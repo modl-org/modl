@@ -1,0 +1,60 @@
+[package]
+name = "mods"
+version = "0.1.0"
+edition = "2024"
+description = "CLI model manager for the AI image generation ecosystem"
+license = "MIT"
+repository = "https://github.com/modshq/mods"
+homepage = "https://github.com/modshq/mods"
+readme = "README.md"
+keywords = ["ai", "models", "comfyui", "stable-diffusion", "flux"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "mods"
+path = "src/main.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Terminal UX
+indicatif = "0.17"
+console = "0.15"
+dialoguer = "0.11"
+comfy-table = "7"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+
+# HTTP + async
+reqwest = { version = "0.12", features = ["stream", "rustls-tls", "json"], default-features = false }
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Hashing
+sha2 = "0.10"
+
+# GPU detection
+nvml-wrapper = "0.10"
+
+# Platform dirs
+dirs = "6"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Misc
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3"
+mockito = "1"
+assert_cmd = "2"
+predicates = "3"

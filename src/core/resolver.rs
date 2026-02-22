@@ -1,0 +1,164 @@
+use anyhow::Result;
+use std::collections::HashSet;
+
+use super::manifest::Manifest;
+use super::registry::RegistryIndex;
+
+/// Resolved install plan — what needs to be downloaded
+#[derive(Debug)]
+pub struct InstallPlan {
+    /// Items to install, in dependency order (deps first)
+    pub items: Vec<ResolvedItem>,
+}
+
+#[derive(Debug)]
+pub struct ResolvedItem {
+    pub manifest: Manifest,
+    pub variant_id: Option<String>,
+    /// Whether this item is already installed (skip download)
+    pub already_installed: bool,
+}
+
+/// Resolve all dependencies for a given model ID
+pub fn resolve(
+    id: &str,
+    variant: Option<&str>,
+    index: &RegistryIndex,
+    installed: &HashSet<String>,
+) -> Result<InstallPlan> {
+    let mut plan = Vec::new();
+    let mut visited = HashSet::new();
+    resolve_recursive(id, variant, index, installed, &mut visited, &mut plan)?;
+    Ok(InstallPlan { items: plan })
+}
+
+fn resolve_recursive(
+    id: &str,
+    variant: Option<&str>,
+    index: &RegistryIndex,
+    installed: &HashSet<String>,
+    visited: &mut HashSet<String>,
+    plan: &mut Vec<ResolvedItem>,
+) -> Result<()> {
+    if visited.contains(id) {
+        return Ok(()); // Already processed (handles circular deps)
+    }
+    visited.insert(id.to_string());
+
+    let manifest = index
+        .find(id)
+        .ok_or_else(|| anyhow::anyhow!("Model '{}' not found in registry", id))?;
+
+    // Resolve dependencies first (depth-first)
+    for dep in &manifest.requires {
+        resolve_recursive(
+            &dep.id,
+            None, // Dependencies use auto-selected variant
+            index,
+            installed,
+            visited,
+            plan,
+        )?;
+    }
+
+    // Add this item
+    plan.push(ResolvedItem {
+        manifest: manifest.clone(),
+        variant_id: variant.map(String::from),
+        already_installed: installed.contains(id),
+    });
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::manifest::{AssetType, Dependency, Manifest};
+
+    fn make_index(items: Vec<Manifest>) -> RegistryIndex {
+        RegistryIndex { version: 1, items }
+    }
+
+    fn simple_manifest(id: &str, deps: Vec<(&str, AssetType)>) -> Manifest {
+        Manifest {
+            id: id.to_string(),
+            name: id.to_string(),
+            asset_type: AssetType::Checkpoint,
+            architecture: None,
+            author: None,
+            license: None,
+            homepage: None,
+            description: None,
+            variants: vec![],
+            file: None,
+            requires: deps
+                .into_iter()
+                .map(|(dep_id, dep_type)| Dependency {
+                    id: dep_id.to_string(),
+                    dep_type,
+                    reason: None,
+                    optional_variant: None,
+                })
+                .collect(),
+            auth: None,
+            defaults: None,
+            base_models: vec![],
+            trigger_words: vec![],
+            recommended_weight: None,
+            weight_range: None,
+            preprocessor: None,
+            scale_factor: None,
+            clip_vision_model: None,
+            preview_images: vec![],
+            tags: vec![],
+            rating: None,
+            downloads: None,
+            added: None,
+            updated: None,
+        }
+    }
+
+    #[test]
+    fn test_resolve_no_deps() {
+        let index = make_index(vec![simple_manifest("model-a", vec![])]);
+        let installed = HashSet::new();
+        let plan = resolve("model-a", None, &index, &installed).unwrap();
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(plan.items[0].manifest.id, "model-a");
+    }
+
+    #[test]
+    fn test_resolve_with_deps() {
+        let index = make_index(vec![
+            simple_manifest("vae-1", vec![]),
+            simple_manifest("model-a", vec![("vae-1", AssetType::Vae)]),
+        ]);
+        let installed = HashSet::new();
+        let plan = resolve("model-a", None, &index, &installed).unwrap();
+        assert_eq!(plan.items.len(), 2);
+        assert_eq!(plan.items[0].manifest.id, "vae-1"); // Dep first
+        assert_eq!(plan.items[1].manifest.id, "model-a");
+    }
+
+    #[test]
+    fn test_resolve_skips_installed() {
+        let index = make_index(vec![
+            simple_manifest("vae-1", vec![]),
+            simple_manifest("model-a", vec![("vae-1", AssetType::Vae)]),
+        ]);
+        let installed: HashSet<String> = ["vae-1".to_string()].into();
+        let plan = resolve("model-a", None, &index, &installed).unwrap();
+        assert_eq!(plan.items.len(), 2);
+        assert!(plan.items[0].already_installed); // vae-1 marked as installed
+        assert!(!plan.items[1].already_installed);
+    }
+
+    #[test]
+    fn test_resolve_not_found() {
+        let index = make_index(vec![]);
+        let installed = HashSet::new();
+        let result = resolve("nonexistent", None, &index, &installed);
+        assert!(result.is_err());
+    }
+}
