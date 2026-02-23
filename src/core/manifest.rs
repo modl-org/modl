@@ -82,6 +82,7 @@ pub enum AssetType {
     Upscaler,
     Embedding,
     Ipadapter,
+    Segmentation,
 }
 
 impl std::fmt::Display for AssetType {
@@ -95,6 +96,7 @@ impl std::fmt::Display for AssetType {
             Self::Upscaler => write!(f, "upscaler"),
             Self::Embedding => write!(f, "embedding"),
             Self::Ipadapter => write!(f, "ipadapter"),
+            Self::Segmentation => write!(f, "segmentation"),
         }
     }
 }
