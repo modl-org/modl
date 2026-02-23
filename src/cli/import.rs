@@ -37,7 +37,7 @@ pub async fn run(path: &str) -> Result<()> {
     for item in &lock.items {
         let variant_arg = item.variant.as_deref();
         println!();
-        match super::install::run(&item.id, variant_arg, false).await {
+        match super::install::run(&item.id, variant_arg, false, false).await {
             Ok(()) => {}
             Err(e) => {
                 eprintln!(

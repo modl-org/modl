@@ -15,7 +15,7 @@ use crate::core::resolver;
 use crate::core::store::Store;
 use crate::core::symlink;
 
-pub async fn run(id: &str, variant: Option<&str>, dry_run: bool) -> Result<()> {
+pub async fn run(id: &str, variant: Option<&str>, dry_run: bool, force: bool) -> Result<()> {
     let config = Config::load()?;
     let index = RegistryIndex::load()?;
     let db = Database::open()?;
@@ -135,19 +135,70 @@ pub async fn run(id: &str, variant: Option<&str>, dry_run: bool) -> Result<()> {
         }
 
         // Download
-        if !store_path.exists() {
-            download::download_file(&url, &store_path, Some(size), auth_token.as_deref())
-                .await
-                .with_context(|| format!("Failed to download {}", item.manifest.name))?;
-
-            // Verify hash
-            if !Store::verify_hash(&store_path, &sha256)? {
-                std::fs::remove_file(&store_path).ok();
-                anyhow::bail!(
-                    "SHA256 mismatch for {}. File deleted. Try again.",
-                    item.manifest.name
-                );
+        if !store_path.exists() || force {
+            // Before downloading, check if the file already exists at any target path
+            let mut adopted = false;
+            if !force {
+                for target in &config.targets {
+                    if !target.symlink {
+                        continue;
+                    }
+                    let target_path = compat::symlink_path(
+                        &target.path,
+                        &target.tool_type,
+                        &item.manifest.asset_type,
+                        &file_name,
+                    );
+                    if target_path.exists() && !target_path.is_symlink() {
+                        // Real file exists at target — check its hash
+                        print!(
+                            "  {} Found existing {} — verifying... ",
+                            style("?").yellow(),
+                            target_path.display()
+                        );
+                        if Store::verify_hash(&target_path, &sha256)? {
+                            println!("{}", style("match!").green());
+                            // Move file to store, create symlink
+                            std::fs::rename(&target_path, &store_path)
+                                .with_context(|| format!(
+                                    "Failed to move {} to store",
+                                    target_path.display()
+                                ))?;
+                            symlink::create(&target_path, &store_path)?;
+                            println!(
+                                "  {} Adopted → {}",
+                                style("→").dim(),
+                                store_path.display()
+                            );
+                            adopted = true;
+                            break;
+                        } else {
+                            println!("{}", style("hash mismatch, downloading fresh").yellow());
+                        }
+                    }
+                }
             }
+
+            if !adopted {
+                download::download_file(&url, &store_path, Some(size), auth_token.as_deref())
+                    .await
+                    .with_context(|| format!("Failed to download {}", item.manifest.name))?;
+
+                // Verify hash
+                if !Store::verify_hash(&store_path, &sha256)? {
+                    std::fs::remove_file(&store_path).ok();
+                    anyhow::bail!(
+                        "SHA256 mismatch for {}. File deleted. Try again.",
+                        item.manifest.name
+                    );
+                }
+            }
+        } else {
+            println!(
+                "  {} {} already in store, skipping download",
+                style("✓").green(),
+                style(&file_name).dim()
+            );
         }
 
         // Create symlinks to all configured targets

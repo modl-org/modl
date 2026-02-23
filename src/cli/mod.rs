@@ -44,6 +44,9 @@ pub enum Commands {
         /// Show what would be installed without doing it
         #[arg(long)]
         dry_run: bool,
+        /// Force re-download even if files already exist
+        #[arg(long)]
+        force: bool,
     },
 
     /// Remove an installed model
@@ -143,7 +146,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             id,
             variant,
             dry_run,
-        } => install::run(&id, variant.as_deref(), dry_run).await,
+            force,
+        } => install::run(&id, variant.as_deref(), dry_run, force).await,
         Commands::Uninstall { id, force } => uninstall::run(&id, force).await,
         Commands::List { r#type } => list::run(r#type.as_deref()).await,
         Commands::Info { id } => info::run(&id).await,
