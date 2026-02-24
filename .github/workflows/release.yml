@@ -116,6 +116,15 @@ jobs:
             artifacts/mods-*
             artifacts/SHA256SUMS
 
+  trigger-site-rebuild:
+    name: Trigger Site Rebuild
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Cloudflare Pages deploy
+        if: ${{ secrets.CLOUDFLARE_DEPLOY_HOOK_URL != '' }}
+        run: curl -s -X POST "${{ secrets.CLOUDFLARE_DEPLOY_HOOK_URL }}"
+
   # Publish to crates.io (manual trigger only — uncomment when ready)
   # publish:
   #   name: Publish to crates.io

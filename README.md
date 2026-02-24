@@ -6,11 +6,16 @@
 
 Think of it as **npm/Homebrew for image gen models**.
 
+**[Website](https://mods.pedroalonso.net)** · **[Docs](https://mods.pedroalonso.net/docs)** · **[Model Registry](https://github.com/modshq-org/mods-registry)** · **[Issues](https://github.com/modshq-org/mods/issues)**
+
 ## Quick Start
 
 ```bash
 # Install mods
-cargo install --path .
+curl -fsSL https://raw.githubusercontent.com/modshq-org/mods/main/install.sh | sh
+
+# Or build from source
+# git clone https://github.com/modshq-org/mods && cd mods && cargo install --path .
 
 # First-time setup (auto-detects ComfyUI, A1111, etc.)
 mods init
@@ -104,8 +109,9 @@ Mods is the foundation of a larger platform:
 
 | Layer | Repo | Status |
 |-------|------|--------|
-| Model Manager | `modshq/mods` | **This repo** — in progress |
-| Registry | `modshq/mods-registry` | Coming soon |
+| Website | [mods.pedroalonso.net](https://mods.pedroalonso.net) | Live |
+| Model Manager | [`modshq/mods`](https://github.com/modshq-org/mods) | **This repo** — in progress |
+| Registry | [`modshq/mods-registry`](https://github.com/modshq-org/mods-registry) | In progress |
 | Pipeline Authoring | TBD | Future — LLM-first pipeline creation |
 | Deploy | TBD | Future — one-click to Modal/Replicate/RunPod |
 
