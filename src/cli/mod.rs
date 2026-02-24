@@ -16,7 +16,7 @@ mod uninstall;
 mod update;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
@@ -139,6 +139,10 @@ pub enum Commands {
         path: String,
     },
 
+    /// Dump CLI schema as JSON (for docs generation)
+    #[command(hide = true)]
+    CliSchema,
+
     /// Show popular/trending models
     Popular {
         /// Filter by asset type
@@ -191,10 +195,114 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Update => update::run().await,
         Commands::Export => export::run().await,
         Commands::Import { path } => import::run(&path).await,
+        Commands::CliSchema => {
+            dump_cli_schema();
+            Ok(())
+        }
         Commands::Popular {
             r#type,
             r#for,
             period,
         } => popular::run(r#type.as_deref(), r#for.as_deref(), &period).await,
     }
+}
+
+fn dump_cli_schema() {
+    let cmd = Cli::command();
+    let mut commands = Vec::new();
+
+    for sub in cmd.get_subcommands() {
+        if sub.is_hide_set() {
+            continue;
+        }
+
+        let name = sub.get_name().to_string();
+        let description = sub
+            .get_about()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+
+        let mut args = Vec::new();
+        let mut flags = Vec::new();
+
+        for arg in sub.get_arguments() {
+            if arg.get_id() == "help" || arg.get_id() == "version" {
+                continue;
+            }
+
+            let id = arg.get_id().to_string();
+            let help = arg
+                .get_help()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            let required = arg.is_required_set();
+
+            let short = arg.get_short().map(|c| format!("-{c}"));
+            let long = arg.get_long().map(|l| format!("--{l}"));
+
+            let default = arg
+                .get_default_values()
+                .first()
+                .and_then(|v| v.to_str())
+                .map(String::from);
+
+            let is_bool = matches!(
+                arg.get_action(),
+                clap::ArgAction::SetTrue | clap::ArgAction::SetFalse | clap::ArgAction::Count
+            );
+
+            if arg.is_positional() {
+                args.push(serde_json::json!({
+                    "name": id,
+                    "description": help,
+                    "required": required,
+                }));
+            } else {
+                let mut flag = serde_json::json!({
+                    "name": long.as_deref().or(short.as_deref()).unwrap_or(&id),
+                    "description": help,
+                    "is_bool": is_bool,
+                });
+                if let Some(s) = &short {
+                    flag.as_object_mut().unwrap().insert("short".into(), serde_json::json!(s));
+                }
+                if let Some(d) = &default {
+                    flag.as_object_mut().unwrap().insert("default".into(), serde_json::json!(d));
+                }
+                flags.push(flag);
+            }
+        }
+
+        // Build usage string
+        let usage = {
+            let mut parts = vec![format!("mods {name}")];
+            for a in &args {
+                let n = a["name"].as_str().unwrap();
+                if a["required"].as_bool().unwrap_or(false) {
+                    parts.push(format!("<{n}>"));
+                } else {
+                    parts.push(format!("[{n}]"));
+                }
+            }
+            if !flags.is_empty() {
+                parts.push("[flags]".into());
+            }
+            parts.join(" ")
+        };
+
+        commands.push(serde_json::json!({
+            "name": name,
+            "description": description,
+            "usage": usage,
+            "args": args,
+            "flags": flags,
+        }));
+    }
+
+    let schema = serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "commands": commands,
+    });
+
+    println!("{}", serde_json::to_string_pretty(&schema).unwrap());
 }
