@@ -77,16 +77,19 @@ async fn link_tool(
     println!("  Found {} model files", files.len());
 
     if !files.is_empty() {
-        // Build a hash → manifest lookup if we have a registry
+        // Build a hash → manifest lookup and a set of known file sizes for pre-filtering
+        let mut known_sizes: std::collections::HashSet<u64> = std::collections::HashSet::new();
         let hash_map: std::collections::HashMap<String, &crate::core::manifest::Manifest> =
             if let Some(idx) = index {
                 let mut map = std::collections::HashMap::new();
                 for m in &idx.items {
                     for v in &m.variants {
                         map.insert(v.sha256.clone(), m);
+                        known_sizes.insert(v.size);
                     }
                     if let Some(ref f) = m.file {
                         map.insert(f.sha256.clone(), m);
+                        known_sizes.insert(f.size);
                     }
                 }
                 map
@@ -102,8 +105,18 @@ async fn link_tool(
         );
 
         let mut matched = 0;
+        let mut skipped = 0u64;
         for file in &files {
             pb.inc(1);
+
+            // Size pre-filter: skip hashing files whose size doesn't match any known variant
+            if let Ok(meta) = std::fs::metadata(file) {
+                if !known_sizes.is_empty() && !known_sizes.contains(&meta.len()) {
+                    skipped += 1;
+                    continue;
+                }
+            }
+
             if let Ok(hash) = Store::hash_file(file)
                 && let Some(manifest) = hash_map.get(&hash)
             {
@@ -129,6 +142,13 @@ async fn link_tool(
         }
 
         pb.finish_and_clear();
+        if skipped > 0 {
+            println!(
+                "  {} Skipped {} files (size mismatch)",
+                style("i").dim(),
+                skipped
+            );
+        }
         println!(
             "  {} Matched {} files to registry entries",
             style("✓").green(),

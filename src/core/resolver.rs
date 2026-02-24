@@ -53,7 +53,8 @@ fn resolve_recursive(
     // Resolve dependencies first (depth-first)
     for dep in &manifest.requires {
         resolve_recursive(
-            &dep.id, None, // Dependencies use auto-selected variant
+            &dep.id,
+            dep.optional_variant.as_deref(),
             index, installed, visited, plan,
         )?;
     }
@@ -149,6 +150,41 @@ mod tests {
         assert_eq!(plan.items.len(), 2);
         assert!(plan.items[0].already_installed); // vae-1 marked as installed
         assert!(!plan.items[1].already_installed);
+    }
+
+    #[test]
+    fn test_resolve_propagates_optional_variant() {
+        let encoder = Manifest {
+            id: "t5-xxl".to_string(),
+            name: "T5-XXL".to_string(),
+            asset_type: AssetType::TextEncoder,
+            variants: vec![],
+            requires: vec![],
+            ..simple_manifest("t5-xxl", vec![])
+        };
+
+        let checkpoint = Manifest {
+            id: "flux-dev".to_string(),
+            name: "Flux Dev".to_string(),
+            asset_type: AssetType::Checkpoint,
+            variants: vec![],
+            requires: vec![Dependency {
+                id: "t5-xxl".to_string(),
+                dep_type: AssetType::TextEncoder,
+                reason: Some("Text encoder".to_string()),
+                optional_variant: Some("fp8".to_string()),
+            }],
+            ..simple_manifest("flux-dev", vec![])
+        };
+
+        let index = make_index(vec![encoder, checkpoint]);
+        let installed = HashSet::new();
+        let plan = resolve("flux-dev", None, &index, &installed).unwrap();
+
+        assert_eq!(plan.items.len(), 2);
+        assert_eq!(plan.items[0].manifest.id, "t5-xxl");
+        assert_eq!(plan.items[0].variant_id.as_deref(), Some("fp8"));
+        assert_eq!(plan.items[1].manifest.id, "flux-dev");
     }
 
     #[test]
