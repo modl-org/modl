@@ -52,9 +52,7 @@ pub async fn run(
     table.set_header(vec![
         Cell::new("Name").fg(Color::Cyan),
         Cell::new("Type").fg(Color::Cyan),
-        Cell::new("Variants").fg(Color::Cyan),
         Cell::new("Size").fg(Color::Cyan),
-        Cell::new("Rating").fg(Color::Cyan),
         Cell::new("Tags").fg(Color::Cyan),
         Cell::new("ID").fg(Color::Cyan),
     ]);
@@ -68,30 +66,26 @@ pub async fn run(
             if min_s == max_s {
                 HumanBytes(*min_s).to_string()
             } else {
-                format!("{} – {}", HumanBytes(*min_s), HumanBytes(*max_s))
+                format!("{} \u{2013} {}", HumanBytes(*min_s), HumanBytes(*max_s))
             }
         } else if let Some(ref f) = m.file {
             HumanBytes(f.size).to_string()
         } else {
-            "—".to_string()
+            "\u{2014}".to_string()
         };
 
-        let variants_str = if m.variants.len() > 1 {
-            m.variants
+        // Build name with variants on a second line
+        let name_display = if m.variants.len() > 1 {
+            let variant_list = m
+                .variants
                 .iter()
                 .map(|v| v.id.as_str())
                 .collect::<Vec<_>>()
-                .join(", ")
-        } else if m.variants.len() == 1 {
-            m.variants[0].id.clone()
+                .join(" | ");
+            format!("{}\n  {}", m.name, style(variant_list).dim())
         } else {
-            "—".to_string()
+            m.name.clone()
         };
-
-        let rating = m
-            .rating
-            .map(|r| format!("{:.1}", r))
-            .unwrap_or_else(|| "—".to_string());
 
         let tags = m
             .tags
@@ -102,11 +96,9 @@ pub async fn run(
             .join(", ");
 
         table.add_row(vec![
-            Cell::new(&m.name),
+            Cell::new(&name_display),
             Cell::new(m.asset_type.to_string()),
-            Cell::new(&variants_str),
             Cell::new(size),
-            Cell::new(rating),
             Cell::new(tags),
             Cell::new(&m.id).fg(Color::DarkGrey),
         ]);

@@ -96,15 +96,15 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
-    // Determine where the current binary lives
+    // Determine where the current binary lives (don't canonicalize — we want
+    // the path the user's shell resolves, not a symlink target)
     let current_exe = std::env::current_exe().context("Could not determine current binary path")?;
-    let current_exe = current_exe
-        .canonicalize()
-        .unwrap_or_else(|_| current_exe.clone());
 
-    // Download to a temp file next to the binary
-    let tmp_archive = current_exe.with_extension("tar.gz.tmp");
-    let tmp_binary = current_exe.with_extension("new");
+    // Download to the system temp directory so we never need elevated
+    // permissions just to fetch the archive
+    let tmp_dir = std::env::temp_dir();
+    let tmp_archive = tmp_dir.join("mods-upgrade.tar.gz");
+    let tmp_binary = tmp_dir.join("mods-upgrade-bin");
 
     let pb = ProgressBar::new(asset.size);
     pb.set_style(
@@ -150,15 +150,35 @@ pub async fn run() -> Result<()> {
     // Clean up the archive
     std::fs::remove_file(&tmp_archive).ok();
 
-    // Replace the current binary
-    replace_binary(&current_exe, &tmp_binary)?;
-
-    println!();
-    println!(
-        "{} Updated to {} successfully!",
-        style("\u{2713}").green().bold(),
-        style(format!("v{}", latest)).bold()
-    );
+    // Try to replace the current binary
+    match replace_binary(&current_exe, &tmp_binary) {
+        Ok(()) => {
+            println!();
+            println!(
+                "{} Updated to {} successfully!",
+                style("\u{2713}").green().bold(),
+                style(format!("v{}", latest)).bold()
+            );
+        }
+        Err(_) => {
+            // Leave the downloaded binary in temp and print manual instructions
+            println!();
+            println!(
+                "  {} Could not replace {} (permission denied)",
+                style("!").yellow().bold(),
+                current_exe.display()
+            );
+            println!();
+            println!("  Run this to finish the update:");
+            println!();
+            println!(
+                "    sudo install {} {}",
+                tmp_binary.display(),
+                current_exe.display()
+            );
+            println!();
+        }
+    }
 
     Ok(())
 }
@@ -201,36 +221,27 @@ fn replace_binary(current: &PathBuf, new: &PathBuf) -> Result<()> {
 
     // Move current -> backup
     if current.exists() {
-        std::fs::rename(current, &backup).with_context(|| {
-            format!(
-                "Failed to back up current binary. You may need sudo:\n  \
-                 sudo mv {} {} && sudo mv {} {}",
-                new.display(),
-                current.display(),
-                current.display(),
-                backup.display()
-            )
-        })?;
+        std::fs::rename(current, &backup).context("Failed to back up current binary")?;
     }
 
-    // Move new -> current
-    match std::fs::rename(new, current) {
-        Ok(()) => {
-            // Clean up backup
+    // Copy new -> current (copy instead of rename to handle cross-filesystem)
+    match std::fs::copy(new, current) {
+        Ok(_) => {
+            // Set executable permission
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(current, std::fs::Permissions::from_mode(0o755)).ok();
+            }
+            // Clean up backup and temp
             std::fs::remove_file(&backup).ok();
+            std::fs::remove_file(new).ok();
             Ok(())
         }
         Err(e) => {
             // Restore backup
             std::fs::rename(&backup, current).ok();
-            Err(e).with_context(|| {
-                format!(
-                    "Failed to install new binary. You may need sudo:\n  \
-                     sudo mv {} {}",
-                    new.display(),
-                    current.display()
-                )
-            })
+            Err(e).context("Failed to install new binary")
         }
     }
 }

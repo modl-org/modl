@@ -5,12 +5,10 @@
 
 set -e
 
-echo "Running cargo fmt check..."
-if ! cargo fmt --all -- --check 2>/dev/null; then
-    echo ""
-    echo "❌ Formatting check failed. Run 'cargo fmt --all' to fix."
-    exit 1
-fi
+echo "Running cargo fmt..."
+cargo fmt --all 2>/dev/null
+# Stage any files that fmt changed
+git diff --name-only | xargs -r git add
 
 echo "Running cargo clippy..."
 if ! cargo clippy --all-targets -- -D warnings 2>/dev/null; then
