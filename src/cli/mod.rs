@@ -11,6 +11,7 @@ mod init;
 mod install;
 mod link;
 mod list;
+mod outputs;
 mod popular;
 mod runtime;
 mod search;
@@ -258,6 +259,12 @@ pub enum Commands {
         provider: String,
     },
 
+    /// Browse and manage generated outputs and training artifacts
+    Outputs {
+        #[command(subcommand)]
+        command: outputs::OutputCommands,
+    },
+
     /// Update mods CLI to the latest release
     Upgrade,
 
@@ -331,6 +338,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Doctor { verify_hashes } => doctor::run(verify_hashes).await,
         Commands::Config { key, value } => config::run(key.as_deref(), value.as_deref()).await,
         Commands::Auth { provider } => auth::run(&provider).await,
+        Commands::Outputs { command } => outputs::run(command).await,
         Commands::Upgrade => upgrade::run().await,
         Commands::CliSchema => {
             dump_cli_schema();

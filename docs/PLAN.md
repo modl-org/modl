@@ -14,7 +14,7 @@
 
 The CLI is on the `feat/train-command` branch. **All 55 unit tests pass.**
 The full Rust+Python pipeline exists for both training and generation.
-The key missing pieces are E2E testing on a real GPU and a few UX gaps.
+The key missing pieces are E2E testing on a real GPU and output management UX.
 
 | Area | Status | Notes |
 |------|--------|-------|
@@ -25,6 +25,7 @@ The key missing pieces are E2E testing on a real GPU and a few UX gaps.
 | GPU detection | ✅ Done | NVML + nvidia-smi fallback, variant auto-selection |
 | Auth (HF, CivitAI) | ✅ Done | Token prompting and storage |
 | Dataset create/ls/validate | ✅ Done | Copy images, pair captions, scan managed datasets |
+| Dataset caption | ✅ Done | Florence-2/BLIP auto-captioning via Python adapter |
 | Training presets | ✅ Done | Quick/Standard/Advanced with full test coverage |
 | TrainJobSpec + events | ✅ Done | All types, serde roundtrips, event protocol |
 | Executor trait + LocalExecutor | ✅ Done | submit, events (mpsc), cancel, stdout→JobEvent parsing |
@@ -37,11 +38,12 @@ The key missing pieces are E2E testing on a real GPU and a few UX gaps.
 | Runtime management | ✅ Done | Python venv bootstrap, ai-toolkit install, setup command |
 | Doctor/GC/Export/Import | ✅ Done | Health checks, garbage collection, lockfile round-trip |
 | `mods upgrade` | ✅ Done | Self-update from GitHub releases |
-| Dataset caption | ✅ Implemented | Florence-2/BLIP auto-captioning |
+| Output management CLI | ✅ Done | `mods outputs` list/show/open/search |
+| E2E GPU validation | ❌ Blocked | Need real GPU test of full train→generate flow |
 | Batch generation | ❌ Not started | `mods generate --batch prompts.txt` |
-| Output management CLI | ❌ Not started | `mods outputs`, search, open |
-| `--cloud` flag | 🟡 Stubbed | CloudExecutor struct + provider enum + cred resolution done, submit returns not-implemented |
-| Web UI (`mods serve`) | ❌ Not started | Deferred to later phase |
+| `--cloud` flag | 🟡 Stubbed | CloudExecutor struct + provider enum + cred resolution done, submit not-implemented |
+| Cloud training | ❌ Not started | API service + Modal backend + CloudExecutor.submit() |
+| Web UI (`mods serve`) | ⏸️ Deferred | CLI-first. UI reads same DB, build independently later |
 
 ---
 
@@ -166,71 +168,74 @@ Likely issues to fix:
 - Runtime bootstrap edge cases (torch version, CUDA compatibility)
 - Diffusers pipeline loading (from_pretrained vs from_single_file logic)
 
-### Priority 2: Dataset Captioning ✅
+**This blocks everything below. Nothing else matters until generate produces an image.**
+
+### Priority 2: Output Management (mini DAM)
+
+Surface what's already in the DB. The `jobs`, `artifacts`, and `job_events` tables
+already store full specs, file paths, and metadata. This is mostly CLI presentation.
 
 ```
-[x] mods dataset caption <name>
-    - Run Florence-2 or BLIP on uncaptioned images (--model flag)
-    - Write .txt files alongside images
-    - Show captions for review in terminal
-    - --overwrite flag to re-caption existing
-    - Progress bar with per-image status
+[x] mods outputs                  # list recent generations (table: id, prompt, model, lora, time)
+[x] mods outputs show <id>        # full metadata (prompt, seed, model, loras, params, paths)
+[x] mods outputs open <id>        # open image in system viewer
+[x] mods outputs search <query>   # search by prompt text, model, or lora name
 ```
 
-Implemented via `caption_adapter.py` Python adapter + CLI subcommand.
-CLI: `mods dataset caption <name> [--model florence-2|blip] [--overwrite]`
+Why before batch/cloud: without a way to find and review what you generated,
+every additional feature just creates more noise.
 
-### Priority 3: Output Management
-
-```
-[ ] mods outputs                 # list recent generations
-[ ] mods outputs search <query>  # search by prompt text
-[ ] mods outputs open <id>       # open in system viewer
-```
-
-The DB already tracks artifacts. This is mostly CLI presentation.
-
-### Priority 4: Batch Generation
+### Priority 3: Batch Generation
 
 ```
 [ ] mods generate --batch prompts.txt
     - One prompt per line
     - Sequential generation (VRAM limited to one at a time)
+    - Each image tracked as separate artifact in DB
 ```
 
-### Priority 5: Cloud Executor (`--cloud`)
-
-The architecture is ready. Adding `--cloud` means:
+### Priority 4: Reproducible Export
 
 ```
-New code:
-  src/core/cloud_executor.rs  — implements Executor trait
-    - Dataset upload to cloud storage
-    - API calls to provider (Modal, Replicate, RunPod)
-    - Event polling → same mpsc channel
-    - Artifact download on completion
-
-  Add --cloud / --provider flags to Commands::Train and Commands::Generate
-
-Untouched code (everything else):
-  - TrainJobSpec — same struct serialized as JSON in API call
-  - presets.rs — same preset logic
-  - dataset.rs — same validation (cloud executor handles upload)
-  - db.rs — same tables
-  - artifacts.rs — same collection (cloud executor downloads artifact first)
-  - cli/train.rs — same flow, one branch:
-
-    let executor: Box<dyn Executor> = if cloud {
-        Box::new(CloudExecutor::new(provider)?)
-    } else {
-        Box::new(LocalExecutor::from_runtime_setup().await?)
-    };
+[ ] mods outputs export <id>      # dump full JobSpec as YAML (all params, model refs, versions)
 ```
 
-### Priority 6: Web UI (`mods serve`)
+The spec_json already contains everything needed. This is a one-command feature
+that makes any generation reproducible.
 
-Deferred. Everything reads from the same `~/.mods/` directory and SQLite DB,
-so the UI can be built independently whenever it makes sense.
+### Priority 5: Cloud Training (`--cloud`, training only)
+
+Cloud inference deferred — cold start + keep_warm economics are brutal for
+interactive use. Cloud training is the real monetization.
+
+See [cloud/plan.md](cloud/plan.md) for full architecture.
+
+```
+[ ] mods API service (auth, job dispatch, S3)
+[ ] Modal backend (train_fn, model volumes)
+[ ] CloudExecutor.submit() implementation
+[ ] mods cloud login / mods cloud status
+```
+
+### Deferred (not blocking v1 UX)
+
+| Feature | Why deferred |
+|---------|-------------|
+| Cloud inference | Cold start UX + keep_warm cost. Generate locally with downloaded LoRA. |
+| Web UI (`mods serve`) | CLI-first. UI reads same DB, can be built independently. |
+| Runs/sessions | Build if grep-search over outputs isn't enough. Nullable `run_id` FK on jobs table. |
+| Tags/notes on outputs | Nice-to-have. Prompt search covers 90% of cases. |
+| Video generation | Architecture supports it (`output_kind` enum on GenerateJobSpec), but adapter not built. |
+| Bundle export (zip) | `mods outputs export` as YAML covers reproducibility. Zip packaging is a later packaging problem. |
+
+### Done ✅
+
+| Feature | Notes |
+|---------|-------|
+| Dataset captioning | `mods dataset caption <name>` — Florence-2/BLIP, --model, --overwrite |
+| CloudExecutor stub | Provider enum + credential resolution. submit() returns not-implemented. |
+| Doctor/GC/Export/Import | Health checks, garbage collection, lockfile round-trip |
+| `mods upgrade` | Self-update from GitHub releases |
 
 ---
 
@@ -247,5 +252,6 @@ so the UI can be built independently whenever it makes sense.
 
 1. **Unit tests** (all passing ✅ — 55 tests): Preset scaling, dataset scanning, spec roundtrips, DB CRUD, event parsing, artifact collection, cloud provider parsing
 2. **Integration test** (TODO): `mods dataset create` → `mods train --dry-run` → verify spec YAML
-3. **E2E with GPU** (TODO): Full training + generation flow on real hardware
-4. **Cloud executor** (TODO): Implement trait methods, test with one provider
+3. **E2E with GPU** (TODO — Priority 1): Full training + generation flow on real hardware
+4. **Output management** (TODO — Priority 2): `mods outputs` list/show/open/search
+5. **Cloud training** (TODO — Priority 5): Implement CloudExecutor.submit(), test with Modal

@@ -261,13 +261,29 @@ impl Database {
         Ok(())
     }
 
+    /// Get a single job by ID (or prefix match)
+    pub fn get_job(&self, job_id: &str) -> Result<Option<JobRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT job_id, kind, status, spec_json, target, provider, created_at, started_at, completed_at FROM jobs WHERE job_id = ?1"
+        ).context("Failed to prepare query")?;
+
+        let mut rows = stmt
+            .query_map(params![job_id], JobRecord::from_row)
+            .context("Failed to query job")?;
+
+        match rows.next() {
+            Some(Ok(record)) => Ok(Some(record)),
+            Some(Err(e)) => Err(e.into()),
+            None => Ok(None),
+        }
+    }
+
     /// List all jobs, optionally filtered by status
-    #[allow(dead_code)]
     pub fn list_jobs(&self, status_filter: Option<&str>) -> Result<Vec<JobRecord>> {
         let sql = if status_filter.is_some() {
-            "SELECT job_id, kind, status, target, provider, created_at, started_at, completed_at FROM jobs WHERE status = ?1 ORDER BY created_at DESC"
+            "SELECT job_id, kind, status, spec_json, target, provider, created_at, started_at, completed_at FROM jobs WHERE status = ?1 ORDER BY created_at DESC"
         } else {
-            "SELECT job_id, kind, status, target, provider, created_at, started_at, completed_at FROM jobs ORDER BY created_at DESC"
+            "SELECT job_id, kind, status, spec_json, target, provider, created_at, started_at, completed_at FROM jobs ORDER BY created_at DESC"
         };
 
         let mut stmt = self.conn.prepare(sql).context("Failed to prepare query")?;
@@ -352,6 +368,7 @@ pub struct JobRecord {
     pub job_id: String,
     pub kind: String,
     pub status: String,
+    pub spec_json: String,
     pub target: String,
     pub provider: Option<String>,
     pub created_at: String,
@@ -365,11 +382,12 @@ impl JobRecord {
             job_id: row.get(0)?,
             kind: row.get(1)?,
             status: row.get(2)?,
-            target: row.get(3)?,
-            provider: row.get(4)?,
-            created_at: row.get(5)?,
-            started_at: row.get(6)?,
-            completed_at: row.get(7)?,
+            spec_json: row.get(3)?,
+            target: row.get(4)?,
+            provider: row.get(5)?,
+            created_at: row.get(6)?,
+            started_at: row.get(7)?,
+            completed_at: row.get(8)?,
         })
     }
 }
