@@ -19,18 +19,18 @@ pub async fn run(provider: &str) -> Result<()> {
 
 async fn configure_huggingface() -> Result<()> {
     println!("{} Configure HuggingFace authentication", style("→").cyan());
-    println!();
-    println!(
-        "  1. Go to {}",
-        style("https://huggingface.co/settings/tokens").underlined()
-    );
-    println!("  2. Create a token with 'Read' access");
-    println!("  3. For gated models (e.g., Flux Dev), accept terms on the model page first");
-    println!();
 
-    let token: String = Password::new()
-        .with_prompt("HuggingFace token (hf_...)")
-        .interact()?;
+    // Check for HF_TOKEN env var first (non-interactive / CI-friendly)
+    let token: String = if let Ok(env_token) = std::env::var("HF_TOKEN") {
+        if !env_token.is_empty() {
+            println!("  {} Found HF_TOKEN in environment", style("→").dim());
+            env_token
+        } else {
+            prompt_hf_token()?
+        }
+    } else {
+        prompt_hf_token()?
+    };
 
     if !token.starts_with("hf_") {
         println!(
@@ -118,4 +118,20 @@ async fn configure_civitai() -> Result<()> {
     );
 
     Ok(())
+}
+
+fn prompt_hf_token() -> Result<String> {
+    println!();
+    println!(
+        "  1. Go to {}",
+        style("https://huggingface.co/settings/tokens").underlined()
+    );
+    println!("  2. Create a token with 'Read' access");
+    println!("  3. For gated models (e.g., Flux Dev), accept terms on the model page first");
+    println!();
+
+    let token: String = Password::new()
+        .with_prompt("HuggingFace token (hf_...)")
+        .interact()?;
+    Ok(token)
 }

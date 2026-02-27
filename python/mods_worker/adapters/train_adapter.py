@@ -11,13 +11,52 @@ from mods_worker.protocol import EventEmitter
 _STEP_RE = re.compile(r"step\s*[:=]?\s*(\d+)\s*/\s*(\d+)", re.IGNORECASE)
 _LOSS_RE = re.compile(r"loss\s*[:=]?\s*([0-9eE+\-.]+)", re.IGNORECASE)
 
+# Lines that indicate important model-loading status updates
+_STATUS_PATTERNS = [
+    re.compile(r"^(Loading|Quantizing|Preparing|Making|Fusing|Caching)\b", re.IGNORECASE),
+    re.compile(r"^Running\s+\d+\s+process", re.IGNORECASE),
+    re.compile(r"^#{3,}\s*$"),
+    re.compile(r"^#\s+Running job:", re.IGNORECASE),
+]
+
+# Lines that indicate errors in the subprocess output
+_ERROR_PATTERNS = [
+    re.compile(r"Traceback \(most recent call last\)"),
+    re.compile(r"^\w*Error:"),
+    re.compile(r"^\w*Exception:"),
+    re.compile(r"CUDA out of memory"),
+    re.compile(r"RuntimeError:"),
+    re.compile(r"^Error running job:"),
+]
+
+_TAIL_BUFFER_SIZE = 30
+
 
 def _build_train_command(config_path: Path) -> List[str]:
+    """Build the command to run ai-toolkit training.
+
+    Checks MODS_AITOOLKIT_TRAIN_CMD (custom override), then MODS_AITOOLKIT_ROOT
+    and sys.path for run.py, then falls back to ``python -m toolkit.job``.
+    """
     env_cmd = os.getenv("MODS_AITOOLKIT_TRAIN_CMD", "").strip()
     if env_cmd:
         env_cmd = env_cmd.replace("{config}", str(config_path)).replace("{python}", sys.executable)
         return shlex.split(env_cmd)
 
+    # ai-toolkit uses run.py as its entry point (toolkit.job has no __main__)
+    aitk_root = os.getenv("MODS_AITOOLKIT_ROOT", "")
+    if not aitk_root:
+        # Try to find run.py via PYTHONPATH entries
+        for p in sys.path:
+            candidate = os.path.join(p, "run.py")
+            if os.path.exists(candidate):
+                aitk_root = p
+                break
+
+    if aitk_root:
+        return [sys.executable, os.path.join(aitk_root, "run.py"), str(config_path)]
+
+    # Fallback: try running as module (won't work with current ai-toolkit)
     return [sys.executable, "-m", "toolkit.job", "--config", str(config_path)]
 
 
@@ -31,6 +70,45 @@ def spec_to_aitoolkit_config(spec: dict) -> dict:
     dataset = spec.get("dataset", {})
     model = spec.get("model", {})
     output = spec.get("output", {})
+
+    base_model_id = model.get("base_model_id", "")
+
+    # Detect model architecture from the base model ID
+    is_flux = "flux" in base_model_id.lower()
+
+    # ai-toolkit's FLUX loading path uses from_pretrained() which requires
+    # HuggingFace diffusers directory format (transformer/, scheduler/, vae/,
+    # text_encoder/, text_encoder_2/, tokenizer/, tokenizer_2/).  Single
+    # safetensors files (like the fp8 checkpoint) are NOT compatible.
+    # Map mods model IDs → HuggingFace hub IDs so ai-toolkit can resolve
+    # configs and weights from the hub (cached in ~/.cache/huggingface/).
+    HF_MODEL_MAP = {
+        "flux-dev": "black-forest-labs/FLUX.1-dev",
+        "flux-schnell": "black-forest-labs/FLUX.1-schnell",
+    }
+
+    if is_flux:
+        model_path = HF_MODEL_MAP.get(base_model_id, base_model_id)
+    else:
+        model_path = model.get("base_model_path") or base_model_id
+
+    # Build model config
+    model_config = {
+        "name_or_path": model_path,
+    }
+    if is_flux:
+        model_config["is_flux"] = True
+        # Quantize fp16 → fp8 for 24 GB GPUs (4090, 3090, etc.)
+        model_config["quantize"] = True
+        # low_vram: quantize on CPU to avoid loading the full fp16 model onto GPU
+        model_config["low_vram"] = True
+
+    # FLUX uses multi-resolution and different training dtype
+    resolution = params.get("resolution", 1024)
+    if is_flux:
+        dataset_resolution = [512, 768, 1024]
+    else:
+        dataset_resolution = resolution
 
     config = {
         "job": "extension",
@@ -57,7 +135,8 @@ def spec_to_aitoolkit_config(spec: dict) -> dict:
                             "folder_path": dataset.get("path", ""),
                             "caption_ext": "txt",
                             "caption_dropout_rate": 0.05,
-                            "resolution": params.get("resolution", 1024),
+                            "resolution": dataset_resolution,
+                            "cache_latents_to_disk": True,
                             "default_caption": params.get("trigger_word", "OHWX"),
                         }
                     ],
@@ -71,16 +150,18 @@ def spec_to_aitoolkit_config(spec: dict) -> dict:
                         "noise_scheduler": "flowmatch",
                         "optimizer": params.get("optimizer", "adamw8bit"),
                         "lr": params.get("learning_rate", 1e-4),
+                        "dtype": "bf16" if is_flux else "fp16",
+                        "ema_config": {
+                            "use_ema": True,
+                            "ema_decay": 0.99,
+                        },
                     },
-                    "model": {
-                        "name_or_path": model.get("base_model_id", "flux-schnell"),
-                        "quantize": params.get("quantize", True),
-                    },
+                    "model": model_config,
                     "sample": {
                         "sampler": "flowmatch",
                         "sample_every": params.get("steps", 2000),
-                        "width": params.get("resolution", 1024),
-                        "height": params.get("resolution", 1024),
+                        "width": resolution,
+                        "height": resolution,
                         "prompts": [],
                         "neg": "",
                         "seed": params.get("seed") or 42,
@@ -152,7 +233,20 @@ def run_train(config_path: Path, emitter: EventEmitter) -> int:
     except Exception:
         effective_config_path = config_path
 
-    cmd = _build_train_command(effective_config_path)
+    # Build the ai-toolkit command.
+    # Prefer MODS_AITOOLKIT_ROOT (set by the Rust executor) to locate run.py
+    # since _build_train_command has intermittent issues when called as a
+    # function from a piped subprocess context.
+    aitk_root = os.getenv("MODS_AITOOLKIT_ROOT", "")
+    if aitk_root:
+        run_py = os.path.join(aitk_root, "run.py")
+        if os.path.exists(run_py):
+            cmd = [sys.executable, run_py, str(effective_config_path)]
+        else:
+            cmd = _build_train_command(effective_config_path)
+    else:
+        cmd = _build_train_command(effective_config_path)
+
     emitter.job_started(config=str(config_path), command=cmd)
 
     try:
@@ -179,13 +273,44 @@ def run_train(config_path: Path, emitter: EventEmitter) -> int:
         return 1
 
     last_step = None
+    tail_lines: list[str] = []  # rolling buffer of recent lines for error context
+    error_lines: list[str] = []  # lines that look like errors/tracebacks
+    in_traceback = False
+
     for raw_line in process.stdout or []:
         line = raw_line.strip()
         if not line:
             continue
 
-        emitter.info(line)
+        # Maintain rolling tail buffer
+        tail_lines.append(line)
+        if len(tail_lines) > _TAIL_BUFFER_SIZE:
+            tail_lines.pop(0)
 
+        # Detect traceback/error lines
+        if "Traceback (most recent call last)" in line:
+            in_traceback = True
+            error_lines = [line]  # reset — start fresh traceback
+        elif in_traceback:
+            error_lines.append(line)
+            # Tracebacks end with the exception line (no leading whitespace after "File" lines)
+            if not line.startswith(" ") and not line.startswith("Traceback"):
+                in_traceback = False
+        elif any(p.search(line) for p in _ERROR_PATTERNS):
+            error_lines.append(line)
+
+        # Classify and emit the line
+        is_status = any(p.search(line) for p in _STATUS_PATTERNS)
+        if is_status:
+            emitter.emit({"type": "log", "level": "status", "message": line})
+        else:
+            emitter.info(line)
+
+        # Check for training progress (step: N/M pattern from ai-toolkit)
+        # We deliberately do NOT match tqdm-style "| N/M [" bars for general
+        # loading/caching progress since those have unrelated total_steps
+        # (e.g. checkpoint shards = 3, latent cache = 10).  Only the
+        # ai-toolkit training step line uses "step: N/M" format.
         step_match = _STEP_RE.search(line)
         if step_match:
             step = int(step_match.group(1))
@@ -213,10 +338,23 @@ def run_train(config_path: Path, emitter: EventEmitter) -> int:
             scan_output_artifacts(output_dir, emitter)
         emitter.completed("ai-toolkit training command finished")
     else:
+        # Build an informative error message with actual failure context
+        if error_lines:
+            # Use captured traceback/error lines
+            error_detail = "\n".join(error_lines[-15:])
+        elif tail_lines:
+            # Fall back to last N lines of output
+            error_detail = "\n".join(tail_lines[-10:])
+        else:
+            error_detail = "(no output captured)"
+
+        # Extract a one-line summary for the error message
+        summary = error_lines[-1] if error_lines else f"Process exited with code {code}"
+
         emitter.error(
             "TRAINING_FAILED",
-            f"ai-toolkit process exited with code {code}",
+            summary,
             recoverable=False,
-            details={"exit_code": code},
+            details={"exit_code": code, "output_tail": error_detail},
         )
     return code

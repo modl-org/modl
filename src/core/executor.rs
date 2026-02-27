@@ -120,9 +120,14 @@ impl Executor for LocalExecutor {
             .arg(&spec_path)
             .arg("--job-id")
             .arg(&job_id)
-            .env("PYTHONPATH", py_path)
+            .env("PYTHONPATH", &py_path)
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::piped());
+
+        // Tell the Python worker where ai-toolkit lives so it can invoke run.py
+        if let Ok(Some(ref aitk_dir)) = runtime::aitoolkit_path() {
+            command.env("MODS_AITOOLKIT_ROOT", aitk_dir);
+        }
 
         if let Ok(Some(template)) = runtime::train_command_template() {
             command.env("MODS_AITOOLKIT_TRAIN_CMD", template);
@@ -146,9 +151,16 @@ impl Executor for LocalExecutor {
             .take()
             .context("Failed to capture worker stdout")?;
 
-        // Spawn reader thread
+        let stderr = child
+            .stderr
+            .take()
+            .context("Failed to capture worker stderr")?;
+
+        // Spawn reader threads for stdout and stderr
         thread::spawn(move || {
-            read_worker_stdout(stdout, &job_id_clone, tx);
+            read_worker_stdout(stdout, &job_id_clone, tx.clone());
+            // After stdout closes, read remaining stderr
+            read_worker_stderr(stderr, &job_id_clone, tx);
         });
 
         self.jobs.insert(
@@ -201,7 +213,7 @@ impl Executor for LocalExecutor {
             .arg(&job_id)
             .env("PYTHONPATH", py_path)
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::piped());
 
         let mut child = command.spawn().with_context(|| {
             format!(
@@ -221,9 +233,15 @@ impl Executor for LocalExecutor {
             .take()
             .context("Failed to capture worker stdout")?;
 
-        // Spawn reader thread
+        let stderr = child
+            .stderr
+            .take()
+            .context("Failed to capture worker stderr")?;
+
+        // Spawn reader threads for stdout and stderr
         thread::spawn(move || {
-            read_worker_stdout(stdout, &job_id_clone, tx);
+            read_worker_stdout(stdout, &job_id_clone, tx.clone());
+            read_worker_stderr(stderr, &job_id_clone, tx);
         });
 
         self.jobs.insert(
@@ -269,6 +287,38 @@ impl Executor for LocalExecutor {
             return Ok(());
         }
         bail!("No running process found for job: {job_id}");
+    }
+}
+
+/// Read stderr from the worker process, wrap each line as a Log event.
+pub(crate) fn read_worker_stderr(
+    stderr: impl std::io::Read,
+    job_id: &str,
+    tx: mpsc::Sender<JobEvent>,
+) {
+    let reader = BufReader::new(stderr);
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => break,
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event = JobEvent {
+            schema_version: "v1".into(),
+            job_id: job_id.into(),
+            sequence: 0,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            source: "mods_worker".into(),
+            event: EventPayload::Log {
+                level: "stderr".into(),
+                message: line,
+            },
+        };
+        if tx.send(event).is_err() {
+            break;
+        }
     }
 }
 

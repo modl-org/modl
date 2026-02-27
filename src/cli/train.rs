@@ -220,7 +220,11 @@ pub async fn run(
         },
         model: ModelRef {
             base_model_id: base_model.clone(),
-            base_model_path: None,
+            base_model_path: {
+                // Resolve the base model to its actual store path
+                let db = Database::open()?;
+                db.find_installed(&base_model)?.map(|m| m.store_path)
+            },
         },
         output: OutputRef {
             lora_name: lora_name.clone(),
@@ -311,6 +315,8 @@ async fn execute_training(spec: TrainJobSpec, cloud: bool, provider: Option<&str
 
     let mut artifact_paths: Vec<String> = Vec::new();
     let mut final_status = "completed";
+    let mut recent_logs: Vec<String> = Vec::new();
+    let max_recent = 20;
 
     for event in rx {
         match &event.event {
@@ -333,15 +339,54 @@ async fn execute_training(spec: TrainJobSpec, cloud: bool, provider: Option<&str
                 pb.finish_with_message(message.as_deref().unwrap_or("done").to_string());
                 break;
             }
-            EventPayload::Error { code, message, .. } => {
+            EventPayload::Error {
+                code,
+                message,
+                details,
+                ..
+            } => {
                 pb.abandon_with_message(format!("error: {code}"));
-                println!("{} Training failed: {message}", style("✗").red().bold());
+                eprintln!();
+                eprintln!("{} Training failed: {message}", style("✗").red().bold());
+
+                // Show the output tail from the error details if available
+                if let Some(details_val) = details
+                    && let Some(tail) = details_val.get("output_tail").and_then(|v| v.as_str())
+                {
+                    eprintln!();
+                    eprintln!("{}", style("─── ai-toolkit output ───").dim());
+                    for line in tail.lines().take(20) {
+                        eprintln!("  {}", style(line).dim());
+                    }
+                    eprintln!("{}", style("─────────────────────────").dim());
+                }
                 final_status = "error";
                 break;
             }
             EventPayload::Log { message, level } => {
-                if level == "info" {
-                    pb.println(format!("  {} {}", style("[log]").dim(), message));
+                // Keep a rolling buffer of recent log lines for context
+                recent_logs.push(message.clone());
+                if recent_logs.len() > max_recent {
+                    recent_logs.remove(0);
+                }
+
+                match level.as_str() {
+                    "status" => {
+                        // Important status updates: show prominently
+                        pb.println(format!("  {} {}", style("→").cyan(), message));
+                    }
+                    "stderr" => {
+                        // Worker stderr lines — show as warnings
+                        pb.println(format!(
+                            "  {} {}",
+                            style("[stderr]").red().dim(),
+                            style(message).dim()
+                        ));
+                    }
+                    "info" => {
+                        // Verbose info — only show if it looks important
+                    }
+                    _ => {}
                 }
             }
             EventPayload::Warning { message, .. } => {
@@ -359,6 +404,29 @@ async fn execute_training(spec: TrainJobSpec, cloud: bool, provider: Option<&str
         // Persist event to DB
         let event_json = serde_json::to_string(&event).unwrap_or_default();
         let _ = db.insert_job_event(job_id, event.sequence, &event_json);
+    }
+
+    // If the event stream ended without a Completed or Error event,
+    // it means the worker process crashed without emitting a structured error.
+    if final_status == "completed" && artifact_paths.is_empty() {
+        // Check if we just never got a completion event
+        if !pb.is_finished() {
+            pb.abandon_with_message("process exited unexpectedly".to_string());
+            eprintln!();
+            eprintln!(
+                "{} Training process exited without reporting completion.",
+                style("✗").red().bold()
+            );
+            if !recent_logs.is_empty() {
+                eprintln!();
+                eprintln!("{}", style("─── last output lines ───").dim());
+                for line in recent_logs.iter().rev().take(10).rev() {
+                    eprintln!("  {}", style(line).dim());
+                }
+                eprintln!("{}", style("─────────────────────────").dim());
+            }
+            final_status = "error";
+        }
     }
 
     // -------------------------------------------------------------------

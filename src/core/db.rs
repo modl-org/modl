@@ -156,6 +156,33 @@ impl Database {
         Ok(())
     }
 
+    /// Find an installed model by ID
+    pub fn find_installed(&self, id: &str) -> Result<Option<InstalledModel>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name, asset_type, variant, sha256, size, file_name, store_path FROM installed WHERE id = ?1")
+            .context("Failed to prepare query")?;
+        let mut rows = stmt
+            .query_map(params![id], |row| {
+                Ok(InstalledModel {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    asset_type: row.get(2)?,
+                    variant: row.get(3)?,
+                    sha256: row.get(4)?,
+                    size: row.get::<_, i64>(5)? as u64,
+                    file_name: row.get(6)?,
+                    store_path: row.get(7)?,
+                })
+            })
+            .context("Failed to query installed model")?;
+        match rows.next() {
+            Some(Ok(model)) => Ok(Some(model)),
+            Some(Err(e)) => Err(e.into()),
+            None => Ok(None),
+        }
+    }
+
     /// List all installed models
     pub fn list_installed(&self, type_filter: Option<&str>) -> Result<Vec<InstalledModel>> {
         let mut stmt = if let Some(t) = type_filter {

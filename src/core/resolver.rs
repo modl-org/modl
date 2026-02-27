@@ -52,13 +52,24 @@ fn resolve_recursive(
 
     // Resolve dependencies first (depth-first)
     for dep in &manifest.requires {
+        // `optional_variant` is an alternative model ID (e.g. "t5-xxl-fp8" as
+        // a lighter substitute for "t5-xxl-fp16"), NOT a variant within the dep.
+        // If the alternative model is already installed, skip this dep.
+        // Otherwise, install the primary dep and let VRAM auto-select pick the
+        // right variant within that model.
+        let dep_id = &dep.id;
+
+        // If user already installed the optional alternative, skip the primary
+        if let Some(ref alt_id) = dep.optional_variant
+            && installed.contains(alt_id)
+        {
+            visited.insert(dep_id.to_string());
+            continue;
+        }
+
         resolve_recursive(
-            &dep.id,
-            dep.optional_variant.as_deref(),
-            index,
-            installed,
-            visited,
-            plan,
+            dep_id, None, // variant auto-selected by VRAM in install.rs
+            index, installed, visited, plan,
         )?;
     }
 

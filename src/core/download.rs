@@ -48,7 +48,10 @@ pub async fn download_file(
             return Ok(());
         }
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .context("Failed to build HTTP client")?;
         let mut request = client.get(url);
 
         if let Some(token) = auth_token {
@@ -60,6 +63,32 @@ pub async fn download_file(
         }
 
         let response = request.send().await.context("Failed to send request")?;
+
+        // Handle HuggingFace-style redirects: the initial response is a 302 to a
+        // pre-signed CDN URL. The CDN URL already contains auth in query params,
+        // so we follow it without the Authorization header.
+        let response = if response.status().is_redirection() {
+            let redirect_url = response
+                .headers()
+                .get("location")
+                .context("Redirect response missing Location header")?
+                .to_str()
+                .context("Invalid Location header")?
+                .to_string();
+
+            let mut redirect_req = client.get(&redirect_url);
+
+            if start_byte > 0 {
+                redirect_req = redirect_req.header("Range", format!("bytes={}-", start_byte));
+            }
+
+            redirect_req
+                .send()
+                .await
+                .context("Failed to follow redirect")?
+        } else {
+            response
+        };
 
         if !response.status().is_success() && response.status().as_u16() != 206 {
             anyhow::bail!("Download failed: HTTP {} for {}", response.status(), url);
