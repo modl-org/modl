@@ -3,6 +3,7 @@ use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 
+use crate::core::cloud::{CloudExecutor, CloudProvider};
 use crate::core::db::Database;
 use crate::core::executor::{Executor, LocalExecutor};
 use crate::core::job::*;
@@ -113,6 +114,8 @@ pub async fn run(
     steps: Option<u32>,
     guidance: Option<f32>,
     count: u32,
+    cloud: bool,
+    provider: Option<&str>,
 ) -> Result<()> {
     let db = Database::open()?;
 
@@ -174,7 +177,11 @@ pub async fn run(
             profile: "trainer-cu124".to_string(),
             python_version: Some("3.11.11".to_string()),
         },
-        target: ExecutionTarget::Local,
+        target: if cloud {
+            ExecutionTarget::Cloud
+        } else {
+            ExecutionTarget::Local
+        },
         labels: std::collections::HashMap::new(),
     };
 
@@ -199,10 +206,14 @@ pub async fn run(
     // -------------------------------------------------------------------
     // Execute
     // -------------------------------------------------------------------
-    execute_generate(spec).await
+    execute_generate(spec, cloud, provider).await
 }
 
-async fn execute_generate(spec: GenerateJobSpec) -> Result<()> {
+async fn execute_generate(
+    spec: GenerateJobSpec,
+    cloud: bool,
+    provider: Option<&str>,
+) -> Result<()> {
     let db = Database::open()?;
     let spec_json = serde_json::to_string(&spec)?;
     let target_str = serde_json::to_string(&spec.target)?;
@@ -210,8 +221,18 @@ async fn execute_generate(spec: GenerateJobSpec) -> Result<()> {
     // -------------------------------------------------------------------
     // 1. Bootstrap executor
     // -------------------------------------------------------------------
-    println!("{} Preparing runtime...", style("→").cyan());
-    let mut executor = LocalExecutor::from_runtime_setup().await?;
+    let mut executor: Box<dyn Executor> = if cloud {
+        let cloud_provider = resolve_cloud_provider(provider)?;
+        println!(
+            "{} Preparing cloud generation via {}...",
+            style("→").cyan(),
+            style(cloud_provider.to_string()).bold()
+        );
+        Box::new(CloudExecutor::new(cloud_provider)?)
+    } else {
+        println!("{} Preparing runtime...", style("→").cyan());
+        Box::new(LocalExecutor::from_runtime_setup().await?)
+    };
 
     // -------------------------------------------------------------------
     // 2. Submit job
@@ -328,4 +349,22 @@ async fn execute_generate(spec: GenerateJobSpec) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Resolve cloud provider from --provider flag or config default.
+fn resolve_cloud_provider(provider: Option<&str>) -> Result<CloudProvider> {
+    if let Some(p) = provider {
+        return p.parse();
+    }
+
+    // Check config for default provider
+    if let Ok(config) = crate::core::config::Config::load()
+        && let Some(ref cloud) = config.cloud
+        && let Some(ref default) = cloud.default_provider
+    {
+        return default.parse();
+    }
+
+    // Default to Modal
+    Ok(CloudProvider::Modal)
 }

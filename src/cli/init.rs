@@ -199,6 +199,7 @@ pub async fn run() -> Result<()> {
         storage: StorageConfig { root: storage_root },
         targets,
         gpu: gpu_override,
+        cloud: None,
     };
 
     config.save().context("Failed to save config")?;

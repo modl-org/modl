@@ -1,4 +1,5 @@
 pub mod artifacts;
+pub mod cloud;
 pub mod config;
 pub mod dataset;
 pub mod db;

@@ -4,6 +4,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 
 use crate::core::artifacts;
+use crate::core::cloud::{CloudExecutor, CloudProvider};
 use crate::core::dataset;
 use crate::core::db::Database;
 use crate::core::executor::{Executor, LocalExecutor};
@@ -23,6 +24,8 @@ pub async fn run(
     steps: Option<u32>,
     config: Option<&str>,
     dry_run: bool,
+    cloud: bool,
+    provider: Option<&str>,
 ) -> Result<()> {
     // -------------------------------------------------------------------
     // Fast path: --config <yaml> loads a full spec directly
@@ -30,15 +33,20 @@ pub async fn run(
     if let Some(config_path) = config {
         let yaml = std::fs::read_to_string(config_path)
             .with_context(|| format!("Failed to read config: {config_path}"))?;
-        let spec: TrainJobSpec =
+        let mut spec: TrainJobSpec =
             serde_yaml::from_str(&yaml).context("Failed to parse TrainJobSpec YAML")?;
+
+        // Respect --cloud flag even when loading spec from file
+        if cloud {
+            spec.target = ExecutionTarget::Cloud;
+        }
 
         if dry_run {
             println!("{}", serde_yaml::to_string(&spec)?);
             return Ok(());
         }
 
-        return execute_training(spec).await;
+        return execute_training(spec, cloud, provider).await;
     }
 
     // -------------------------------------------------------------------
@@ -223,7 +231,11 @@ pub async fn run(
             profile: "trainer-cu124".to_string(),
             python_version: Some("3.11.11".to_string()),
         },
-        target: ExecutionTarget::Local,
+        target: if cloud {
+            ExecutionTarget::Cloud
+        } else {
+            ExecutionTarget::Local
+        },
         labels: std::collections::HashMap::new(),
     };
 
@@ -236,11 +248,11 @@ pub async fn run(
         return Ok(());
     }
 
-    execute_training(spec).await
+    execute_training(spec, cloud, provider).await
 }
 
 /// Execute training: persist job, run executor, collect artifacts.
-async fn execute_training(spec: TrainJobSpec) -> Result<()> {
+async fn execute_training(spec: TrainJobSpec, cloud: bool, provider: Option<&str>) -> Result<()> {
     let db = Database::open()?;
 
     let spec_json = serde_json::to_string(&spec)?;
@@ -249,8 +261,18 @@ async fn execute_training(spec: TrainJobSpec) -> Result<()> {
     // -------------------------------------------------------------------
     // 1. Bootstrap executor
     // -------------------------------------------------------------------
-    println!("{} Preparing training runtime...", style("→").cyan());
-    let mut executor = LocalExecutor::from_runtime_setup().await?;
+    let mut executor: Box<dyn Executor> = if cloud {
+        let cloud_provider = resolve_cloud_provider(provider)?;
+        println!(
+            "{} Preparing cloud training via {}...",
+            style("→").cyan(),
+            style(cloud_provider.to_string()).bold()
+        );
+        Box::new(CloudExecutor::new(cloud_provider)?)
+    } else {
+        println!("{} Preparing training runtime...", style("→").cyan());
+        Box::new(LocalExecutor::from_runtime_setup().await?)
+    };
 
     // -------------------------------------------------------------------
     // 2. Submit job
@@ -435,4 +457,22 @@ fn edit_in_editor(content: &str) -> Result<String> {
     let edited = std::fs::read_to_string(&tmp_path).context("Failed to read edited file")?;
     let _ = std::fs::remove_file(&tmp_path);
     Ok(edited)
+}
+
+/// Resolve cloud provider from --provider flag or config default.
+fn resolve_cloud_provider(provider: Option<&str>) -> Result<CloudProvider> {
+    if let Some(p) = provider {
+        return p.parse();
+    }
+
+    // Check config for default provider
+    if let Ok(config) = crate::core::config::Config::load()
+        && let Some(ref cloud) = config.cloud
+        && let Some(ref default) = cloud.default_provider
+    {
+        return default.parse();
+    }
+
+    // Default to Modal
+    Ok(CloudProvider::Modal)
 }

@@ -15,9 +15,10 @@ use crate::core::training::resolve_worker_python_root;
 // ---------------------------------------------------------------------------
 
 /// Handle returned after submitting a job
-#[allow(dead_code)]
+#[derive(Debug)]
 pub struct JobHandle {
     pub job_id: String,
+    #[allow(dead_code)]
     pub child_pid: Option<u32>,
 }
 

@@ -9,6 +9,25 @@ pub struct Config {
     #[serde(default)]
     pub targets: Vec<TargetConfig>,
     pub gpu: Option<GpuOverride>,
+    #[serde(default)]
+    pub cloud: Option<CloudConfig>,
+}
+
+/// Cloud provider credentials and default settings
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CloudConfig {
+    /// Default provider when --provider is omitted (modal, replicate, runpod)
+    #[serde(default)]
+    pub default_provider: Option<String>,
+    /// Modal token (MODAL_TOKEN_ID)
+    #[serde(default)]
+    pub modal_token: Option<String>,
+    /// Replicate API token
+    #[serde(default)]
+    pub replicate_token: Option<String>,
+    /// RunPod API key
+    #[serde(default)]
+    pub runpod_key: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -89,6 +108,7 @@ impl Default for Config {
             },
             targets: vec![],
             gpu: None,
+            cloud: None,
         }
     }
 }
@@ -126,6 +146,7 @@ mod tests {
                 symlink: true,
             }],
             gpu: None,
+            cloud: None,
         };
         let yaml = serde_yaml::to_string(&config).unwrap();
         let parsed: Config = serde_yaml::from_str(&yaml).unwrap();

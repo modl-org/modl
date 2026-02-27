@@ -184,6 +184,12 @@ pub enum Commands {
         /// Generate spec and print it without executing
         #[arg(long)]
         dry_run: bool,
+        /// Run training on a cloud provider instead of locally
+        #[arg(long)]
+        cloud: bool,
+        /// Cloud provider to use (modal, replicate, runpod)
+        #[arg(long)]
+        provider: Option<String>,
     },
 
     /// Generate images using diffusers
@@ -211,6 +217,12 @@ pub enum Commands {
         /// Number of images to generate
         #[arg(long, default_value = "1")]
         count: u32,
+        /// Run generation on a cloud provider instead of locally
+        #[arg(long)]
+        cloud: bool,
+        /// Cloud provider to use (modal, replicate, runpod)
+        #[arg(long)]
+        provider: Option<String>,
     },
 
     /// Manage datasets for training
@@ -268,6 +280,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             steps,
             config,
             dry_run,
+            cloud,
+            provider,
         } => match command {
             Some(TrainSubcommands::Setup { reinstall }) => train_setup::run(reinstall).await,
             None => {
@@ -280,6 +294,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                     steps,
                     config.as_deref(),
                     dry_run,
+                    cloud,
+                    provider.as_deref(),
                 )
                 .await
             }
@@ -293,6 +309,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             steps,
             guidance,
             count,
+            cloud,
+            provider,
         } => {
             generate::run(
                 &prompt,
@@ -303,6 +321,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 steps,
                 guidance,
                 count,
+                cloud,
+                provider.as_deref(),
             )
             .await
         }

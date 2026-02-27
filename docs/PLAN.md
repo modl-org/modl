@@ -1,286 +1,246 @@
 # mods: The Opinionated Image Generation Toolkit
 
+> Last updated: 2026-02-26 — audited against `feat/train-command` branch
+
 1. CLI-first (like rails/cargo/git)
 2. Opinionated defaults with escape hatches
 3. Covers the *full lifecycle*: models → datasets → training → inference → outputs
 4. Local-first, cloud-burst capable
 5. Actually maintained for modern models (Flux, Z-Image, Qwen, etc.)
 
-## The MVP: What mods Actually Is
+---
+
+## Current Status Summary
+
+The CLI is on the `feat/train-command` branch. **All 50 unit tests pass.**
+The full Rust+Python pipeline exists for both training and generation.
+The key missing pieces are E2E testing on a real GPU and a few UX gaps.
+
+| Area | Status | Notes |
+|------|--------|-------|
+| Model pull/install | ✅ Done | Registry, HF download, content-addressed store, dep resolution, symlinks |
+| Model ls/info/search | ✅ Done | Filtering by type, detailed info, popular/trending |
+| Model link (ComfyUI/A1111) | ✅ Done | Auto-detect layouts, bidirectional symlinks |
+| Config (YAML) | ✅ Done | `mods config`, ~/.mods/config.yaml, targets, storage |
+| GPU detection | ✅ Done | NVML + nvidia-smi fallback, variant auto-selection |
+| Auth (HF, CivitAI) | ✅ Done | Token prompting and storage |
+| Dataset create/ls/validate | ✅ Done | Copy images, pair captions, scan managed datasets |
+| Training presets | ✅ Done | Quick/Standard/Advanced with full test coverage |
+| TrainJobSpec + events | ✅ Done | All types, serde roundtrips, event protocol |
+| Executor trait + LocalExecutor | ✅ Done | submit, events (mpsc), cancel, stdout→JobEvent parsing |
+| CLI train (interactive + flags) | ✅ Done | Dialoguer prompts, dry-run, $EDITOR for Advanced |
+| Artifact collection | ✅ Done | Hash, store, register in DB, symlink to ~/.mods/loras/ |
+| Job tracking (DB) | ✅ Done | jobs/job_events/artifacts tables, full CRUD |
+| Python train adapter | ✅ Done | spec→ai-toolkit YAML, stdout progress parsing, artifact scan |
+| CLI generate | ✅ Done | Prompt, --lora, --seed, --size presets, --count, progress bar |
+| Python gen adapter | ✅ Done | FluxPipeline/SDXL/SD1.5, LoRA loading, artifact emission |
+| Runtime management | ✅ Done | Python venv bootstrap, ai-toolkit install, setup command |
+| Doctor/GC/Export/Import | ✅ Done | Health checks, garbage collection, lockfile round-trip |
+| `mods upgrade` | ✅ Done | Self-update from GitHub releases |
+| Dataset caption | ❌ Not started | Florence-2/BLIP auto-captioning |
+| Batch generation | ❌ Not started | `mods generate --batch prompts.txt` |
+| Output management CLI | ❌ Not started | `mods outputs`, search, open |
+| `--cloud` flag | ❌ Not started | Architecture ready (dyn Executor), no CloudExecutor yet |
+| Web UI (`mods serve`) | ❌ Not started | Deferred to later phase |
+
+---
+
+## Architecture
+
+```
+CLI layer (interactive prompts, progress display)
+    │
+    ├── presets::resolve_params()  ── pure logic, no I/O
+    ├── dataset::validate()        ── filesystem scan
+    ├── gpu::detect()              ── NVML + nvidia-smi
+    │
+    ▼
+TrainJobSpec / GenerateJobSpec  ◄── the serialization boundary
+    │
+    ▼
+┌─────────────────────┐
+│  dyn Executor       │  ◄── trait: submit / submit_generate / events / cancel
+├─────────────────────┤
+│  LocalExecutor      │  ◄── Implemented ✅
+│  CloudExecutor      │  ◄── Future (just impl the trait)
+└─────────────────────┘
+    │
+    ▼
+artifacts::collect_lora()  ── hash, store, register, symlink
+```
+
+The job spec is the contract. Same `TrainJobSpec` struct gets built by presets,
+persisted to DB, and handed to whichever executor runs it. Adding `--cloud`
+means implementing one new struct, not refactoring the pipeline.
+
+### File Map (key modules, ~9200 LOC total)
+
+| File | LOC | Purpose |
+|------|-----|---------|
+| `src/core/runtime.rs` | 803 | Python venv bootstrap, ai-toolkit install, profile management |
+| `src/core/executor.rs` | 622 | Executor trait + LocalExecutor (train + generate) |
+| `src/cli/mod.rs` | 488 | CLI arg definitions, command dispatch |
+| `src/core/db.rs` | 448 | SQLite: installed, symlinks, deps, jobs, events, artifacts |
+| `src/cli/train.rs` | 438 | Interactive prompts, executor dispatch, progress display |
+| `src/cli/install.rs` | 430 | `mods model pull` — download, verify, register |
+| `src/core/job.rs` | 347 | TrainJobSpec, GenerateJobSpec, JobEvent, EventPayload |
+| `src/cli/generate.rs` | 331 | Generate command with LoRA resolution, size presets |
+| `src/core/dataset.rs` | 322 | Dataset create/scan/validate/list |
+| `src/core/presets.rs` | 298 | Quick/Standard/Advanced param resolution |
+| `src/core/artifacts.rs` | 217 | LoRA collection: hash, store, register, symlink |
+| `python/mods_worker/adapters/gen_adapter.py` | 250 | Diffusers pipeline loading + inference |
+| `python/mods_worker/adapters/train_adapter.py` | 222 | ai-toolkit config translation + process orchestration |
+| `python/mods_worker/protocol.py` | 99 | EventEmitter: JSON-line protocol over stdout |
+
+---
+
+## The MVP: What mods Actually Does
 
 ### Philosophy: CLI is the truth, UI is a window
 
 ```
-mods                          # shows status: models, running jobs, recent generations
-mods models                   # list all local models (base + LoRAs)
-mods models pull flux-dev     # download Flux.1-dev (like ollama pull)
-mods models pull civitai:123  # pull from CivitAI by ID
-mods models ls                # list with size, type, base model
+mods model pull flux-dev        # download from HF, deps auto-resolved
+mods model ls                   # list installed (checkpoints, loras, vaes)
+mods model ls --type lora       # filter by type
 
-mods train                    # interactive: picks dataset, model, writes config, starts
-mods train --dataset ./products --base flux-dev --name product-lora-v1
-mods train --config custom.yml  # escape hatch: full ai-toolkit YAML
+mods dataset create myface --from ~/photos/headshots/
+mods dataset ls                 # table: name, images, captions, coverage
+mods dataset validate myface    # checks image count, warns if < 5
 
-mods generate "a photo of OHWX on marble countertop"  # uses last trained LoRA
-mods generate "a photo of OHWX" --lora product-lora-v1 --seed 42
-mods generate "a cat" --base flux-schnell              # no LoRA, base model
+mods train                      # interactive: pick dataset, model, preset
+mods train --dataset myface --base flux-schnell --name myface-v1
+mods train --config custom.yml  # escape hatch: full TrainJobSpec YAML
+mods train --dry-run            # print generated spec without running
 
-mods datasets                  # list datasets
-mods datasets create ./photos  # creates dataset dir with proper structure
-mods datasets caption ./photos # auto-caption with Florence/BLIP
-
-mods serve                     # starts local web UI on :3000
-mods deploy                    # deploys to Modal (BYOK)
+mods generate "a photo of OHWX on marble countertop"
+mods generate "a photo of OHWX" --lora myface-v1 --seed 42
+mods generate "a cat" --base flux-schnell --size 16:9 --count 4
 ```
 
 ### The Three Layers
 
 ```
-Layer 1: mods CLI (Rust)
-├── Model manager (download, organize, track)
-├── Config generator (simple flags → ai-toolkit YAML)
-├── Process orchestrator (spawn training, inference)
-└── Output organizer (SQLite DAM)
+Layer 1: mods CLI (Rust, single binary)
+├── Model manager (download, dep resolution, content-addressed store)
+├── Dataset manager (create, validate, scan)
+├── Training orchestrator (presets → spec → executor → artifacts)
+├── Generation orchestrator (spec → executor → images)
+├── Job tracker (SQLite: jobs, events, artifacts)
+└── Tooling (doctor, gc, export/import, upgrade, init)
 
 Layer 2: mods Python runtime (managed by CLI)
 ├── ai-toolkit (training, managed as dependency)
-├── diffusers (inference)
-└── Auto-captioning (Florence-2 / BLIP)
+├── diffusers (inference: Flux, SDXL, SD1.5 pipelines)
+└── LoRA loading + fusion
 
-Layer 3: mods web UI (optional, `mods serve`)
-├── Next.js + shadcn/ui
+Layer 3: mods web UI (future, `mods serve`)
 ├── Reads from same SQLite + filesystem
-└── Generation playground
+└── Generation playground + training dashboard
 ```
 
 ### Why Rust CLI + Python runtime?
 
-- Rust CLI: fast startup, single binary distribution, model file management is I/O-bound (perfect for Rust), cross-platform
+- Rust CLI: fast startup, single binary distribution, file I/O, cross-platform
 - Python runtime: ai-toolkit and diffusers are Python. No point fighting this.
 - The CLI orchestrates Python processes. Like how `cargo` doesn't compile Rust itself — it calls `rustc`.
 
 ---
 
-## MVP Task List for Claude Code
+## What's Left to Ship: Prioritized
 
-### Sprint 1: Model Manager (the `mods` you already started)
+### Priority 1: E2E Validation (real GPU test)
 
-```
-[ ] mods models pull <model>
-    - Registry of known models (flux-dev, flux-schnell, sdxl, z-image-turbo)
-    - Downloads from HF with progress bar
-    - Stores in ~/.mods/models/ with metadata
-    - Handles auth (HF token in ~/.mods/config.toml)
+Everything is wired. The critical next step is running the full flow on a machine
+with a GPU to shake out integration issues:
 
-[ ] mods models ls
-    - Shows: name, type (base/lora), size, base_model, local path
-    - Groups: base models vs LoRAs
-
-[ ] mods models link <path>
-    - Symlink existing models (don't force re-download)
-    - Scan ComfyUI/A1111 model directories
-
-[ ] ~/.mods/config.toml
-    - models_dir, outputs_dir, datasets_dir
-    - hf_token
-    - default_base_model
-    - gpu (auto-detect or manual)
+```bash
+mods dataset create test --from ./some-images/
+mods train --dataset test --base flux-schnell --name test-v1 --preset quick
+mods generate "a photo of OHWX in a park" --lora test-v1
 ```
 
-### Sprint 2: Training (`mods train`)
+Likely issues to fix:
+- ai-toolkit config field mapping (model names, paths)
+- Runtime bootstrap edge cases (torch version, CUDA compatibility)
+- Diffusers pipeline loading (from_pretrained vs from_single_file logic)
+
+### Priority 2: Dataset Captioning
 
 ```
-[ ] mods datasets create <name> --from <dir>
-    - Copies/symlinks images to ~/.mods/datasets/<name>/
-    - Validates file formats (jpg/png only, no webp)
-    - Pairs images with .txt files
-    - Reports: "12 images, 10 captioned, 2 missing captions"
-
-[ ] mods datasets caption <name>
-    - Runs Florence-2 or BLIP on uncaptioned images
-    - Writes .txt files alongside images
-    - Shows captions for review in terminal
-
-[ ] mods train (interactive mode)
-    Prompt-driven:
-    > Base model? [flux-dev] ↵
-    > Dataset? products ↵
-    > Trigger word? OHWX ↵
-    > Name this LoRA? product-v1 ↵
-    > Quick/Standard/Advanced? [Standard] ↵
-    
-    Presets:
-    - Quick: 1000 steps, rank 8, ~20 min on 4090
-    - Standard: 2000 steps, rank 16, ~45 min on 4090
-    - Advanced: opens $EDITOR with full YAML
-
-[ ] mods train --dataset products --base flux-dev --name product-v1
-    - Non-interactive mode with sensible defaults
-    - Generates ai-toolkit YAML config
-    - Spawns training process
-    - Shows: live loss, step count, ETA, sample images
-    - Saves LoRA to ~/.mods/models/loras/product-v1.safetensors
-    - Records training metadata in SQLite
-
-[ ] Config generation: the opinionated part
-    Given base_model + dataset_size + trigger_word, auto-pick:
-    - steps (scale with dataset: 150-200 per image, min 1000, max 4000)
-    - learning_rate (1e-4 for most, 5e-5 for small datasets)
-    - rank (8 for <20 images, 16 for 20-100, 32 for 100+)
-    - resolution (match base model default)
-    - optimizer (adamw8bit always)
-    - sample prompts (auto-generate from trigger + captions)
-    - quantize (true if VRAM < 40GB)
+[ ] mods dataset caption <name>
+    - Run Florence-2 or BLIP on uncaptioned images
+    - Write .txt files alongside images
+    - Show captions for review in terminal
 ```
 
-### Sprint 3: Inference (`mods generate`)
+Needs a new Python adapter (`caption_adapter.py`) and a CLI subcommand.
+
+### Priority 3: Output Management
 
 ```
-[ ] mods generate "<prompt>"
-    - Auto-detects: if prompt contains a known trigger word, loads that LoRA
-    - Otherwise uses default base model
-    - Sensible defaults: 1024x1024, 28 steps, guidance 3.5
-    - Saves to ~/.mods/outputs/<date>/<timestamp>.png
-    - Prints: seed, inference time, file path
+[ ] mods outputs                 # list recent generations
+[ ] mods outputs search <query>  # search by prompt text
+[ ] mods outputs open <id>       # open in system viewer
+```
 
-[ ] mods generate "<prompt>" --lora <name> --seed 42 --size 16:9
-    - Size presets: 1:1 (1024x1024), 16:9 (1344x768), 9:16, 4:3
-    - Seed for reproducibility
-    - --count 4 for batch
+The DB already tracks artifacts. This is mostly CLI presentation.
 
+### Priority 4: Batch Generation
+
+```
 [ ] mods generate --batch prompts.txt
     - One prompt per line
-    - Parallel generation if VRAM allows
-
-[ ] Output management
-    - SQLite tracks: prompt, seed, lora, params, file path, timestamp
-    - mods outputs (list recent)
-    - mods outputs search "marble countertop"
-    - mods outputs open <id> (opens in system viewer)
+    - Sequential generation (VRAM limited to one at a time)
 ```
 
-### Sprint 4: Web UI (`mods serve`)
+### Priority 5: Cloud Executor (`--cloud`)
+
+The architecture is ready. Adding `--cloud` means:
 
 ```
-[ ] mods serve → starts Next.js on localhost:3000
-    - Reads from same ~/.mods/ directory
-    - SQLite for metadata
-    - Filesystem for images/models
+New code:
+  src/core/cloud_executor.rs  — implements Executor trait
+    - Dataset upload to cloud storage
+    - API calls to provider (Modal, Replicate, RunPod)
+    - Event polling → same mpsc channel
+    - Artifact download on completion
 
-[ ] Pages (4 total, that's it):
+  Add --cloud / --provider flags to Commands::Train and Commands::Generate
 
-    1. Dashboard (/)
-       - Recent generations (image grid)
-       - Active training jobs
-       - Model count, storage used
+Untouched code (everything else):
+  - TrainJobSpec — same struct serialized as JSON in API call
+  - presets.rs — same preset logic
+  - dataset.rs — same validation (cloud executor handles upload)
+  - db.rs — same tables
+  - artifacts.rs — same collection (cloud executor downloads artifact first)
+  - cli/train.rs — same flow, one branch:
 
-    2. Generate (/generate)
-       - THE main page, like A1111's txt2img but cleaner
-       - Prompt textarea (big, center)
-       - LoRA dropdown (grouped by base model)
-       - Quick params: size preset, guidance, steps
-       - "Advanced" disclosure → all params
-       - Generate button → image(s) appear below
-       - Click image → full size + metadata + "regenerate" + "download"
-       - History sidebar (last 50 generations)
-
-    3. Models (/models)
-       - Grid of base models + LoRAs
-       - Each card: preview image, name, size, base model
-       - Click → detail: training config, sample images
-       - "Train new" button → training form
-       - "Pull model" → search/download
-
-    4. Train (/train)
-       - Dataset selector (or upload)
-       - Base model selector
-       - The three presets: Quick / Standard / Advanced
-       - Live training view: loss graph, sample images, progress
-       - History of past training runs
-
-[ ] UI stack:
-    - Next.js 14, App Router
-    - shadcn/ui (Button, Card, Select, Slider, Dialog, Tabs)
-    - Tailwind
-    - Dark mode only (it's an image tool, dark is correct)
-    - No auth (it's local)
-    - Communicates with mods CLI via local HTTP API or direct SQLite reads
+    let executor: Box<dyn Executor> = if cloud {
+        Box::new(CloudExecutor::new(provider)?)
+    } else {
+        Box::new(LocalExecutor::from_runtime_setup().await?)
+    };
 ```
 
-### Sprint 5: Modal Cloud Burst (`mods deploy`)
+### Priority 6: Web UI (`mods serve`)
 
-```
-[ ] mods deploy setup
-    - Prompts for Modal token
-    - Stores in ~/.mods/config.toml
-    - Creates Modal secrets (HF token)
+Deferred. Everything reads from the same `~/.mods/` directory and SQLite DB,
+so the UI can be built independently whenever it makes sense.
 
-[ ] mods train --cloud
-    - Same command, adds --cloud flag
-    - Generates config, uploads dataset to Modal volume
-    - Spawns Modal training function
-    - Streams logs back to terminal
-    - Downloads completed LoRA to local
-
-[ ] mods deploy serve
-    - Deploys inference endpoint to Modal
-    - Returns URL: https://your-app--inference.modal.run
-    - mods generate "prompt" --remote → uses Modal endpoint
-
-[ ] mods deploy sync
-    - Pushes local LoRAs to B2/Modal volume
-    - Pulls remote LoRAs to local
-    - Bidirectional sync of model registry
-```
+---
 
 ## What mods is NOT
 
 - **Not a node editor.** No graphs. If you want ComfyUI, use ComfyUI.
 - **Not a marketplace.** CivitAI exists. mods can *pull from* CivitAI.
-- **Not a hosted service.** You run it. On your machine or your Modal account.
-- **Not infinitely configurable.** Three training presets. If Quick/Standard doesn't work, Advanced gives you the full YAML. That's it.
-- **Not a VC play.** It's a tool. Like Ollama. Use local or pay cloud usage.
+- **Not a hosted service.** You run it. On your machine or your cloud account.
+- **Not infinitely configurable.** Three training presets. Advanced gives you full YAML. That's it.
 
+---
 
-## Product / Business Path (if you want one)
+## Verification Checklist
 
-### Option A: Open Source Tool (recommended start)
-
-- MIT license (already planned)
-- Build community, get feedback
-- Revenue: none initially, and that's fine
-- Like: Kamal, Rails, Ollama
-
-
-## Why This Works (For You Specifically)
-
-1. **You're already building mods** — this is just the vision crystallized
-2. **You're the ideal user** — 4090, trains LoRAs, builds products on top of them
-3. **It feeds ReframeHQ** — train product LoRAs with mods, deploy inference via Modal, serve from your Shopify app
-4. **It's a portfolio piece** — Rust CLI + Python ML + Next.js UI + Modal cloud. Shows the full stack.
-5. **It solves YOUR confusion** — right now you switch between ComfyUI, ai-toolkit CLI, manual HF downloads, and scattered outputs. mods unifies all of that.
-6. **The timing is right** — A1111 is dying, ComfyUI is hostile, Forge is frozen, and new models (Flux, Z-Image, Qwen) are arriving monthly with no good tool to manage them.
-
-
-## First Weekend: What to Actually Build
-
-Forget everything else. Build this:
-
-```bash
-# Friday evening
-mods models pull flux-schnell    # downloads to ~/.mods/models/
-mods models ls                   # lists what you have
-
-# Saturday
-mods datasets create products --from ~/photos/airbnb-products/
-mods train --dataset products --base flux-schnell --name airbnb-v1
-# → trains on your 4090, 20 mins, saves LoRA
-
-# Sunday
-mods generate "a photo of OHWX in a modern apartment, morning light"
-# → generates image, saves to ~/.mods/outputs/
-mods serve
-# → opens web UI, shows your models and generations
-```
-
-That's the MVP. Three commands to go from photos to trained LoRA to generated images. Everything else is iteration.
+1. **Unit tests** (all passing ✅): Preset scaling, dataset scanning, spec roundtrips, DB CRUD, event parsing, artifact collection
+2. **Integration test** (TODO): `mods dataset create` → `mods train --dry-run` → verify spec YAML
+3. **E2E with GPU** (TODO): Full training + generation flow on real hardware
+4. **Cloud executor** (TODO): Implement trait, test with one provider
