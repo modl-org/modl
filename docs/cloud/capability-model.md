@@ -1,5 +1,7 @@
 # Cloud Capability Model
 
+> **STATUS: NOT IMPLEMENTED** — Future spec for `mods --cloud` gating. See [plan.md](plan.md) for cloud roadmap.
+
 ## Purpose
 
 Define a provider-neutral cloud gating model for `mods --cloud` execution.

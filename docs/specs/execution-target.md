@@ -1,5 +1,7 @@
 # Execution Target Interface
 
+> **STATUS:** `LocalExecutor` fully implemented. `CloudExecutor` stubbed (provider enum + cred resolution done, `submit` returns not-implemented). See [cloud plan](../cloud/plan.md) for cloud roadmap.
+
 ## Purpose
 
 Define the stable execution contract used by CLI commands and higher-level orchestration.

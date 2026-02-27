@@ -1,5 +1,7 @@
 # Jobs Schema v1
 
+> **STATUS: IMPLEMENTED** — These schemas match the types in `src/core/job.rs`. Canonical reference.
+
 ## Purpose
 
 Define transport-agnostic, backend-neutral schemas for all executable jobs in `mods`.

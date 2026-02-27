@@ -1,5 +1,11 @@
 # Mods Runtime — Architecture Proposal
 
+> **STATUS: ASPIRATIONAL / NOT IMPLEMENTED**
+> This document describes a future product vision (ComfyUI as sidecar engine,
+> YAML workflow format, Next.js web UI, node registry, cloud deploy platform).
+> None of this is built. The current product is a CLI toolkit for models,
+> training, and generation — see [../PLAN.md](../PLAN.md) for actual status.
+
 ## The Thesis
 
 ComfyUI solves the hard problem (execution engine, model management, node ecosystem) but wraps it in the wrong UX for 2026: spaghetti node graphs that are impossible for LLMs to generate, impossible to version-control, and impossible to deploy. 

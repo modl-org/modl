@@ -1,6 +1,9 @@
 # Cloud LoRA Training Plan
 
 > Last updated: 2026-02-27
+>
+> **STATUS:** Phase 1 (Executor trait + CloudExecutor stub) done. Phases 2-5 (API, Modal backend, CloudExecutor impl, polish) not started.
+> Related specs: [execution-target.md](../specs/execution-target.md), [capability-model.md](capability-model.md)
 
 ## Business Model: mods cloud as a Product Layer
 

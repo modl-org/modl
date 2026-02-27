@@ -1,5 +1,7 @@
 # mods_worker Protocol (JSONL)
 
+> **STATUS: IMPLEMENTED** — Matches `python/mods_worker/protocol.py` and event parsing in `src/core/executor.rs`. Canonical reference.
+
 ## Purpose
 
 Define the canonical JSONL protocol between `mods` (Rust) and `mods_worker` (Python).

@@ -1,6 +1,6 @@
 # mods: The Opinionated Image Generation Toolkit
 
-> Last updated: 2026-02-26 — audited against `feat/train-command` branch
+> Last updated: 2026-02-27 — audited against `feat/train-command` branch
 
 1. CLI-first (like rails/cargo/git)
 2. Opinionated defaults with escape hatches
@@ -12,7 +12,7 @@
 
 ## Current Status Summary
 
-The CLI is on the `feat/train-command` branch. **All 50 unit tests pass.**
+The CLI is on the `feat/train-command` branch. **All 55 unit tests pass.**
 The full Rust+Python pipeline exists for both training and generation.
 The key missing pieces are E2E testing on a real GPU and a few UX gaps.
 
@@ -40,7 +40,7 @@ The key missing pieces are E2E testing on a real GPU and a few UX gaps.
 | Dataset caption | ✅ Implemented | Florence-2/BLIP auto-captioning |
 | Batch generation | ❌ Not started | `mods generate --batch prompts.txt` |
 | Output management CLI | ❌ Not started | `mods outputs`, search, open |
-| `--cloud` flag | ❌ Not started | Architecture ready (dyn Executor), no CloudExecutor yet |
+| `--cloud` flag | 🟡 Stubbed | CloudExecutor struct + provider enum + cred resolution done, submit returns not-implemented |
 | Web UI (`mods serve`) | ❌ Not started | Deferred to later phase |
 
 ---
@@ -73,22 +73,24 @@ The job spec is the contract. Same `TrainJobSpec` struct gets built by presets,
 persisted to DB, and handed to whichever executor runs it. Adding `--cloud`
 means implementing one new struct, not refactoring the pipeline.
 
-### File Map (key modules, ~9200 LOC total)
+### File Map (key modules, ~10500 LOC total)
 
 | File | LOC | Purpose |
 |------|-----|---------|
 | `src/core/runtime.rs` | 803 | Python venv bootstrap, ai-toolkit install, profile management |
-| `src/core/executor.rs` | 622 | Executor trait + LocalExecutor (train + generate) |
-| `src/cli/mod.rs` | 488 | CLI arg definitions, command dispatch |
+| `src/core/executor.rs` | 627 | Executor trait + LocalExecutor (train + generate) |
+| `src/cli/mod.rs` | 508 | CLI arg definitions, command dispatch |
 | `src/core/db.rs` | 448 | SQLite: installed, symlinks, deps, jobs, events, artifacts |
-| `src/cli/train.rs` | 438 | Interactive prompts, executor dispatch, progress display |
+| `src/cli/train.rs` | 478 | Interactive prompts, executor dispatch, progress display |
 | `src/cli/install.rs` | 430 | `mods model pull` — download, verify, register |
-| `src/core/job.rs` | 347 | TrainJobSpec, GenerateJobSpec, JobEvent, EventPayload |
-| `src/cli/generate.rs` | 331 | Generate command with LoRA resolution, size presets |
+| `src/core/job.rs` | 382 | TrainJobSpec, GenerateJobSpec, JobEvent, EventPayload |
+| `src/cli/generate.rs` | 370 | Generate command with LoRA resolution, size presets |
 | `src/core/dataset.rs` | 322 | Dataset create/scan/validate/list |
 | `src/core/presets.rs` | 298 | Quick/Standard/Advanced param resolution |
+| `src/core/cloud.rs` | 238 | CloudExecutor stub + provider enum + credential resolution |
 | `src/core/artifacts.rs` | 217 | LoRA collection: hash, store, register, symlink |
 | `python/mods_worker/adapters/gen_adapter.py` | 250 | Diffusers pipeline loading + inference |
+| `python/mods_worker/adapters/caption_adapter.py` | 240 | Florence-2/BLIP auto-captioning adapter |
 | `python/mods_worker/adapters/train_adapter.py` | 222 | ai-toolkit config translation + process orchestration |
 | `python/mods_worker/protocol.py` | 99 | EventEmitter: JSON-line protocol over stdout |
 
@@ -243,7 +245,7 @@ so the UI can be built independently whenever it makes sense.
 
 ## Verification Checklist
 
-1. **Unit tests** (all passing ✅): Preset scaling, dataset scanning, spec roundtrips, DB CRUD, event parsing, artifact collection
+1. **Unit tests** (all passing ✅ — 55 tests): Preset scaling, dataset scanning, spec roundtrips, DB CRUD, event parsing, artifact collection, cloud provider parsing
 2. **Integration test** (TODO): `mods dataset create` → `mods train --dry-run` → verify spec YAML
 3. **E2E with GPU** (TODO): Full training + generation flow on real hardware
-4. **Cloud executor** (TODO): Implement trait, test with one provider
+4. **Cloud executor** (TODO): Implement trait methods, test with one provider

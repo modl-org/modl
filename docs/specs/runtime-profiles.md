@@ -1,5 +1,12 @@
 # Runtime Profile Specification
 
+> **STATUS: PARTIALLY IMPLEMENTED / ASPIRATIONAL**
+> The actual runtime (`src/core/runtime.rs`, 803 LOC) uses a simpler approach:
+> Python venv creation + pip install from requirements. The manifest index,
+> profile JSON schemas, and lockfile format described below are a *target
+> architecture* not yet built. The current system works but doesn't have the
+> full reproducibility guarantees this spec envisions.
+
 ## Purpose
 
 Define how `mods` describes, resolves, installs, verifies, and upgrades managed embedded Python runtimes.
