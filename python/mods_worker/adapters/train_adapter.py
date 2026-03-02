@@ -287,12 +287,29 @@ def spec_to_aitoolkit_config(spec: dict) -> dict:
 
 
 def scan_output_artifacts(output_dir: str, emitter: EventEmitter) -> None:
-    """After training, scan output directory for .safetensors files and emit artifact events."""
+    """After training, emit artifact event for the final LoRA only (not intermediate checkpoints).
+
+    ai-toolkit saves checkpoints as `{name}_000002000.safetensors` and the
+    final output as `{name}.safetensors`.  We only register the final one in
+    the DB — checkpoints stay on disk for manual comparison but don't
+    clutter `mods model ls`.
+    """
     import glob
     import hashlib
+    import re
 
     pattern = os.path.join(output_dir, "**", "*.safetensors")
-    for filepath in glob.glob(pattern, recursive=True):
+    all_files = sorted(glob.glob(pattern, recursive=True))
+
+    # Separate final outputs from numbered checkpoints (e.g. _000002000)
+    checkpoint_re = re.compile(r"_\d{6,}\.safetensors$")
+    final_files = [f for f in all_files if not checkpoint_re.search(f)]
+
+    # If no non-checkpoint file found, fall back to the last checkpoint
+    # (highest step number) so we always emit at least one artifact.
+    targets = final_files if final_files else all_files[-1:] if all_files else []
+
+    for filepath in targets:
         path = Path(filepath)
         size_bytes = path.stat().st_size
 
