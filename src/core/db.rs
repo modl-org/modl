@@ -343,6 +343,31 @@ impl Database {
             .context("Failed to collect job results")
     }
 
+    /// Delete all jobs and their events for a given LoRA name
+    pub fn delete_jobs_by_lora_name(&self, lora_name: &str) -> Result<()> {
+        let pattern = format!("job-{lora_name}-%");
+        // Delete events first (child records)
+        self.conn
+            .execute(
+                "DELETE FROM job_events WHERE job_id LIKE ?1",
+                params![pattern],
+            )
+            .context("Failed to delete job events")?;
+        // Delete the jobs themselves
+        let deleted = self
+            .conn
+            .execute("DELETE FROM jobs WHERE job_id LIKE ?1", params![pattern])
+            .context("Failed to delete jobs")?;
+        if deleted > 0 {
+            println!(
+                "  {} Removed {} job record(s)",
+                console::style("×").red(),
+                deleted
+            );
+        }
+        Ok(())
+    }
+
     /// Insert a job event
     pub fn insert_job_event(&self, job_id: &str, sequence: u64, event_json: &str) -> Result<()> {
         self.conn

@@ -128,11 +128,37 @@ fn remove_trained_artifact(
         }
     }
 
+    // Remove training output directory (samples, logs, config)
+    let training_output_dir = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".mods")
+        .join("training_output")
+        .join(lora_name);
+    if training_output_dir.is_dir() {
+        std::fs::remove_dir_all(&training_output_dir)?;
+        println!(
+            "  {} Deleted training output: {}",
+            style("×").red(),
+            training_output_dir.display()
+        );
+    }
+    // Also clean up any stale config/log files at the training_output level
+    let training_output_parent = training_output_dir.parent().unwrap();
+    for suffix in &["-config.yaml", ".log"] {
+        let stale = training_output_parent.join(format!("{}{}", lora_name, suffix));
+        if stale.exists() {
+            std::fs::remove_file(&stale).ok();
+        }
+    }
+
     // Also remove from the installed table if it was registered there
     db.remove_installed(&artifact.artifact_id)?;
 
     // Remove the artifact record from DB
     db.delete_artifact(&artifact.artifact_id)?;
+
+    // Remove associated job records from DB
+    db.delete_jobs_by_lora_name(lora_name)?;
 
     println!();
     println!(
