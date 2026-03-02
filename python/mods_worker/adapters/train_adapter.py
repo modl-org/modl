@@ -111,7 +111,7 @@ def _build_train_block(family: str, params: dict, lora_type: str) -> dict:
     elif family == "sdxl":
         train["train_text_encoder"] = True
         train["noise_scheduler"] = "ddpm"
-        train["dtype"] = "fp16"
+        train["dtype"] = "bf16"  # fp16 causes NaN loss due to overflow in SDXL UNet
         train["max_denoising_steps"] = 1000
         # SDXL was trained with noise_offset 0.0357
         train["noise_offset"] = 0.0357 if is_style else 0.0

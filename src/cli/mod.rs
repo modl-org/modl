@@ -19,6 +19,7 @@ mod search;
 mod space;
 mod train;
 mod train_setup;
+mod train_status;
 mod uninstall;
 mod update;
 mod upgrade;
@@ -153,6 +154,15 @@ pub enum TrainSubcommands {
         /// Force re-install of training dependencies
         #[arg(long)]
         reinstall: bool,
+    },
+
+    /// Show live training progress (parses log files)
+    Status {
+        /// Show status for a specific run name only
+        name: Option<String>,
+        /// Watch mode: refresh every 2 seconds
+        #[arg(long, short = 'w')]
+        watch: bool,
     },
 }
 
@@ -317,6 +327,10 @@ pub async fn run(cli: Cli) -> Result<()> {
             provider,
         } => match command {
             Some(TrainSubcommands::Setup { reinstall }) => train_setup::run(reinstall).await,
+            Some(TrainSubcommands::Status { name, watch }) => {
+                train_status::run(name.as_deref(), watch)?;
+                Ok(())
+            }
             None => {
                 train::run(
                     dataset.as_deref(),
