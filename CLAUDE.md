@@ -508,6 +508,12 @@ items:
 ### First Run Experience
 If no `~/.mods/config.yaml` exists, `mods install` (or any command) should suggest running `mods init` first, but still work with sensible defaults (store in `~/mods/`, no symlinks).
 
+### Port killing (SSH safety)
+When killing processes on a port (e.g. preview server restart), **always** use `lsof -sTCP:LISTEN` to match only listeners. Plain `lsof -ti :PORT` also returns PIDs of processes with client connections to that port — including VS Code Remote SSH port-forwarding. Killing those drops the SSH session. See `kill_existing_on_port()` in `src/ui/server.rs`.
+
+### Training runs via SSH
+`mods train` runs the worker as a direct child process. If the SSH session drops, SIGHUP cascades and kills training. Users should run long training jobs inside `tmux` or `screen`. A future improvement would be to daemonize the worker, but that requires the worker to write events directly to the DB instead of stdout.
+
 ## Non-Goals (for now)
 - Custom node management (ComfyUI Manager's domain)
 - Pipeline definitions / execution

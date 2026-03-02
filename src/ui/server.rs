@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use tokio::net::TcpListener;
 
 use crate::core::dataset;
+use crate::core::db::Database;
 use crate::core::training_status;
 
 // ---------------------------------------------------------------------------
@@ -26,6 +27,25 @@ struct TrainingRun {
     samples: Vec<SampleGroup>,
     lora_path: Option<String>,
     lora_size: Option<u64>,
+    lineage: Option<TrainingLineage>,
+}
+
+/// Provenance: links a training run back to its job(s), dataset, and artifacts.
+#[derive(Serialize)]
+struct TrainingLineage {
+    dataset_name: Option<String>,
+    dataset_image_count: Option<u32>,
+    base_model: Option<String>,
+    jobs: Vec<JobSummary>,
+}
+
+#[derive(Serialize)]
+struct JobSummary {
+    job_id: String,
+    status: String,
+    steps: Option<u64>,
+    created_at: String,
+    resumed_from: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -90,14 +110,19 @@ pub async fn start(port: u16, open_browser: bool) -> Result<()> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Kill any existing process listening on the given port (best-effort).
+/// Kill any existing process **listening** on the given port (best-effort).
+///
+/// IMPORTANT: We use `-sTCP:LISTEN` so we only kill the server process, NOT
+/// processes that merely have a connection to the port (e.g. VS Code Remote
+/// SSH port-forwarding).  Without this filter, `lsof -ti :PORT` also returns
+/// the sshd/vscode-server PID and killing it drops the SSH session.
 fn kill_existing_on_port(port: u16) {
     // Try to connect — if it succeeds, something is already listening
     let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
     if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(200)).is_ok() {
-        // Use lsof to find the PID, then kill it
+        // Use lsof to find PIDs in LISTEN state only
         if let Ok(output) = std::process::Command::new("lsof")
-            .args(["-ti", &format!(":{port}")])
+            .args(["-ti", &format!(":{port}"), "-sTCP:LISTEN"])
             .output()
         {
             let pids = String::from_utf8_lossy(&output.stdout);
@@ -237,12 +262,71 @@ fn scan_training_run(name: &str) -> Result<TrainingRun> {
         (None, None)
     };
 
+    // Query DB for job lineage
+    let lineage = build_lineage(name);
+
     Ok(TrainingRun {
         name: name.to_string(),
         config,
         samples,
         lora_path: lora_p,
         lora_size: lora_s,
+        lineage,
+    })
+}
+
+/// Build training lineage by querying the jobs DB for matching runs.
+fn build_lineage(lora_name: &str) -> Option<TrainingLineage> {
+    let db = Database::open().ok()?;
+    let jobs = db.find_jobs_by_lora_name(lora_name).ok()?;
+
+    if jobs.is_empty() {
+        return None;
+    }
+
+    // Extract dataset + model info from the first job's spec
+    let first_spec: serde_json::Value = serde_json::from_str(&jobs[0].spec_json).ok()?;
+
+    let dataset_name = first_spec
+        .pointer("/dataset/name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let dataset_image_count = first_spec
+        .pointer("/dataset/image_count")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
+    let base_model = first_spec
+        .pointer("/model/base_model_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let job_summaries: Vec<JobSummary> = jobs
+        .iter()
+        .map(|j| {
+            let spec: serde_json::Value = serde_json::from_str(&j.spec_json).unwrap_or_default();
+            let steps = spec.pointer("/params/steps").and_then(|v| v.as_u64());
+            let resumed_from = spec
+                .pointer("/params/resume_from")
+                .and_then(|v| v.as_str())
+                .map(|s| {
+                    // Show just the filename, not the full path
+                    s.rsplit('/').next().unwrap_or(s).to_string()
+                });
+            JobSummary {
+                job_id: j.job_id.clone(),
+                status: j.status.clone(),
+                steps,
+                created_at: j.created_at.clone(),
+                resumed_from,
+            }
+        })
+        .collect();
+
+    Some(TrainingLineage {
+        dataset_name,
+        dataset_image_count,
+        base_model,
+        jobs: job_summaries,
     })
 }
 

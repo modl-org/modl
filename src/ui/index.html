@@ -135,6 +135,31 @@
     transition: opacity 0.15s; border: 1px solid var(--border); }
   .evo-grid img:hover { opacity: 0.85; border-color: var(--accent); }
 
+  /* Lineage card */
+  .lineage-section { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; }
+  .lineage-block { flex: 1; min-width: 180px; }
+  .lineage-block h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--fg2); margin-bottom: 8px; font-weight: 600; }
+  .lineage-dataset { display: flex; align-items: center; gap: 10px; }
+  .lineage-dataset .ds-icon { width: 36px; height: 36px; border-radius: 6px; background: var(--bg3);
+    display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0; }
+  .lineage-dataset .ds-info { font-size: 13px; }
+  .lineage-dataset .ds-name { font-weight: 600; color: var(--accent); cursor: pointer; }
+  .lineage-dataset .ds-name:hover { text-decoration: underline; }
+  .lineage-dataset .ds-count { color: var(--fg2); font-size: 12px; }
+  .lineage-jobs { font-size: 12px; }
+  .lineage-jobs table { border-collapse: collapse; width: 100%; }
+  .lineage-jobs th { text-align: left; color: var(--fg2); font-weight: 500; padding: 4px 8px 4px 0;
+    border-bottom: 1px solid var(--border); }
+  .lineage-jobs td { padding: 4px 8px 4px 0; color: var(--fg); font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 11px; }
+  .lineage-jobs .status-chip { display: inline-block; padding: 1px 8px; border-radius: 10px;
+    font-size: 11px; font-weight: 500; }
+  .lineage-jobs .status-chip.completed { background: rgba(63,185,80,0.15); color: var(--green); }
+  .lineage-jobs .status-chip.running { background: rgba(88,166,255,0.15); color: var(--accent); }
+  .lineage-jobs .status-chip.error { background: rgba(248,81,73,0.15); color: var(--red); }
+  .lineage-jobs .resume-tag { color: var(--fg2); font-size: 10px; }
+
   /* Empty state */
   .empty { text-align: center; padding: 60px 20px; color: var(--fg2); }
   .empty h2 { font-size: 20px; margin-bottom: 8px; color: var(--fg); }
@@ -336,6 +361,48 @@ async function selectRun(name) {
     <div class="stat"><div class="num">${maxStep.toLocaleString()}</div><div class="label">Latest Step</div></div>
     <div class="stat"><div class="num">${run.lora_size ? formatBytes(run.lora_size) : '—'}</div><div class="label">LoRA Size</div></div>
   </div>`;
+
+  // Lineage card — dataset + job history from DB
+  if (run.lineage) {
+    const lin = run.lineage;
+    html += `<div class="card"><h2>Lineage</h2><div class="lineage-section">`;
+
+    // Dataset block
+    if (lin.dataset_name) {
+      html += `<div class="lineage-block">
+        <h3>Dataset</h3>
+        <div class="lineage-dataset">
+          <div class="ds-icon">📁</div>
+          <div class="ds-info">
+            <div class="ds-name" onclick="switchTab('datasets'); setTimeout(() => selectDataset('${escapeHtml(lin.dataset_name)}'), 100)">${escapeHtml(lin.dataset_name)}</div>
+            ${lin.dataset_image_count ? `<div class="ds-count">${lin.dataset_image_count} images</div>` : ''}
+          </div>
+        </div>
+      </div>`;
+    }
+
+    // Job history block
+    if (lin.jobs && lin.jobs.length > 0) {
+      html += `<div class="lineage-block" style="flex:2">
+        <h3>Training History</h3>
+        <div class="lineage-jobs"><table>
+          <tr><th>Job</th><th>Status</th><th>Steps</th><th>Date</th><th></th></tr>`;
+      for (const j of lin.jobs) {
+        const shortId = j.job_id.replace(/^job-/, '');
+        const statusCls = j.status === 'completed' ? 'completed' : j.status === 'running' ? 'running' : 'error';
+        html += `<tr>
+          <td>${escapeHtml(shortId)}</td>
+          <td><span class="status-chip ${statusCls}">${j.status}</span></td>
+          <td>${j.steps ? j.steps.toLocaleString() : '—'}</td>
+          <td>${j.created_at?.substring(0, 16) || '—'}</td>
+          <td>${j.resumed_from ? `<span class="resume-tag">↩ ${escapeHtml(j.resumed_from)}</span>` : ''}</td>
+        </tr>`;
+      }
+      html += '</table></div></div>';
+    }
+
+    html += '</div></div>';
+  }
 
   // Config (compact summary + show more)
   if (run.config) {

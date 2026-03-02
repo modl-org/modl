@@ -32,6 +32,48 @@ _ERROR_PATTERNS = [
 _TAIL_BUFFER_SIZE = 30
 
 
+def _read_original_intervals(checkpoint_path: str) -> tuple[int | None, int | None]:
+    """Infer the original save_every/sample_every from sample files on disk.
+
+    When resuming training, we want to keep the same sampling/checkpoint intervals
+    as the original run so that step numbers remain consistent in the preview UI.
+
+    We look at the sample images (named ``<ts>__<step>_<idx>.jpg``) and use the
+    lowest non-zero step number as the original interval (step 0 → first
+    checkpoint = the interval).  We use the sample-derived interval for both
+    save_every and sample_every since they default to the same formula and
+    checkpoint files may be pruned by max_step_saves_to_keep.
+    Returns (save_every, sample_every) or (None, None) if not determinable.
+    """
+    ckpt = Path(checkpoint_path)
+    run_dir = ckpt.parent  # e.g. ~/.mods/training_output/<name>/<name>/
+
+    # Infer interval from sample images (never pruned, most reliable)
+    interval = None
+    samples_dir = run_dir / "samples"
+    if samples_dir.exists():
+        steps = set()
+        for f in samples_dir.iterdir():
+            if f.suffix in (".jpg", ".png"):
+                parts = f.stem.split("__")
+                if len(parts) == 2:
+                    step_part = parts[1].split("_")[0]
+                    try:
+                        steps.add(int(step_part))
+                    except ValueError:
+                        pass
+        nonzero = sorted(s for s in steps if s > 0)
+        if nonzero:
+            # The first non-zero step equals the original interval
+            interval = nonzero[0]
+
+    if interval:
+        print(f"[mods] Preserving original intervals: save_every={interval}, sample_every={interval}")
+        return interval, interval
+
+    return None, None
+
+
 def _build_train_command(config_path: Path) -> List[str]:
     """Build the command to run ai-toolkit training.
 
@@ -130,7 +172,7 @@ def _build_train_block(family: str, params: dict, lora_type: str) -> dict:
     return train
 
 
-def _build_sample_block(family: str, params: dict, resolution: int, lora_type: str) -> dict:
+def _build_sample_block(family: str, params: dict, resolution: int, lora_type: str, sample_every_override: int | None = None) -> dict:
     """Build the 'sample' config block with per-architecture settings."""
     steps = params.get("steps", 2000)
 
@@ -149,7 +191,7 @@ def _build_sample_block(family: str, params: dict, resolution: int, lora_type: s
 
     return {
         "sampler": sampler,
-        "sample_every": max(steps // 5, 50),
+        "sample_every": sample_every_override or max(steps // 5, 50),
         "width": resolution,
         "height": resolution,
         "prompts": _build_sample_prompts(params.get("trigger_word", "OHWX"), lora_type),
@@ -237,9 +279,13 @@ def spec_to_aitoolkit_config(spec: dict) -> dict:
 
     # Resume from a previous checkpoint if specified
     resume_from = params.get("resume_from")
+    original_save_every = None
+    original_sample_every = None
     if resume_from:
         network_config["pretrained_lora_path"] = resume_from
         print(f"[mods] Resuming training from checkpoint: {resume_from}")
+        # Try to read original config to preserve save/sample intervals
+        original_save_every, original_sample_every = _read_original_intervals(resume_from)
 
     # Style defaults: more repeats + higher caption dropout to learn style over content.
     # A value of 0 (num_repeats) or <0 (caption_dropout) means "use adapter default".
@@ -264,7 +310,7 @@ def spec_to_aitoolkit_config(spec: dict) -> dict:
                     "network": network_config,
                     "save": {
                         "dtype": "float16",
-                        "save_every": max(params.get("steps", 2000) // 5, 500) if is_style else params.get("steps", 2000),
+                        "save_every": original_save_every or (max(params.get("steps", 2000) // 5, 500) if is_style else params.get("steps", 2000)),
                         "max_step_saves_to_keep": 5 if is_style else 1,
                     },
                     "datasets": [
@@ -280,7 +326,7 @@ def spec_to_aitoolkit_config(spec: dict) -> dict:
                     ],
                     "train": _build_train_block(family, params, lora_type),
                     "model": model_config,
-                    "sample": _build_sample_block(family, params, resolution, lora_type),
+                    "sample": _build_sample_block(family, params, resolution, lora_type, original_sample_every),
                 }
             ],
         },

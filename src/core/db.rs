@@ -327,6 +327,22 @@ impl Database {
             .context("Failed to collect job results")
     }
 
+    /// Find jobs whose lora_name matches (via job_id pattern `job-<name>-*`)
+    pub fn find_jobs_by_lora_name(&self, lora_name: &str) -> Result<Vec<JobRecord>> {
+        let pattern = format!("job-{lora_name}-%");
+        let mut stmt = self.conn.prepare(
+            "SELECT job_id, kind, status, spec_json, target, provider, created_at, started_at, completed_at \
+             FROM jobs WHERE job_id LIKE ?1 ORDER BY created_at ASC"
+        ).context("Failed to prepare query")?;
+
+        let rows = stmt
+            .query_map(params![pattern], JobRecord::from_row)
+            .context("Failed to query jobs by lora name")?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("Failed to collect job results")
+    }
+
     /// Insert a job event
     pub fn insert_job_event(&self, job_id: &str, sequence: u64, event_json: &str) -> Result<()> {
         self.conn
