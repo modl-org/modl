@@ -162,11 +162,30 @@ pub struct TrainingParams {
     pub steps: u32,
     pub rank: u32,
     pub learning_rate: f64,
-    pub optimizer: String,
+    pub optimizer: Optimizer,
     pub resolution: u32,
     #[serde(default)]
     pub seed: Option<u64>,
     pub quantize: bool,
+    /// Batch size per training step (higher = faster but more VRAM)
+    #[serde(default = "default_batch_size")]
+    pub batch_size: u32,
+    /// Dataset repetitions per epoch (higher = more exposure per image)
+    #[serde(default = "default_num_repeats")]
+    pub num_repeats: u32,
+    /// Probability of dropping captions (higher = learn visual style over text)
+    #[serde(default = "default_caption_dropout")]
+    pub caption_dropout_rate: f64,
+}
+
+fn default_batch_size() -> u32 {
+    0 // 0 = let adapter choose per lora_type
+}
+fn default_num_repeats() -> u32 {
+    0 // 0 = let adapter choose per lora_type
+}
+fn default_caption_dropout() -> f64 {
+    -1.0 // negative = let adapter choose per lora_type
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
@@ -195,6 +214,51 @@ impl std::str::FromStr for LoraType {
             "character" | "char" => Ok(Self::Character),
             "object" | "obj" => Ok(Self::Object),
             _ => anyhow::bail!("Unknown lora type: {s}. Expected style, character, or object."),
+        }
+    }
+}
+
+/// Validated optimizer choices supported by ai-toolkit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum Optimizer {
+    /// AdamW 8-bit (bitsandbytes) — best default, low VRAM
+    #[value(alias = "adamw8bit")]
+    Adamw8bit,
+    /// Prodigy — adaptive LR, no manual LR tuning needed
+    Prodigy,
+    /// AdamW (full precision) — uses more VRAM
+    Adamw,
+    /// Adafactor — memory-efficient, good for large models
+    Adafactor,
+    /// SGD with momentum — simple, sometimes useful for fine-tuning
+    Sgd,
+}
+
+impl std::fmt::Display for Optimizer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Adamw8bit => write!(f, "adamw8bit"),
+            Self::Prodigy => write!(f, "prodigy"),
+            Self::Adamw => write!(f, "adamw"),
+            Self::Adafactor => write!(f, "adafactor"),
+            Self::Sgd => write!(f, "sgd"),
+        }
+    }
+}
+
+impl std::str::FromStr for Optimizer {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "adamw8bit" | "adamw_8bit" => Ok(Self::Adamw8bit),
+            "prodigy" => Ok(Self::Prodigy),
+            "adamw" => Ok(Self::Adamw),
+            "adafactor" => Ok(Self::Adafactor),
+            "sgd" => Ok(Self::Sgd),
+            _ => anyhow::bail!(
+                "Unknown optimizer: {s}. Options: adamw8bit, prodigy, adamw, adafactor, sgd"
+            ),
         }
     }
 }
@@ -386,10 +450,13 @@ mod tests {
                 steps: 3000,
                 rank: 16,
                 learning_rate: 5e-5,
-                optimizer: "adamw8bit".into(),
+                optimizer: Optimizer::Adamw8bit,
                 resolution: 1024,
                 seed: Some(42),
                 quantize: true,
+                batch_size: 0,
+                num_repeats: 0,
+                caption_dropout_rate: -1.0,
             },
             runtime: RuntimeRef {
                 profile: "trainer-cu124".into(),

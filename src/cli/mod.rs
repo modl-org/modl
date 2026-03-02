@@ -28,8 +28,40 @@ use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
 use crate::core::cloud::CloudProvider;
-use crate::core::job::{LoraType, Preset};
+use crate::core::job::{LoraType, Optimizer, Preset};
 use crate::core::manifest::AssetType;
+
+/// Extended help text for `mods train` with recommended settings per model.
+const TRAIN_HELP_EXTRA: &str = "\
+\x1b[1mRecommended settings by model:\x1b[0m
+
+  SDXL (sdxl-base-1.0):
+    Style:     --rank 32  --lr 1e-4   --steps 10000+  --batch-size 2
+    Character: --rank 16  --lr 1e-4   --steps 1500    --batch-size 1
+    Object:    --rank 8   --lr 1e-4   --steps 1000    --batch-size 1
+
+  Flux (flux-dev):
+    Style:     --rank 16  --lr 1e-4   --steps 5000+   --batch-size 1
+    Character: --rank 16  --lr 4e-4   --steps 1500    --batch-size 1
+    Object:    --rank 8   --lr 1e-4   --steps 1000    --batch-size 1
+
+  SD 1.5 (sd-1.5):
+    Style:     --rank 32  --lr 1e-4   --steps 5000+   --batch-size 2
+    Character: --rank 8   --lr 1e-4   --steps 1500    --batch-size 1
+
+\x1b[1mOptimizer guide:\x1b[0m
+    adamw8bit  Best default. Low VRAM, stable training.
+    prodigy    Auto-tunes LR. Set --lr 1.0 and let it adapt.
+    adamw      Full precision. More VRAM but sometimes better quality.
+    adafactor  Memory-efficient. Good for VRAM-constrained setups.
+
+\x1b[1mStyle training tips:\x1b[0m
+    - Use 50-150 images of consistent style (fewer is often better)
+    - Higher --caption-dropout (0.3-0.5) helps learn style over content
+    - More --steps (10k-40k) needed for large datasets
+    - Higher --rank (32-64) gives more capacity for complex styles
+    - Use --repeats 10 for small datasets (<50 images)
+";
 
 /// Auth provider for `mods auth` command.
 #[derive(Clone, Debug, ValueEnum)]
@@ -179,6 +211,7 @@ pub enum Commands {
 
     /// Train a LoRA with managed runtime
     #[command(args_conflicts_with_subcommands = true)]
+    #[command(after_long_help = TRAIN_HELP_EXTRA)]
     Train {
         #[command(subcommand)]
         command: Option<TrainSubcommands>,
@@ -203,6 +236,30 @@ pub enum Commands {
         /// Override training steps
         #[arg(long)]
         steps: Option<u32>,
+        /// LoRA rank (capacity). Higher = more expressive but larger file
+        #[arg(long)]
+        rank: Option<u32>,
+        /// Learning rate (e.g. 1e-4, 2e-4, 5e-5)
+        #[arg(long)]
+        lr: Option<f64>,
+        /// Batch size per step (higher = faster but more VRAM)
+        #[arg(long)]
+        batch_size: Option<u32>,
+        /// Image resolution for training
+        #[arg(long)]
+        resolution: Option<u32>,
+        /// Optimizer: adamw8bit, prodigy, adamw, adafactor, sgd
+        #[arg(long, value_enum)]
+        optimizer: Option<Optimizer>,
+        /// Random seed for reproducibility
+        #[arg(long)]
+        seed: Option<u64>,
+        /// Dataset repetitions per epoch
+        #[arg(long)]
+        repeats: Option<u32>,
+        /// Caption dropout rate (0.0-1.0, higher = learn style over content)
+        #[arg(long)]
+        caption_dropout: Option<f64>,
         /// Load a full TrainJobSpec YAML (escape hatch)
         #[arg(long)]
         config: Option<String>,
@@ -321,6 +378,14 @@ pub async fn run(cli: Cli) -> Result<()> {
             lora_type,
             preset,
             steps,
+            rank,
+            lr,
+            batch_size,
+            resolution,
+            optimizer,
+            seed,
+            repeats,
+            caption_dropout,
             config,
             dry_run,
             cloud,
@@ -339,7 +404,17 @@ pub async fn run(cli: Cli) -> Result<()> {
                     trigger.as_deref(),
                     lora_type,
                     preset,
-                    steps,
+                    train::TrainOverrides {
+                        steps,
+                        rank,
+                        lr,
+                        batch_size,
+                        resolution,
+                        optimizer,
+                        seed,
+                        repeats,
+                        caption_dropout,
+                    },
                     config.as_deref(),
                     dry_run,
                     cloud,

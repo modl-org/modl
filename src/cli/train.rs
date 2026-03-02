@@ -12,6 +12,19 @@ use crate::core::gpu;
 use crate::core::job::*;
 use crate::core::presets::{self, DatasetStats, GpuContext};
 
+/// CLI overrides that take precedence over preset-resolved values.
+pub struct TrainOverrides {
+    pub steps: Option<u32>,
+    pub rank: Option<u32>,
+    pub lr: Option<f64>,
+    pub batch_size: Option<u32>,
+    pub resolution: Option<u32>,
+    pub optimizer: Option<Optimizer>,
+    pub seed: Option<u64>,
+    pub repeats: Option<u32>,
+    pub caption_dropout: Option<f64>,
+}
+
 /// Run the train command. Arguments are all optional; missing ones trigger
 /// interactive prompts (except when --config is given).
 #[allow(clippy::too_many_arguments)]
@@ -22,7 +35,7 @@ pub async fn run(
     trigger: Option<&str>,
     lora_type_arg: Option<LoraType>,
     preset_arg: Option<Preset>,
-    steps: Option<u32>,
+    overrides: TrainOverrides,
     config: Option<&str>,
     dry_run: bool,
     cloud: bool,
@@ -213,9 +226,35 @@ pub async fn run(
         &trigger_word,
     );
 
-    // Override steps if explicitly provided
-    if let Some(s) = steps {
+    // -----------------------------------------------------------------
+    // Apply CLI overrides (take precedence over preset values)
+    // -----------------------------------------------------------------
+    if let Some(s) = overrides.steps {
         params.steps = s;
+    }
+    if let Some(r) = overrides.rank {
+        params.rank = r;
+    }
+    if let Some(lr) = overrides.lr {
+        params.learning_rate = lr;
+    }
+    if let Some(bs) = overrides.batch_size {
+        params.batch_size = bs; // 0 = let adapter decide per lora_type
+    }
+    if let Some(res) = overrides.resolution {
+        params.resolution = res;
+    }
+    if let Some(opt) = overrides.optimizer {
+        params.optimizer = opt;
+    }
+    if let Some(seed) = overrides.seed {
+        params.seed = Some(seed);
+    }
+    if let Some(rep) = overrides.repeats {
+        params.num_repeats = rep; // 0 = let adapter decide per lora_type
+    }
+    if let Some(cd) = overrides.caption_dropout {
+        params.caption_dropout_rate = cd; // -1.0 = let adapter decide
     }
 
     // -------------------------------------------------------------------

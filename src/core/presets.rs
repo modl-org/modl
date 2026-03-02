@@ -1,4 +1,4 @@
-use crate::core::job::{LoraType, Preset, TrainingParams};
+use crate::core::job::{LoraType, Optimizer, Preset, TrainingParams};
 
 /// Dataset statistics needed for preset resolution
 #[derive(Debug, Clone)]
@@ -106,10 +106,13 @@ pub fn resolve_params(
         steps,
         rank,
         learning_rate,
-        optimizer: "adamw8bit".to_string(),
+        optimizer: Optimizer::Adamw8bit,
         resolution,
         seed: None,
         quantize,
+        batch_size: 0,              // 0 = let adapter choose per lora_type
+        num_repeats: 0,             // 0 = let adapter choose per lora_type
+        caption_dropout_rate: -1.0, // negative = let adapter choose
     }
 }
 
@@ -334,7 +337,7 @@ mod tests {
             "flux-schnell",
             "OHWX",
         );
-        assert_eq!(p.optimizer, "adamw8bit");
+        assert_eq!(p.optimizer, Optimizer::Adamw8bit);
     }
 
     #[test]

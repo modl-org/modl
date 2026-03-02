@@ -89,8 +89,13 @@ def _build_train_block(family: str, params: dict, lora_type: str) -> dict:
     steps = params.get("steps", 2000)
     is_style = lora_type == "style"
 
+    # batch_size: 0 means "let adapter decide" (sentinel from Rust)
+    bs = params.get("batch_size", 0)
+    if bs <= 0:
+        bs = 2 if is_style else 1
+
     train = {
-        "batch_size": 2 if is_style else 1,
+        "batch_size": bs,
         "steps": steps,
         "gradient_accumulation_steps": 1,
         "train_unet": True,
@@ -230,9 +235,15 @@ def spec_to_aitoolkit_config(spec: dict) -> dict:
         "linear_alpha": rank,
     }
 
-    # Style: more repeats + higher caption dropout to learn style over content
-    num_repeats = 10 if is_style else 1
-    caption_dropout = 0.3 if is_style else 0.05
+    # Style defaults: more repeats + higher caption dropout to learn style over content.
+    # A value of 0 (num_repeats) or <0 (caption_dropout) means "use adapter default".
+    num_repeats = params.get("num_repeats", 0)
+    if num_repeats <= 0:
+        num_repeats = 10 if is_style else 1
+
+    caption_dropout = params.get("caption_dropout_rate", -1.0)
+    if caption_dropout < 0:
+        caption_dropout = 0.3 if is_style else 0.05
 
     config = {
         "job": "extension",
