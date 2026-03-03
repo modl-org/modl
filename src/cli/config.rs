@@ -8,13 +8,13 @@ use crate::core::symlink;
 
 pub async fn run(key: Option<&str>, value: Option<&str>) -> Result<()> {
     match (key, value) {
-        // mods config — show current config
+        // modl config — show current config
         (None, _) => show_config(),
 
-        // mods config set <key> <value>
+        // modl config set <key> <value>
         (Some(key), Some(value)) => set_config(key, value),
 
-        // mods config <key> — show single value
+        // modl config <key> — show single value
         (Some(key), None) => show_key(key),
     }
 }

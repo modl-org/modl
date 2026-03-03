@@ -1,24 +1,24 @@
-# CLAUDE.md — Mods: Model Manager
+# CLAUDE.md — Modl: Model Manager
 
-## What is Mods?
+## What is Modl?
 
-Mods is a CLI model manager for the AI image generation ecosystem. It handles downloading, dependency resolution, variant selection, and folder placement for models, LoRAs, VAEs, text encoders, ControlNets, and other assets used by tools like ComfyUI, A1111, and InvokeAI.
+Modl is a CLI model manager for the AI image generation ecosystem. It handles downloading, dependency resolution, variant selection, and folder placement for models, LoRAs, VAEs, text encoders, ControlNets, and other assets used by tools like ComfyUI, A1111, and InvokeAI.
 
-Think of it as **npm/Homebrew for image gen models**. `mods install flux-dev` downloads the model, its required VAE, its text encoders — everything — to the right folders, with verified hashes and compatibility checking.
+Think of it as **npm/Homebrew for image gen models**. `modl install flux-dev` downloads the model, its required VAE, its text encoders — everything — to the right folders, with verified hashes and compatibility checking.
 
 ## Project Vision
 
-Mods is the foundational piece of a larger **modshq** platform — a next-generation alternative to ComfyUI and similar tools. The full vision:
+Modl is the foundational piece of a larger **modl** platform — a next-generation alternative to ComfyUI and similar tools. The full vision:
 
-1. **mods** (this repo) — CLI model manager. Independently useful, well-crafted, and complete on its own.
-2. **mods-registry** — Community-contributed model manifests (separate repo).
+1. **modl** (this repo) — CLI model manager. Independently useful, well-crafted, and complete on its own.
+2. **modl-registry** — Community-contributed model manifests (separate repo).
 3. **Pipelines (future)** — LLM-first pipeline authoring via natural language instead of node graphs. Text in, pipeline out.
 4. **Deploy (future)** — One-click deployment to Modal.com, Replicate, RunPod, and others.
 5. **AI UX (future)** — LLM with tools/context to assist with parameter tuning, workflow sharing, and end-to-end generation.
 
 The key differentiator vs ComfyUI: **LLM-native, text-first UX** instead of node-based visual programming. Better params input, easier sharing, easier deployment. But **this repo is strictly the model manager**. It must stand on its own before anything else gets built.
 
-**GitHub org:** [github.com/modshq](https://github.com/modshq)
+**GitHub org:** [github.com/modl](https://github.com/modl)
 
 ## Tech Stack
 
@@ -34,7 +34,7 @@ The key differentiator vs ComfyUI: **LLM-native, text-first UX** instead of node
 
 ### Why Rust
 
-Mods downloads and manages files. It does NOT do ML inference. No PyTorch, no CUDA, no Python runtime needed. Rust gives us:
+Modl downloads and manages files. It does NOT do ML inference. No PyTorch, no CUDA, no Python runtime needed. Rust gives us:
 - Single static binary (~10-15MB) — no runtime dependencies for users
 - Distribution via `brew install`, `cargo install`, curl one-liner, or direct download
 - Fast SHA256 verification on 24GB model files (seconds, not minutes)
@@ -44,21 +44,21 @@ Mods downloads and manages files. It does NOT do ML inference. No PyTorch, no CU
 
 ```
 ┌───────────────────┐
-│  Mods Registry    │  ← Git repo of YAML manifests (separate repo)
+│  Modl Registry    │  ← Git repo of YAML manifests (separate repo)
 │  (GitHub repo)    │    Community contributes via PRs
 └────────┬──────────┘
          │
-  mods update (fetches compiled index.json)
+  modl update (fetches compiled index.json)
          │
 ┌────────┴──────────┐
-│   Mods CLI        │  ← This repo. Single Rust binary.
+│   Modl CLI        │  ← This repo. Single Rust binary.
 │   + Local DB      │    SQLite for installed state
 └────┬─────────┬────┘
      │         │
   downloads    │  symlinks
      │         │
 ┌────┴─────┐  ┌┴──────────┐
-│ ~/mods/  │  │ ComfyUI/  │
+│ ~/modl/  │  │ ComfyUI/  │
 │ store/   │──│ A1111/    │
 │ (content │  │ Invoke/   │
 │ addressed│  │ (linked)  │
@@ -67,26 +67,26 @@ Mods downloads and manages files. It does NOT do ML inference. No PyTorch, no CU
 
 ### Two Repos
 
-1. **mods** (`modshq/mods`) — The CLI tool. Rust. This repo.
-2. **mods-registry** (`modshq/mods-registry`) — YAML manifest files + CI that compiles `index.json`. Community contributes manifests here.
+1. **modl** (`modl/modl`) — The CLI tool. Rust. This repo.
+2. **modl-registry** (`modl/modl-registry`) — YAML manifest files + CI that compiles `index.json`. Community contributes manifests here.
 
 ## Key Concepts
 
 ### Content-Addressed Storage
 
-Models are stored by SHA256 hash in `~/mods/store/`. Symlinks with human-readable names point into the store. Benefits:
+Models are stored by SHA256 hash in `~/modl/store/`. Symlinks with human-readable names point into the store. Benefits:
 - Same model referenced by multiple manifests = one file on disk
 - Hash verification is built-in (corrupted downloads caught automatically)
-- `mods gc` can safely identify and remove unreferenced files
+- `modl gc` can safely identify and remove unreferenced files
 
 ### Configurable Folder Layout
 
-Different tools expect models in different places. Mods supports multiple layouts:
+Different tools expect models in different places. Modl supports multiple layouts:
 
 ```yaml
-# ~/.mods/config.yaml
+# ~/.modl/config.yaml
 storage:
-  root: ~/mods           # Where mods keeps its store
+  root: ~/modl           # Where modl keeps its store
 
 targets:
   - path: ~/ComfyUI
@@ -105,7 +105,7 @@ Layouts define where each asset type goes for each tool:
 - **InvokeAI:** Uses its own model management but we can integrate
 - **Custom:** User defines arbitrary paths per asset type
 
-`mods init` auto-detects installed tools and configures this.
+`modl init` auto-detects installed tools and configures this.
 
 ### Dependency Resolution
 
@@ -122,7 +122,7 @@ requires:
     type: text_encoder
 ```
 
-`mods install flux-dev` installs all 4 items. The resolver handles:
+`modl install flux-dev` installs all 4 items. The resolver handles:
 - Transitive dependencies
 - Already-installed items (skip)
 - Variant matching (if user requests fp8, also get fp8 text encoders if available)
@@ -130,7 +130,7 @@ requires:
 
 ### Variant Selection
 
-Models come in variants (fp16, fp8, GGUF quantizations). Mods auto-selects based on detected GPU VRAM:
+Models come in variants (fp16, fp8, GGUF quantizations). Modl auto-selects based on detected GPU VRAM:
 
 | VRAM | flux-dev variant | Notes |
 |------|-----------------|-------|
@@ -139,15 +139,15 @@ Models come in variants (fp16, fp8, GGUF quantizations). Mods auto-selects based
 | 8-11GB | gguf-q4 (6.8GB) | Quantized, needs GGUF loader |
 | <8GB | gguf-q2 (4.2GB) | Lower quality, functional |
 
-User can always override: `mods install flux-dev --variant fp8`
+User can always override: `modl install flux-dev --variant fp8`
 
 ### Gated Models (Authentication)
 
-Models like Flux Dev require accepting terms on HuggingFace. Mods handles this:
+Models like Flux Dev require accepting terms on HuggingFace. Modl handles this:
 
 1. Manifest declares `auth.provider: huggingface` and `auth.gated: true`
 2. On install, CLI detects gating and guides user to accept terms + provide token
-3. Token stored in `~/.mods/auth.yaml`
+3. Token stored in `~/.modl/auth.yaml`
 4. Subsequent downloads use the token automatically
 
 Supports: HuggingFace (`hf_...` tokens), Civitai (API keys).
@@ -262,15 +262,15 @@ added: 2025-01-10
 
 ## CLI Commands
 
-### mods init
+### modl init
 Interactive first-run setup:
 - Auto-detect ComfyUI / A1111 / Invoke installations
 - Ask user which to target (can target multiple)
 - Choose symlink mode (recommended) or direct mode
 - Scan existing model files, match by hash to registry entries
-- Generate `~/.mods/config.yaml`
+- Generate `~/.modl/config.yaml`
 
-### mods install <id> [--variant <v>] [--dry-run]
+### modl install <id> [--variant <v>] [--dry-run]
 - Resolve dependencies (full install tree)
 - Auto-select variant based on GPU VRAM (unless --variant specified)
 - Check auth requirements, guide user if needed
@@ -281,71 +281,71 @@ Interactive first-run setup:
 - Update local SQLite database
 - `--dry-run` shows what would be installed without doing it
 
-### mods uninstall <id>
+### modl uninstall <id>
 - Check if other installed items depend on this
 - Warn user if so, require --force to proceed
 - Remove symlinks
 - Mark as uninstalled in DB
-- Actual store file removed on next `mods gc` (safe)
+- Actual store file removed on next `modl gc` (safe)
 
-### mods list [--type <type>]
+### modl list [--type <type>]
 - Table output: Name, Type, Variant, Size, Location
 - Filter by type: checkpoint, lora, vae, text_encoder, controlnet, upscaler, embedding, ipadapter
 - Show total disk usage at bottom
 
-### mods info <id>
+### modl info <id>
 - Full details: all variants, VRAM requirements, dependencies, description, tags
 - If installed: show location, installed variant, disk usage
 - If not installed: show download sizes, auth requirements
 
-### mods search <query> [--type <t>] [--for <base_model>] [--tag <tag>] [--min-rating <r>]
+### modl search <query> [--type <t>] [--for <base_model>] [--tag <tag>] [--min-rating <r>]
 - Search the registry index
 - Filterable by type, compatible base model, tag, minimum rating
 - Results: name, type, rating, downloads, size
 
-### mods space
+### modl space
 - Tree view of disk usage by type and by model
 - Show total store size
 - Suggest cleanup candidates (old versions, unused items)
 
-### mods doctor
+### modl doctor
 - Check for broken symlinks
 - Verify hashes of installed files (detect corruption)
 - Check LoRA/base model compatibility
 - Check for missing dependencies
 - Report any issues with suggested fixes
 
-### mods gc
+### modl gc
 - Remove files in store not referenced by any installed entry
 - Show space recovered
 - Require confirmation
 
-### mods link --comfyui <path> | --a1111 <path>
+### modl link --comfyui <path> | --a1111 <path>
 - Scan the tool's model folders
 - Hash each file, match against registry
-- Register matched files in mods' database (no copy/move)
+- Register matched files in modl' database (no copy/move)
 - Set up symlink configuration for future installs
 
-### mods auth <provider>
+### modl auth <provider>
 - Interactive: prompt for token/key
-- Store in `~/.mods/auth.yaml`
+- Store in `~/.modl/auth.yaml`
 - Verify token works (test API call)
 - Providers: huggingface, civitai
 
-### mods update
+### modl update
 - Fetch latest registry index.json
 - Show if any installed items have newer versions available
-- Does NOT auto-upgrade (user runs `mods upgrade` for that)
+- Does NOT auto-upgrade (user runs `modl upgrade` for that)
 
-### mods export
-- Generate `mods.lock` file listing all installed items with exact versions and hashes
+### modl export
+- Generate `modl.lock` file listing all installed items with exact versions and hashes
 - Shareable — anyone can reproduce the environment
 
-### mods import <mods.lock>
+### modl import <modl.lock>
 - Install everything from a lock file
 - Respects exact variants and versions specified
 
-### mods popular [type] [--for <base_model>] [--period <day|week|month>]
+### modl popular [type] [--for <base_model>] [--period <day|week|month>]
 - Show trending items from registry
 - Useful for discovery
 
@@ -387,7 +387,7 @@ Interactive first-run setup:
 ## Registry (Separate Repo: forge-registry)
 
 ```
-mods-registry/
+modl-registry/
   manifests/
     checkpoints/
       flux-dev.yaml
@@ -417,7 +417,7 @@ mods-registry/
 ### CI on the registry repo:
 - On every PR: validate manifest schema, check URLs are accessible (optional, can be slow)
 - On merge to main: regenerate index.json, publish as GitHub Release asset
-- The CLI fetches `index.json` from the latest release on `mods update`
+- The CLI fetches `index.json` from the latest release on `modl update`
 
 ### Initial catalog to create manually:
 **Checkpoints:** flux-dev, flux-schnell, sdxl-base-1.0, sd-3.5-large, sd-3.5-medium, sd-1.5, playground-v2.5
@@ -432,11 +432,11 @@ mods-registry/
 
 ## Config Files
 
-### ~/.mods/config.yaml
+### ~/.modl/config.yaml
 ```yaml
-# Created by `mods init`, editable by user
+# Created by `modl init`, editable by user
 storage:
-  root: ~/mods
+  root: ~/modl
 
 targets:
   - path: ~/ComfyUI
@@ -449,21 +449,21 @@ targets:
 #   vram_mb: 24576
 ```
 
-### ~/.mods/auth.yaml
+### ~/.modl/auth.yaml
 ```yaml
-# Created by `mods auth`
+# Created by `modl auth`
 huggingface:
   token: "hf_..."
 civitai:
   api_key: "..."
 ```
 
-### mods.lock
+### modl.lock
 ```yaml
-# Generated by `mods export`
+# Generated by `modl export`
 # Machine-readable, reproducible environment specification
 generated: 2026-02-22T14:30:00Z
-mods_version: 0.1.0
+modl_version: 0.1.0
 
 items:
   - id: flux-dev
@@ -494,8 +494,8 @@ items:
 - Show speed, ETA, and total progress for multi-file installs
 
 ### Symlink Strategy
-- Mods store: `~/mods/store/<type>/<hash>/<filename>`
-- Symlinks: `~/ComfyUI/models/checkpoints/flux1-dev.safetensors` → `~/mods/store/checkpoints/<hash>/flux1-dev.safetensors`
+- Modl store: `~/modl/store/<type>/<hash>/<filename>`
+- Symlinks: `~/ComfyUI/models/checkpoints/flux1-dev.safetensors` → `~/modl/store/checkpoints/<hash>/flux1-dev.safetensors`
 - If the target already has a real file (not symlink) with matching hash, register it but don't replace it
 - Cross-device symlinks may not work — detect and warn, suggest same-device storage
 
@@ -506,7 +506,13 @@ items:
 - Cache GPU info in config after first detection
 
 ### First Run Experience
-If no `~/.mods/config.yaml` exists, `mods install` (or any command) should suggest running `mods init` first, but still work with sensible defaults (store in `~/mods/`, no symlinks).
+If no `~/.modl/config.yaml` exists, `modl install` (or any command) should suggest running `modl init` first, but still work with sensible defaults (store in `~/modl/`, no symlinks).
+
+### Port killing (SSH safety)
+When killing processes on a port (e.g. preview server restart), **always** use `lsof -sTCP:LISTEN` to match only listeners. Plain `lsof -ti :PORT` also returns PIDs of processes with client connections to that port — including VS Code Remote SSH port-forwarding. Killing those drops the SSH session. See `kill_existing_on_port()` in `src/ui/server.rs`.
+
+### Training runs via SSH
+`modl train` runs the worker as a direct child process. If the SSH session drops, SIGHUP cascades and kills training. Users should run long training jobs inside `tmux` or `screen`. A future improvement would be to daemonize the worker, but that requires the worker to write events directly to the DB instead of stdout.
 
 ## Non-Goals (for now)
 - Custom node management (ComfyUI Manager's domain)
@@ -517,4 +523,4 @@ If no `~/.mods/config.yaml` exists, `mods install` (or any command) should sugge
 - Model training
 - Image generation / inference
 
-These are future layers in the larger **modshq** platform. This repo is the model manager only.
+These are future layers in the larger **modl** platform. This repo is the model manager only.

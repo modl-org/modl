@@ -4,10 +4,12 @@ use console::style;
 use indicatif::HumanBytes;
 
 use crate::core::db::Database;
+use crate::core::manifest::AssetType;
 
-pub async fn run(type_filter: Option<&str>) -> Result<()> {
+pub async fn run(type_filter: Option<AssetType>) -> Result<()> {
     let db = Database::open()?;
-    let models = db.list_installed(type_filter)?;
+    let filter_str = type_filter.as_ref().map(|t| t.to_string());
+    let models = db.list_installed(filter_str.as_deref())?;
 
     if models.is_empty() {
         if let Some(t) = type_filter {
@@ -16,7 +18,7 @@ pub async fn run(type_filter: Option<&str>) -> Result<()> {
             println!("No models installed yet.");
             println!(
                 "  Run {} to get started.",
-                style("mods install flux-dev").cyan()
+                style("modl install flux-dev").cyan()
             );
         }
         return Ok(());

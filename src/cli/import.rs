@@ -7,7 +7,7 @@ struct LockFile {
     #[allow(dead_code)]
     generated: Option<String>,
     #[allow(dead_code)]
-    mods_version: Option<String>,
+    modl_version: Option<String>,
     items: Vec<LockItem>,
 }
 

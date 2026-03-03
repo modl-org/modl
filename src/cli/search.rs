@@ -8,7 +8,7 @@ use crate::core::registry::RegistryIndex;
 
 pub async fn run(
     query: &str,
-    type_filter: Option<&str>,
+    type_filter: Option<AssetType>,
     for_model: Option<&str>,
     tag: Option<&str>,
     min_rating: Option<f32>,
@@ -18,15 +18,8 @@ pub async fn run(
     let mut results = index.search(query);
 
     // Apply filters
-    if let Some(t) = type_filter {
-        let parsed_type = parse_asset_type(t);
-        results.retain(|m| {
-            if let Some(ref at) = parsed_type {
-                m.asset_type == *at
-            } else {
-                m.asset_type.to_string() == t
-            }
-        });
+    if let Some(ref t) = type_filter {
+        results.retain(|m| m.asset_type == *t);
     }
 
     if let Some(base) = for_model {
@@ -108,18 +101,4 @@ pub async fn run(
     println!("\n  {} results", style(results.len()).bold());
 
     Ok(())
-}
-
-fn parse_asset_type(s: &str) -> Option<AssetType> {
-    match s.to_lowercase().as_str() {
-        "checkpoint" => Some(AssetType::Checkpoint),
-        "lora" => Some(AssetType::Lora),
-        "vae" => Some(AssetType::Vae),
-        "text_encoder" | "textencoder" => Some(AssetType::TextEncoder),
-        "controlnet" => Some(AssetType::Controlnet),
-        "upscaler" => Some(AssetType::Upscaler),
-        "embedding" => Some(AssetType::Embedding),
-        "ipadapter" => Some(AssetType::Ipadapter),
-        _ => None,
-    }
 }

@@ -57,6 +57,36 @@ pub struct Manifest {
     #[serde(default)]
     pub clip_vision_model: Option<String>,
 
+    // Cloud availability
+    #[serde(default)]
+    pub cloud_available: bool,
+    #[serde(default)]
+    pub cloud_training: Option<CloudTrainingInfo>,
+    #[serde(default)]
+    pub cloud_inference: Option<CloudInferenceInfo>,
+
+    // Category (for LoRAs and recipes)
+    #[serde(default)]
+    pub category: Option<String>,
+
+    // Community LoRA training details
+    #[serde(default)]
+    pub training_details: Option<TrainingDetails>,
+    #[serde(default)]
+    pub sample_images: Vec<SampleImage>,
+
+    // Recipe config (for recipe type)
+    #[serde(default)]
+    pub recipe: Option<RecipeConfig>,
+
+    // Vision-language: HuggingFace repo ID (multi-file transformer checkpoints)
+    #[serde(default)]
+    pub huggingface_repo: Option<String>,
+
+    // Publisher (distinct from author, for community contributions)
+    #[serde(default)]
+    pub publisher: Option<String>,
+
     #[serde(default)]
     pub preview_images: Vec<String>,
     #[serde(default)]
@@ -71,19 +101,24 @@ pub struct Manifest {
     pub updated: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum AssetType {
     Checkpoint,
+    #[value(name = "diffusion_model")]
     DiffusionModel,
     Lora,
     Vae,
+    #[value(name = "text_encoder", alias = "textencoder")]
     TextEncoder,
     Controlnet,
     Upscaler,
     Embedding,
     Ipadapter,
     Segmentation,
+    #[value(name = "vision_language")]
+    VisionLanguage,
+    Recipe,
 }
 
 impl std::fmt::Display for AssetType {
@@ -99,6 +134,8 @@ impl std::fmt::Display for AssetType {
             Self::Embedding => write!(f, "embedding"),
             Self::Ipadapter => write!(f, "ipadapter"),
             Self::Segmentation => write!(f, "segmentation"),
+            Self::VisionLanguage => write!(f, "vision_language"),
+            Self::Recipe => write!(f, "recipe"),
         }
     }
 }
@@ -118,6 +155,8 @@ impl std::str::FromStr for AssetType {
             "embedding" => Ok(Self::Embedding),
             "ipadapter" => Ok(Self::Ipadapter),
             "segmentation" => Ok(Self::Segmentation),
+            "vision_language" => Ok(Self::VisionLanguage),
+            "recipe" => Ok(Self::Recipe),
             _ => anyhow::bail!("Unknown asset type: {}", s),
         }
     }
@@ -185,6 +224,104 @@ pub struct ModelDefaults {
     pub sampler: Option<String>,
     #[serde(default)]
     pub scheduler: Option<String>,
+    #[serde(default)]
+    pub resolution: Option<String>,
+    #[serde(default)]
+    pub clip_skip: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloudTrainingInfo {
+    #[serde(default)]
+    pub gpu: Option<String>,
+    #[serde(default)]
+    pub estimated_minutes: Option<u32>,
+    #[serde(default)]
+    pub supported_ranks: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloudInferenceInfo {
+    #[serde(default)]
+    pub gpu: Option<String>,
+    #[serde(default)]
+    pub supports_lora: bool,
+    #[serde(default)]
+    pub cold_start_seconds: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrainingDetails {
+    #[serde(default)]
+    pub steps: Option<u32>,
+    #[serde(default)]
+    pub rank: Option<u32>,
+    #[serde(default)]
+    pub learning_rate: Option<f64>,
+    #[serde(default)]
+    pub optimizer: Option<String>,
+    #[serde(default)]
+    pub dataset_size: Option<u32>,
+    #[serde(default)]
+    pub training_time_minutes: Option<u32>,
+    #[serde(default)]
+    pub cloud_trained: bool,
+    #[serde(default)]
+    pub recipe_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SampleImage {
+    pub url: String,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub negative_prompt: Option<String>,
+    #[serde(default)]
+    pub seed: Option<u64>,
+    #[serde(default)]
+    pub steps: Option<u32>,
+    #[serde(default)]
+    pub cfg: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecipeTraining {
+    #[serde(default)]
+    pub steps: Option<u32>,
+    #[serde(default)]
+    pub learning_rate: Option<f64>,
+    #[serde(default)]
+    pub rank: Option<u32>,
+    #[serde(default)]
+    pub optimizer: Option<String>,
+    #[serde(default)]
+    pub batch_size: Option<u32>,
+    #[serde(default)]
+    pub resolution: Option<String>,
+    #[serde(default)]
+    pub dataset_min_images: Option<u32>,
+    #[serde(default)]
+    pub dataset_max_images: Option<u32>,
+    #[serde(default)]
+    pub caption_strategy: Option<String>,
+    #[serde(default)]
+    pub trigger_word_template: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecipeConfig {
+    pub base_model: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub training: Option<RecipeTraining>,
+    #[serde(default)]
+    pub generation: Option<ModelDefaults>,
+    #[serde(default)]
+    pub recommended_lora_weight: Option<f32>,
+    #[serde(default)]
+    pub tips: Vec<String>,
 }
 
 #[cfg(test)]

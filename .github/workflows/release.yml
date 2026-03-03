@@ -73,7 +73,7 @@ jobs:
         if: matrix.archive == 'tar.gz'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../mods-${{ github.ref_name }}-${{ matrix.target }}.tar.gz mods
+          tar czf ../../../modl-${{ github.ref_name }}-${{ matrix.target }}.tar.gz modl
           cd ../../..
 
       # Package — Windows
@@ -81,13 +81,13 @@ jobs:
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          Compress-Archive -Path "target/${{ matrix.target }}/release/mods.exe" -DestinationPath "mods-${{ github.ref_name }}-${{ matrix.target }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/modl.exe" -DestinationPath "modl-${{ github.ref_name }}-${{ matrix.target }}.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mods-${{ matrix.target }}
-          path: mods-${{ github.ref_name }}-${{ matrix.target }}.*
+          name: modl-${{ matrix.target }}
+          path: modl-${{ github.ref_name }}-${{ matrix.target }}.*
 
   release:
     name: Create Release
@@ -105,7 +105,7 @@ jobs:
       - name: Generate checksums
         run: |
           cd artifacts
-          sha256sum mods-* > SHA256SUMS
+          sha256sum modl-* > SHA256SUMS
           cat SHA256SUMS
 
       - name: Create release
@@ -113,7 +113,7 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            artifacts/mods-*
+            artifacts/modl-*
             artifacts/SHA256SUMS
 
   trigger-site-rebuild:

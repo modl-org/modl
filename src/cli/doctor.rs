@@ -9,7 +9,7 @@ use crate::core::symlink;
 pub async fn run(verify_hashes: bool) -> Result<()> {
     println!(
         "{}",
-        style("mods doctor — running diagnostics").bold().cyan()
+        style("modl doctor — running diagnostics").bold().cyan()
     );
     println!();
 
@@ -63,7 +63,7 @@ pub async fn run(verify_hashes: bool) -> Result<()> {
             );
             println!(
                 "    Fix: {}",
-                style(format!("mods uninstall {} && mods install {}", m.id, m.id)).cyan()
+                style(format!("modl uninstall {} && modl install {}", m.id, m.id)).cyan()
             );
             issues += 1;
             store_ok = false;
@@ -93,7 +93,7 @@ pub async fn run(verify_hashes: bool) -> Result<()> {
                         );
                         println!(
                             "    Fix: {}",
-                            style(format!("mods uninstall {} && mods install {}", m.id, m.id))
+                            style(format!("modl uninstall {} && modl install {}", m.id, m.id))
                                 .cyan()
                         );
                         issues += 1;

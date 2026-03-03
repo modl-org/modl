@@ -1,14 +1,62 @@
 use anyhow::{Context, Result};
+use console::style;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// Main configuration for mods, stored at ~/.mods/config.yaml
+/// Migrate ~/.mods → ~/.modl if the old directory exists and the new one doesn't.
+/// Called automatically on Config::load() so every command benefits.
+pub fn migrate_legacy_dir() {
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let old = home.join(".mods");
+    let new = home.join(".modl");
+
+    if old.is_dir() && !new.exists() {
+        eprintln!(
+            "{} Migrating {} → {} …",
+            style("↗").cyan(),
+            style("~/.mods").dim(),
+            style("~/.modl").bold()
+        );
+        if let Err(e) = std::fs::rename(&old, &new) {
+            eprintln!(
+                "  {} Could not rename: {}. Copy manually or run:\n    mv ~/.mods ~/.modl",
+                style("⚠").yellow(),
+                e
+            );
+        } else {
+            eprintln!("  {} Done.", style("✓").green());
+        }
+    }
+}
+
+/// Main configuration for modl, stored at ~/.modl/config.yaml
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub storage: StorageConfig,
     #[serde(default)]
     pub targets: Vec<TargetConfig>,
     pub gpu: Option<GpuOverride>,
+    #[serde(default)]
+    pub cloud: Option<CloudConfig>,
+}
+
+/// Cloud provider credentials and default settings
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CloudConfig {
+    /// Default provider when --provider is omitted (modal, replicate, runpod)
+    #[serde(default)]
+    pub default_provider: Option<String>,
+    /// Modal token (MODAL_TOKEN_ID)
+    #[serde(default)]
+    pub modal_token: Option<String>,
+    /// Replicate API token
+    #[serde(default)]
+    pub replicate_token: Option<String>,
+    /// RunPod API key
+    #[serde(default)]
+    pub runpod_key: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -44,8 +92,9 @@ fn default_true() -> bool {
 }
 
 impl Config {
-    /// Load config from the default path (~/.mods/config.yaml)
+    /// Load config from the default path (~/.modl/config.yaml)
     pub fn load() -> Result<Self> {
+        migrate_legacy_dir();
         let path = Self::default_path();
         if path.exists() {
             let contents = std::fs::read_to_string(&path).context("Failed to read config file")?;
@@ -71,7 +120,7 @@ impl Config {
     pub fn default_path() -> PathBuf {
         dirs::home_dir()
             .expect("Could not determine home directory")
-            .join(".mods")
+            .join(".modl")
             .join("config.yaml")
     }
 
@@ -85,10 +134,11 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             storage: StorageConfig {
-                root: PathBuf::from("~/mods"),
+                root: PathBuf::from("~/modl"),
             },
             targets: vec![],
             gpu: None,
+            cloud: None,
         }
     }
 }
@@ -109,7 +159,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.storage.root, PathBuf::from("~/mods"));
+        assert_eq!(config.storage.root, PathBuf::from("~/modl"));
         assert!(config.targets.is_empty());
         assert!(config.gpu.is_none());
     }
@@ -118,7 +168,7 @@ mod tests {
     fn test_config_roundtrip() {
         let config = Config {
             storage: StorageConfig {
-                root: PathBuf::from("~/mods"),
+                root: PathBuf::from("~/modl"),
             },
             targets: vec![TargetConfig {
                 path: PathBuf::from("~/ComfyUI"),
@@ -126,6 +176,7 @@ mod tests {
                 symlink: true,
             }],
             gpu: None,
+            cloud: None,
         };
         let yaml = serde_yaml::to_string(&config).unwrap();
         let parsed: Config = serde_yaml::from_str(&yaml).unwrap();

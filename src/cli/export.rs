@@ -7,7 +7,7 @@ use crate::core::db::Database;
 #[derive(Serialize)]
 struct LockFile {
     generated: String,
-    mods_version: String,
+    modl_version: String,
     items: Vec<LockItem>,
 }
 
@@ -32,7 +32,7 @@ pub async fn run() -> Result<()> {
 
     let lock = LockFile {
         generated: chrono::Utc::now().to_rfc3339(),
-        mods_version: env!("CARGO_PKG_VERSION").to_string(),
+        modl_version: env!("CARGO_PKG_VERSION").to_string(),
         items: models
             .iter()
             .map(|m| LockItem {
@@ -45,13 +45,13 @@ pub async fn run() -> Result<()> {
     };
 
     let yaml = serde_yaml::to_string(&lock)?;
-    std::fs::write("mods.lock", &yaml)?;
+    std::fs::write("modl.lock", &yaml)?;
 
     println!(
         "{} Exported {} models to {}",
         style("✓").green(),
         style(lock.items.len()).bold(),
-        style("mods.lock").cyan()
+        style("modl.lock").cyan()
     );
 
     Ok(())

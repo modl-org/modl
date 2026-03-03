@@ -1,17 +1,17 @@
 [package]
-name = "mods"
+name = "modl"
 version = "0.1.3"
 edition = "2024"
 description = "CLI model manager for the AI image generation ecosystem"
 license = "MIT"
-repository = "https://github.com/modshq/mods"
-homepage = "https://github.com/modshq/mods"
+repository = "https://github.com/modl/modl"
+homepage = "https://github.com/modl/modl"
 readme = "README.md"
 keywords = ["ai", "models", "comfyui", "stable-diffusion", "flux"]
 categories = ["command-line-utilities"]
 
 [[bin]]
-name = "mods"
+name = "modl"
 path = "src/main.rs"
 
 [dependencies]
@@ -43,6 +43,7 @@ sha2 = "0.10"
 # Archive extraction (for self-update)
 flate2 = "1"
 tar = "0.4"
+zstd = "0.13"
 
 # GPU detection
 nvml-wrapper = "0.10"
@@ -53,6 +54,11 @@ dirs = "6"
 # Error handling
 anyhow = "1"
 thiserror = "2"
+
+# Web UI (training preview)
+axum = "0.8"
+tower-http = { version = "0.6", features = ["fs", "cors"] }
+open = "5"
 
 # Misc
 chrono = { version = "0.4", features = ["serde"] }

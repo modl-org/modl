@@ -19,7 +19,7 @@ pub fn create(link: &Path, target: &Path) -> Result<()> {
     } else if link.exists() {
         // Real file exists — don't overwrite
         anyhow::bail!(
-            "File already exists at {} (not a symlink). Use `mods link` to register it.",
+            "File already exists at {} (not a symlink). Use `modl link` to register it.",
             link.display()
         );
     }
@@ -51,7 +51,7 @@ pub fn create(link: &Path, target: &Path) -> Result<()> {
                     if hard_link_err.raw_os_error() == Some(17) {
                         anyhow::bail!(
                             "Cannot link files across different drives on Windows without Admin rights.\n\
-                             Your mods store and target folder must be on the same drive.\n\
+                             Your modl store and target folder must be on the same drive.\n\
                              Store: {}\nTarget: {}",
                             target.display(),
                             link.display()

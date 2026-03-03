@@ -57,7 +57,11 @@ pub async fn run(id: &str, variant: Option<&str>, dry_run: bool, force: bool) ->
 
     let mut total_download: u64 = 0;
     for item in &plan.items {
-        let effective_variant = item.variant_id.as_deref().or(variant);
+        let effective_variant = if item.manifest.id == id {
+            item.variant_id.as_deref().or(variant)
+        } else {
+            item.variant_id.as_deref()
+        };
         let (_file_name, size, variant_label) =
             get_file_info(&item.manifest, effective_variant, vram);
         let status = if item.already_installed {
@@ -112,7 +116,13 @@ pub async fn run(id: &str, variant: Option<&str>, dry_run: bool, force: bool) ->
 
     // Download each item
     for item in &items_to_install {
-        let effective_variant = item.variant_id.as_deref().or(variant);
+        // Only apply the user-specified --variant to the primary model, not to dependencies.
+        // Dependencies use their own variant_id set by the resolver, or auto-select by VRAM.
+        let effective_variant = if item.manifest.id == id {
+            item.variant_id.as_deref().or(variant)
+        } else {
+            item.variant_id.as_deref()
+        };
         let (file_name, size, selected_variant) =
             get_file_info(&item.manifest, effective_variant, vram);
         let url = get_download_url(&item.manifest, effective_variant, vram);
@@ -124,11 +134,21 @@ pub async fn run(id: &str, variant: Option<&str>, dry_run: bool, force: bool) ->
             .context("Failed to create store directory")?;
 
         // Get auth token if needed
+        // First check explicit auth in manifest, then fall back to HF token for
+        // any huggingface.co URL (some manifests like flux-vae don't declare auth
+        // but the CDN still requires a token).
         let auth_token = item
             .manifest
             .auth
             .as_ref()
-            .and_then(|a| auth_store.token_for(&a.provider));
+            .and_then(|a| auth_store.token_for(&a.provider))
+            .or_else(|| {
+                if url.contains("huggingface.co") {
+                    auth_store.token_for("huggingface")
+                } else {
+                    None
+                }
+            });
 
         if item.manifest.auth.as_ref().is_some_and(|a| a.gated) && auth_token.is_none() {
             let provider = &item.manifest.auth.as_ref().unwrap().provider;
@@ -140,13 +160,13 @@ pub async fn run(id: &str, variant: Option<&str>, dry_run: bool, force: bool) ->
             );
             println!(
                 "    Run: {}",
-                style(format!("mods auth {}", provider)).cyan()
+                style(format!("modl auth {}", provider)).cyan()
             );
             if let Some(ref terms) = item.manifest.auth.as_ref().unwrap().terms_url {
                 println!("    Accept terms at: {}", style(terms).underlined());
             }
             anyhow::bail!(
-                "Authentication required. Run `mods auth {}` first.",
+                "Authentication required. Run `modl auth {}` first.",
                 provider
             );
         }
@@ -212,7 +232,7 @@ pub async fn run(id: &str, variant: Option<&str>, dry_run: bool, force: bool) ->
                                 .unwrap_or("huggingface");
                             println!(
                                 "    Run: {}",
-                                style(format!("mods auth {}", provider)).cyan()
+                                style(format!("modl auth {}", provider)).cyan()
                             );
                             if let Some(ref auth) = item.manifest.auth
                                 && let Some(ref terms) = auth.terms_url
@@ -228,6 +248,21 @@ pub async fn run(id: &str, variant: Option<&str>, dry_run: bool, force: bool) ->
 
                 // Verify hash
                 if !Store::verify_hash(&store_path, &sha256)? {
+                    let actual_hash =
+                        Store::hash_file(&store_path).unwrap_or_else(|_| "unknown".to_string());
+                    let actual_size = std::fs::metadata(&store_path).map(|m| m.len()).unwrap_or(0);
+                    eprintln!(
+                        "  {} SHA256 mismatch for {}",
+                        style("✗").red(),
+                        item.manifest.name
+                    );
+                    eprintln!("    expected: {}", sha256);
+                    eprintln!("    actual:   {}", actual_hash);
+                    eprintln!(
+                        "    size:     {} (expected {})",
+                        HumanBytes(actual_size),
+                        HumanBytes(size)
+                    );
                     std::fs::remove_file(&store_path).ok();
                     anyhow::bail!(
                         "SHA256 mismatch for {}. File deleted. Try again.",

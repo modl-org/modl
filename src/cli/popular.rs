@@ -3,16 +3,17 @@ use comfy_table::{Cell, Color, Table, presets::UTF8_FULL_CONDENSED};
 use console::style;
 use indicatif::HumanBytes;
 
+use crate::core::manifest::AssetType;
 use crate::core::registry::RegistryIndex;
 
-pub async fn run(type_filter: Option<&str>, for_model: Option<&str>, _period: &str) -> Result<()> {
+pub async fn run(type_filter: Option<AssetType>, for_model: Option<&str>) -> Result<()> {
     let index = RegistryIndex::load_or_fetch().await?;
 
     let mut items: Vec<_> = index.items.iter().collect();
 
     // Apply filters
-    if let Some(t) = type_filter {
-        items.retain(|m| m.asset_type.to_string() == t);
+    if let Some(ref t) = type_filter {
+        items.retain(|m| m.asset_type == *t);
     }
     if let Some(base) = for_model {
         items.retain(|m| m.base_models.iter().any(|b| b == base));

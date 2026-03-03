@@ -1,8 +1,8 @@
-# Contributing to mods
+# Contributing to modl
 
 ## Adding Support for a New Tool
 
-Mods uses folder layout mappings to know where each tool expects its model files. Adding a new tool is a small, focused PR.
+Modl uses folder layout mappings to know where each tool expects its model files. Adding a new tool is a small, focused PR.
 
 ### What you need to add
 
@@ -44,13 +44,13 @@ pub fn asset_folder(tool_type: &ToolType, asset_type: &AssetType) -> PathBuf {
 }
 ```
 
-**4. Add a CLI flag** to `mods link` in `src/cli/mod.rs` and `src/cli/link.rs`:
+**4. Add a CLI flag** to `modl link` in `src/cli/mod.rs` and `src/cli/link.rs`:
 
 Add `--yourtool <path>` alongside the existing `--comfyui` and `--a1111` flags.
 
 **5. (Optional) Add auto-detection** in `src/compat/mod.rs` `detect_tools()`:
 
-If your tool has a predictable install location, you can add it to the auto-detection scan. This is nice to have but not required — explicit `mods link --yourtool /path` always works.
+If your tool has a predictable install location, you can add it to the auto-detection scan. This is nice to have but not required — explicit `modl link --yourtool /path` always works.
 
 ### How to verify
 
@@ -74,7 +74,7 @@ All three must pass. CI runs these on every PR across Linux, macOS, and Windows.
 
 ## Adding Models to the Registry
 
-Model manifests live in a separate repo: [mods-registry](https://github.com/modshq-org/mods-registry). See that repo's CONTRIBUTING.md for how to add models.
+Model manifests live in a separate repo: [modl-registry](https://github.com/modl-org/modl-registry). See that repo's CONTRIBUTING.md for how to add models.
 
 ## General Guidelines
 

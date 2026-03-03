@@ -4,7 +4,7 @@ use dialoguer::Confirm;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 
-const REPO: &str = "modshq-org/mods";
+const REPO: &str = "modl-org/modl";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(serde::Deserialize)]
@@ -28,7 +28,7 @@ pub async fn run() -> Result<()> {
     );
 
     let client = reqwest::Client::builder()
-        .user_agent("mods-cli")
+        .user_agent("modl-cli")
         .timeout(std::time::Duration::from_secs(15))
         .build()?;
 
@@ -56,7 +56,7 @@ pub async fn run() -> Result<()> {
     }
 
     let target = detect_target()?;
-    let asset_name = format!("mods-{}-{}.tar.gz", release.tag_name, target);
+    let asset_name = format!("modl-{}-{}.tar.gz", release.tag_name, target);
 
     let asset = release
         .assets
@@ -103,8 +103,8 @@ pub async fn run() -> Result<()> {
     // Download to the system temp directory so we never need elevated
     // permissions just to fetch the archive
     let tmp_dir = std::env::temp_dir();
-    let tmp_archive = tmp_dir.join("mods-upgrade.tar.gz");
-    let tmp_binary = tmp_dir.join("mods-upgrade-bin");
+    let tmp_archive = tmp_dir.join("modl-upgrade.tar.gz");
+    let tmp_binary = tmp_dir.join("modl-upgrade-bin");
 
     let pb = ProgressBar::new(asset.size);
     pb.set_style(
@@ -183,7 +183,7 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
-/// Extract the `mods` binary from a .tar.gz archive
+/// Extract the `modl` binary from a .tar.gz archive
 fn extract_binary(archive_path: &std::path::Path, dest: &std::path::Path) -> Result<()> {
     let file = std::fs::File::open(archive_path)?;
     let gz = flate2::read::GzDecoder::new(file);
@@ -197,7 +197,7 @@ fn extract_binary(archive_path: &std::path::Path, dest: &std::path::Path) -> Res
             .and_then(|n| n.to_str())
             .unwrap_or_default();
 
-        if name == "mods" || name == "mods.exe" {
+        if name == "modl" || name == "modl.exe" {
             let mut out = std::fs::File::create(dest)?;
             std::io::copy(&mut entry, &mut out)?;
 
@@ -212,7 +212,7 @@ fn extract_binary(archive_path: &std::path::Path, dest: &std::path::Path) -> Res
         }
     }
 
-    anyhow::bail!("Could not find mods binary inside the archive")
+    anyhow::bail!("Could not find modl binary inside the archive")
 }
 
 /// Replace the running binary atomically

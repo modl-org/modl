@@ -10,6 +10,16 @@ use super::manifest::Manifest;
 pub struct RegistryIndex {
     #[serde(default)]
     pub version: u32,
+    #[serde(default)]
+    pub generated_at: Option<String>,
+    #[serde(default)]
+    pub total_count: Option<u32>,
+    #[serde(default)]
+    pub type_counts: Option<std::collections::HashMap<String, u32>>,
+    #[serde(default)]
+    pub cloud_available_count: Option<u32>,
+    #[serde(default)]
+    pub schema_url: Option<String>,
     pub items: Vec<Manifest>,
 }
 
@@ -18,7 +28,7 @@ impl RegistryIndex {
     pub fn load() -> Result<Self> {
         let path = Self::local_path();
         if !path.exists() {
-            anyhow::bail!("Registry index not found. Run `mods update` to fetch it.");
+            anyhow::bail!("Registry index not found. Run `modl update` to fetch it.");
         }
         let contents = std::fs::read_to_string(&path).context("Failed to read registry index")?;
         let index: RegistryIndex =
@@ -41,7 +51,7 @@ impl RegistryIndex {
     pub fn local_path() -> PathBuf {
         dirs::home_dir()
             .expect("Could not determine home directory")
-            .join(".mods")
+            .join(".modl")
             .join("index.json")
     }
 
@@ -74,16 +84,16 @@ impl RegistryIndex {
 
     /// The URL to fetch the latest index from.
     ///
-    /// Uses registry.mods.sh (Cloudflare-cached) as primary,
-    /// with raw GitHub as fallback. Override via MODS_REGISTRY_URL env var.
+    /// Uses registry.modl.run (Cloudflare-cached) as primary,
+    /// with raw GitHub as fallback. Override via MODL_REGISTRY_URL env var.
     pub fn remote_url() -> String {
-        std::env::var("MODS_REGISTRY_URL")
-            .unwrap_or_else(|_| "https://registry.mods.sh/index.json".to_string())
+        std::env::var("MODL_REGISTRY_URL")
+            .unwrap_or_else(|_| "https://registry.modl.run/index.json".to_string())
     }
 
     /// Fallback URL if the primary registry is unreachable
     pub fn fallback_url() -> &'static str {
-        "https://raw.githubusercontent.com/modshq-org/mods-registry/main/index.json"
+        "https://raw.githubusercontent.com/modl-org/modl-registry/main/index.json"
     }
 
     /// Check if the local index is missing or older than `max_age`

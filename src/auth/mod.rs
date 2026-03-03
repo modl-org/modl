@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Auth credentials stored at ~/.mods/auth.yaml
+/// Auth credentials stored at ~/.modl/auth.yaml
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct AuthStore {
     #[serde(default)]
@@ -50,7 +50,7 @@ impl AuthStore {
     pub fn path() -> PathBuf {
         dirs::home_dir()
             .expect("Could not determine home directory")
-            .join(".mods")
+            .join(".modl")
             .join("auth.yaml")
     }
 

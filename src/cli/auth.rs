@@ -3,34 +3,29 @@ use console::style;
 use dialoguer::Password;
 
 use crate::auth::{AuthStore, CivitaiAuth, HuggingFaceAuth};
+use crate::cli::AuthProvider;
 
-pub async fn run(provider: &str) -> Result<()> {
+pub async fn run(provider: AuthProvider) -> Result<()> {
     match provider {
-        "huggingface" | "hf" => configure_huggingface().await,
-        "civitai" => configure_civitai().await,
-        _ => {
-            anyhow::bail!(
-                "Unknown provider '{}'. Supported: huggingface, civitai",
-                provider
-            );
-        }
+        AuthProvider::Huggingface => configure_huggingface().await,
+        AuthProvider::Civitai => configure_civitai().await,
     }
 }
 
 async fn configure_huggingface() -> Result<()> {
     println!("{} Configure HuggingFace authentication", style("→").cyan());
-    println!();
-    println!(
-        "  1. Go to {}",
-        style("https://huggingface.co/settings/tokens").underlined()
-    );
-    println!("  2. Create a token with 'Read' access");
-    println!("  3. For gated models (e.g., Flux Dev), accept terms on the model page first");
-    println!();
 
-    let token: String = Password::new()
-        .with_prompt("HuggingFace token (hf_...)")
-        .interact()?;
+    // Check for HF_TOKEN env var first (non-interactive / CI-friendly)
+    let token: String = if let Ok(env_token) = std::env::var("HF_TOKEN") {
+        if !env_token.is_empty() {
+            println!("  {} Found HF_TOKEN in environment", style("→").dim());
+            env_token
+        } else {
+            prompt_hf_token()?
+        }
+    } else {
+        prompt_hf_token()?
+    };
 
     if !token.starts_with("hf_") {
         println!(
@@ -58,7 +53,7 @@ async fn configure_huggingface() -> Result<()> {
                 style("!").yellow(),
                 e
             );
-            println!("  Saving anyway — you can re-run `mods auth huggingface` later.");
+            println!("  Saving anyway — you can re-run `modl auth huggingface` later.");
         }
     }
 
@@ -69,7 +64,7 @@ async fn configure_huggingface() -> Result<()> {
     println!(
         "{} HuggingFace auth saved to {}",
         style("✓").green(),
-        style("~/.mods/auth.yaml").dim()
+        style("~/.modl/auth.yaml").dim()
     );
 
     Ok(())
@@ -114,8 +109,24 @@ async fn configure_civitai() -> Result<()> {
     println!(
         "{} Civitai auth saved to {}",
         style("✓").green(),
-        style("~/.mods/auth.yaml").dim()
+        style("~/.modl/auth.yaml").dim()
     );
 
     Ok(())
+}
+
+fn prompt_hf_token() -> Result<String> {
+    println!();
+    println!(
+        "  1. Go to {}",
+        style("https://huggingface.co/settings/tokens").underlined()
+    );
+    println!("  2. Create a token with 'Read' access");
+    println!("  3. For gated models (e.g., Flux Dev), accept terms on the model page first");
+    println!();
+
+    let token: String = Password::new()
+        .with_prompt("HuggingFace token (hf_...)")
+        .interact()?;
+    Ok(token)
 }

@@ -10,7 +10,7 @@ use crate::core::gpu;
 pub async fn run() -> Result<()> {
     println!(
         "{}",
-        style("mods init — setting up your environment")
+        style("modl init — setting up your environment")
             .bold()
             .cyan()
     );
@@ -20,7 +20,7 @@ pub async fn run() -> Result<()> {
     let config_path = Config::default_path();
     if config_path.exists() {
         let overwrite = Confirm::new()
-            .with_prompt("Config already exists at ~/.mods/config.yaml. Overwrite?")
+            .with_prompt("Config already exists at ~/.modl/config.yaml. Overwrite?")
             .default(false)
             .interact()?;
         if !overwrite {
@@ -32,10 +32,10 @@ pub async fn run() -> Result<()> {
     // 1. Storage root
     let default_root = dirs::home_dir()
         .expect("Could not determine home directory")
-        .join("mods");
+        .join("modl");
     let root_display = default_root.display().to_string();
 
-    println!("{} Where should mods store model files?", style("→").cyan());
+    println!("{} Where should modl store model files?", style("→").cyan());
     println!("  Default: {}", style(&root_display).dim());
 
     let use_default = Confirm::new()
@@ -69,7 +69,7 @@ pub async fn run() -> Result<()> {
                 "  {} Windows Developer Mode is not enabled.",
                 style("⚠").yellow()
             );
-            println!("  Without it, mods will use hard links instead of symlinks.");
+            println!("  Without it, modl will use hard links instead of symlinks.");
             println!("  Hard links work fine, but require store and tools on the same drive.");
             println!();
             println!(
@@ -102,11 +102,11 @@ pub async fn run() -> Result<()> {
         println!("  Can't find your install? Add it manually with:");
         println!(
             "    {}",
-            style("mods link --comfyui /path/to/ComfyUI").cyan()
+            style("modl link --comfyui /path/to/ComfyUI").cyan()
         );
         println!(
             "    {}",
-            style("mods link --a1111 /path/to/stable-diffusion-webui").cyan()
+            style("modl link --a1111 /path/to/stable-diffusion-webui").cyan()
         );
     } else {
         let labels: Vec<String> = detected
@@ -199,6 +199,7 @@ pub async fn run() -> Result<()> {
         storage: StorageConfig { root: storage_root },
         targets,
         gpu: gpu_override,
+        cloud: None,
     };
 
     config.save().context("Failed to save config")?;
@@ -211,10 +212,10 @@ pub async fn run() -> Result<()> {
     );
     println!();
     println!("Next steps:");
-    println!("  {} Fetch the model registry", style("mods update").cyan());
+    println!("  {} Fetch the model registry", style("modl update").cyan());
     println!(
         "  {} Install your first model",
-        style("mods install flux-dev").cyan()
+        style("modl install flux-dev").cyan()
     );
 
     Ok(())

@@ -1,11 +1,11 @@
 #!/bin/sh
-# mods installer — downloads the latest release binary for your platform
-# Usage: curl -fsSL https://raw.githubusercontent.com/modshq-org/mods/main/install.sh | sh
+# modl installer — downloads the latest release binary for your platform
+# Usage: curl -fsSL https://raw.githubusercontent.com/modl-org/modl/main/install.sh | sh
 
 set -e
 
-REPO="modshq-org/mods"
-INSTALL_DIR="${MODS_INSTALL_DIR:-/usr/local/bin}"
+REPO="modl-org/modl"
+INSTALL_DIR="${MODL_INSTALL_DIR:-/usr/local/bin}"
 
 # Check for required tools
 for cmd in curl tar; do
@@ -35,7 +35,7 @@ case "$OS" in
         esac
         ;;
     *)
-        echo "Unsupported OS: $OS (use Windows installer or cargo install mods)"
+        echo "Unsupported OS: $OS (use Windows installer or cargo install modl)"
         exit 1
         ;;
 esac
@@ -51,10 +51,10 @@ if [ -z "$LATEST" ]; then
     exit 1
 fi
 
-echo "Installing mods ${LATEST} for ${TARGET}..."
+echo "Installing modl ${LATEST} for ${TARGET}..."
 
 # Download binary and checksums
-ASSET="mods-${LATEST}-${TARGET}.tar.gz"
+ASSET="modl-${LATEST}-${TARGET}.tar.gz"
 URL="https://github.com/${REPO}/releases/download/${LATEST}/${ASSET}"
 CHECKSUM_URL="https://github.com/${REPO}/releases/download/${LATEST}/SHA256SUMS"
 TMPDIR=$(mktemp -d)
@@ -94,20 +94,20 @@ tar xzf "$TMPDIR/${ASSET}" -C "$TMPDIR"
 
 # Install
 if [ -w "$INSTALL_DIR" ]; then
-    mv "$TMPDIR/mods" "$INSTALL_DIR/mods"
+    mv "$TMPDIR/modl" "$INSTALL_DIR/modl"
 else
     echo "Installing to $INSTALL_DIR (requires sudo)..."
-    sudo mv "$TMPDIR/mods" "$INSTALL_DIR/mods"
+    sudo mv "$TMPDIR/modl" "$INSTALL_DIR/modl"
 fi
 
-chmod +x "$INSTALL_DIR/mods"
+chmod +x "$INSTALL_DIR/modl"
 
 echo ""
-echo "mods ${LATEST} installed to ${INSTALL_DIR}/mods"
+echo "modl ${LATEST} installed to ${INSTALL_DIR}/modl"
 echo ""
 echo "Get started:"
-echo "  mods init              # Configure your setup"
-echo "  mods install flux-dev  # Install a model"
+echo "  modl init              # Configure your setup"
+echo "  modl install flux-dev  # Install a model"
 echo ""
-echo "Docs: https://mods.pedroalonso.net/docs"
+echo "Docs: https://modl.run/docs"
 echo ""

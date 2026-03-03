@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use super::manifest::AssetType;
 
-/// Content-addressed store at ~/mods/store/
+/// Content-addressed store at ~/modl/store/
 pub struct Store {
     root: PathBuf,
 }
@@ -69,7 +69,7 @@ mod tests {
 
     #[test]
     fn test_store_path() {
-        let store = Store::new(PathBuf::from("/tmp/mods"));
+        let store = Store::new(PathBuf::from("/tmp/modl"));
         let path = store.path_for(
             &AssetType::Checkpoint,
             "abcdef1234567890abcdef",
@@ -77,7 +77,7 @@ mod tests {
         );
         assert_eq!(
             path,
-            PathBuf::from("/tmp/mods/store/checkpoint/abcdef1234567890/model.safetensors")
+            PathBuf::from("/tmp/modl/store/checkpoint/abcdef1234567890/model.safetensors")
         );
     }
 

@@ -14,9 +14,9 @@ pub async fn run(comfyui: Option<&str>, a1111: Option<&str>) -> Result<()> {
     if comfyui.is_none() && a1111.is_none() {
         anyhow::bail!(
             "Specify a tool to link:\n\n  \
-             mods link --comfyui ~/ComfyUI\n  \
-             mods link --a1111 ~/stable-diffusion-webui\n\n\
-             This scans the tool's model folders and adopts recognized files into the mods store."
+             modl link --comfyui ~/ComfyUI\n  \
+             modl link --a1111 ~/stable-diffusion-webui\n\n\
+             This scans the tool's model folders and adopts recognized files into the modl store."
         );
     }
 
@@ -256,7 +256,7 @@ fn find_model_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()
         if path.is_dir() && !path.is_symlink() {
             find_model_files_recursive(&path, files)?;
         } else if path.is_symlink() {
-            // Skip files already managed by mods
+            // Skip files already managed by modl
             continue;
         } else if let Some("safetensors" | "ckpt" | "pt" | "pth" | "bin" | "gguf") =
             path.extension().and_then(|e| e.to_str())

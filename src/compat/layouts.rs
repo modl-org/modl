@@ -15,6 +15,8 @@ pub fn comfyui(asset_type: &AssetType) -> PathBuf {
         AssetType::Embedding => PathBuf::from("models/embeddings"),
         AssetType::Ipadapter => PathBuf::from("models/ipadapter"),
         AssetType::Segmentation => PathBuf::from("models/BiRefNet"),
+        AssetType::VisionLanguage => PathBuf::from("models/vision_language"),
+        AssetType::Recipe => PathBuf::from("recipes"),
     }
 }
 
@@ -31,6 +33,8 @@ pub fn a1111(asset_type: &AssetType) -> PathBuf {
         AssetType::Embedding => PathBuf::from("embeddings"),
         AssetType::Ipadapter => PathBuf::from("models/ipadapter"),
         AssetType::Segmentation => PathBuf::from("models/BiRefNet"),
+        AssetType::VisionLanguage => PathBuf::from("models/vision_language"),
+        AssetType::Recipe => PathBuf::from("recipes"),
     }
 }
 
@@ -47,5 +51,7 @@ pub fn invokeai(asset_type: &AssetType) -> PathBuf {
         AssetType::Embedding => PathBuf::from("models/embedding"),
         AssetType::Ipadapter => PathBuf::from("models/ip_adapter"),
         AssetType::Segmentation => PathBuf::from("models/segmentation"),
+        AssetType::VisionLanguage => PathBuf::from("models/vision_language"),
+        AssetType::Recipe => PathBuf::from("recipes"),
     }
 }
