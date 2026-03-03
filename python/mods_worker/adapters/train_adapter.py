@@ -126,15 +126,176 @@ def _build_sample_prompts(trigger_word: str, lora_type: str) -> list[str]:
         ]
 
 
-def _build_train_block(family: str, params: dict, lora_type: str) -> dict:
+# -----------------------------------------------------------------------
+# Architecture config table
+# -----------------------------------------------------------------------
+# Data-driven config for each model family.  Used by _build_train_block,
+# _build_sample_block, and spec_to_aitoolkit_config instead of ad-hoc
+# if/elif chains.  Extension-based models use "arch" key; legacy models
+# use boolean flags (is_flux, is_v3).
+#
+# Fields:
+#   model_flags   – merged into the ai-toolkit "model" block
+#   noise_scheduler, dtype, train_text_encoder – for the "train" block
+#   resolutions   – resolution buckets for dataset
+#   default_resolution – fallback when user doesn't specify
+#   sample        – sampler, steps, guidance, neg for sample block
+#   extra_train   – extra keys merged into "train" block
+# -----------------------------------------------------------------------
+
+ARCH_CONFIGS: dict[str, dict] = {
+    "flux": {
+        "model_flags": {"is_flux": True, "quantize": True},
+        "noise_scheduler": "flowmatch",
+        "dtype": "bf16",
+        "train_text_encoder": False,
+        "resolutions": [512, 768, 1024],
+        "default_resolution": 1024,
+        "sample": {"sampler": "flowmatch", "steps": 20, "guidance": 4.0, "neg": ""},
+    },
+    "flux_schnell": {
+        "model_flags": {
+            "is_flux": True,
+            "quantize": True,
+            "assistant_lora_path": "ostris/FLUX.1-schnell-training-adapter",
+        },
+        "noise_scheduler": "flowmatch",
+        "dtype": "bf16",
+        "train_text_encoder": False,
+        "resolutions": [512, 768, 1024],
+        "default_resolution": 1024,
+        "sample": {"sampler": "flowmatch", "steps": 4, "guidance": 1.0, "neg": ""},
+    },
+    "zimage_turbo": {
+        "model_flags": {
+            "arch": "zimage",
+            "quantize": True,
+            "quantize_te": True,
+            "low_vram": True,
+            "assistant_lora_path": "ostris/zimage_turbo_training_adapter/zimage_turbo_training_adapter_v2.safetensors",
+        },
+        "noise_scheduler": "flowmatch",
+        "dtype": "bf16",
+        "train_text_encoder": False,
+        "resolutions": [512, 768, 1024],
+        "default_resolution": 1024,
+        "extra_train": {"timestep_type": "weighted"},
+        "sample": {"sampler": "flowmatch", "steps": 8, "guidance": 1.0, "neg": ""},
+    },
+    "zimage": {
+        "model_flags": {
+            "arch": "zimage",
+            "quantize": True,
+            "quantize_te": True,
+            "low_vram": True,
+        },
+        "noise_scheduler": "flowmatch",
+        "dtype": "bf16",
+        "train_text_encoder": False,
+        "resolutions": [512, 768, 1024],
+        "default_resolution": 1024,
+        "extra_train": {"timestep_type": "weighted"},
+        "sample": {"sampler": "flowmatch", "steps": 30, "guidance": 4.0, "neg": ""},
+    },
+    "chroma": {
+        "model_flags": {"arch": "chroma", "quantize": True},
+        "noise_scheduler": "flowmatch",
+        "dtype": "bf16",
+        "train_text_encoder": False,
+        "resolutions": [512, 768, 1024],
+        "default_resolution": 1024,
+        "sample": {"sampler": "flowmatch", "steps": 25, "guidance": 4.0, "neg": ""},
+    },
+    "sdxl": {
+        "model_flags": {"arch": "sdxl"},
+        "noise_scheduler": "ddpm",
+        "dtype": "bf16",
+        "train_text_encoder": True,
+        "resolutions": [768, 1024],
+        "default_resolution": 1024,
+        "extra_train": {"max_denoising_steps": 1000},
+        "sample": {"sampler": "euler", "steps": 30, "guidance": 7.5, "neg": "blurry, low quality, deformed"},
+    },
+    "sd15": {
+        "model_flags": {},
+        "noise_scheduler": "ddpm",
+        "dtype": "fp16",
+        "train_text_encoder": True,
+        "resolutions": [512],
+        "default_resolution": 512,
+        "extra_train": {"max_denoising_steps": 1000},
+        "sample": {"sampler": "euler", "steps": 30, "guidance": 7.5, "neg": "blurry, low quality, deformed"},
+    },
+}
+
+# Map mods model IDs → (arch_key, HuggingFace hub ID)
+MODEL_REGISTRY: dict[str, tuple[str, str]] = {
+    "flux-dev":       ("flux",          "black-forest-labs/FLUX.1-dev"),
+    "flux-schnell":   ("flux_schnell",  "black-forest-labs/FLUX.1-schnell"),
+    "z-image-turbo":  ("zimage_turbo",  "Tongyi-MAI/Z-Image-Turbo"),
+    "z-image":        ("zimage",        "Tongyi-MAI/Z-Image"),
+    "chroma":         ("chroma",        "lodestones/Chroma"),
+    "sdxl-base-1.0":  ("sdxl",          "stabilityai/stable-diffusion-xl-base-1.0"),
+    "sdxl-turbo":     ("sdxl",          "stabilityai/sdxl-turbo"),
+    "sd-1.5":         ("sd15",          "stable-diffusion-v1-5/stable-diffusion-v1-5"),
+}
+
+
+def _detect_arch(base_model_id: str) -> str:
+    """Detect architecture key from a base model ID.
+
+    First checks MODEL_REGISTRY for an exact match, then falls back to
+    substring heuristics.  Returns a key into ARCH_CONFIGS.
+    """
+    # Exact match in registry
+    entry = MODEL_REGISTRY.get(base_model_id)
+    if entry:
+        return entry[0]
+
+    # Substring heuristics for raw HF paths or unknown IDs
+    bid = base_model_id.lower()
+    if "z-image-turbo" in bid or "z_image_turbo" in bid:
+        return "zimage_turbo"
+    if "z-image" in bid or "z_image" in bid or "zimage" in bid:
+        return "zimage"
+    if "chroma" in bid:
+        return "chroma"
+    if "flux" in bid and "schnell" in bid:
+        return "flux_schnell"
+    if "flux" in bid:
+        return "flux"
+    if "sdxl" in bid or "xl" in bid:
+        return "sdxl"
+    if "sd-1.5" in bid or "sd15" in bid or "1.5" in bid:
+        return "sd15"
+    return "sdxl"  # safe default
+
+
+def _resolve_model_path(base_model_id: str) -> str:
+    """Resolve a mods model ID to a HuggingFace hub path."""
+    entry = MODEL_REGISTRY.get(base_model_id)
+    if entry:
+        return entry[1]
+    return base_model_id  # already a HF path or local path
+
+
+def _build_train_block(arch_key: str, params: dict, lora_type: str) -> dict:
     """Build the 'train' config block with per-architecture settings."""
+    arch = ARCH_CONFIGS.get(arch_key, ARCH_CONFIGS["sdxl"])
     steps = params.get("steps", 2000)
     is_style = lora_type == "style"
+    is_zimage = arch_key.startswith("zimage")
 
     # batch_size: 0 means "let adapter decide" (sentinel from Rust)
     bs = params.get("batch_size", 0)
     if bs <= 0:
-        bs = 2 if is_style else 1
+        bs = 2 if (is_style and not is_zimage) else 1
+
+    lr = params.get("learning_rate", 1e-4)
+    # Z-Image: LR must not exceed 1e-4 — higher values break the distillation
+    if is_zimage and lr > 1e-4:
+        print(f"[mods] WARNING: Clamping LR from {lr} to 1e-4 for Z-Image (higher LR breaks distillation)")
+        lr = 1e-4
 
     train = {
         "batch_size": bs,
@@ -143,63 +304,48 @@ def _build_train_block(family: str, params: dict, lora_type: str) -> dict:
         "train_unet": True,
         "gradient_checkpointing": True,
         "optimizer": params.get("optimizer", "adamw8bit"),
-        "lr": params.get("learning_rate", 1e-4),
+        "lr": lr,
     }
 
     if is_style:
-        # Bias timestep sampling toward noisier steps where style lives
         train["content_or_style"] = "style"
 
-    if family == "flux":
-        train["train_text_encoder"] = False
-        train["noise_scheduler"] = "flowmatch"
-        train["dtype"] = "bf16"
+    train["train_text_encoder"] = arch.get("train_text_encoder", False)
+    train["noise_scheduler"] = arch["noise_scheduler"]
+    train["dtype"] = arch["dtype"]
+
+    # EMA for most architectures
+    if arch_key not in ("sd15",):
         train["ema_config"] = {"use_ema": True, "ema_decay": 0.99}
-    elif family == "sdxl":
-        train["train_text_encoder"] = True
-        train["noise_scheduler"] = "ddpm"
-        train["dtype"] = "bf16"  # fp16 causes NaN loss due to overflow in SDXL UNet
-        train["max_denoising_steps"] = 1000
-        # SDXL was trained with noise_offset 0.0357
+
+    # SDXL-specific noise_offset
+    if arch_key == "sdxl":
         train["noise_offset"] = 0.0357 if is_style else 0.0
-        train["ema_config"] = {"use_ema": True, "ema_decay": 0.99}
-    else:  # sd15
-        train["train_text_encoder"] = True
-        train["noise_scheduler"] = "ddpm"
-        train["dtype"] = "fp16"
-        train["max_denoising_steps"] = 1000
+
+    # Merge any extra train keys from the arch config
+    extra = arch.get("extra_train", {})
+    train.update(extra)
 
     return train
 
 
-def _build_sample_block(family: str, params: dict, resolution: int, lora_type: str, sample_every_override: int | None = None) -> dict:
+def _build_sample_block(arch_key: str, params: dict, resolution: int, lora_type: str, sample_every_override: int | None = None) -> dict:
     """Build the 'sample' config block with per-architecture settings."""
+    arch = ARCH_CONFIGS.get(arch_key, ARCH_CONFIGS["sdxl"])
+    sample_cfg = arch["sample"]
     steps = params.get("steps", 2000)
 
-    if family == "flux":
-        sampler = "flowmatch"
-        guidance = 4
-        sample_steps = 20
-    elif family == "sdxl":
-        sampler = "euler"
-        guidance = 7.5
-        sample_steps = 30
-    else:  # sd15
-        sampler = "euler"
-        guidance = 7.5
-        sample_steps = 30
-
     return {
-        "sampler": sampler,
+        "sampler": sample_cfg["sampler"],
         "sample_every": sample_every_override or max(steps // 5, 50),
         "width": resolution,
         "height": resolution,
         "prompts": _build_sample_prompts(params.get("trigger_word", "OHWX"), lora_type),
-        "neg": "blurry, low quality, deformed" if family != "flux" else "",
+        "neg": sample_cfg["neg"],
         "seed": params.get("seed") or 42,
         "walk_seed": True,
-        "guidance_scale": guidance,
-        "sample_steps": sample_steps,
+        "guidance_scale": sample_cfg["guidance"],
+        "sample_steps": sample_cfg["steps"],
     }
 
 
@@ -220,52 +366,22 @@ def spec_to_aitoolkit_config(spec: dict) -> dict:
     lora_type = params.get("lora_type", "character")
 
     # Detect model architecture from the base model ID
-    bid_lower = base_model_id.lower()
-    if "flux" in bid_lower:
-        family = "flux"
-    elif "sdxl" in bid_lower or "xl" in bid_lower:
-        family = "sdxl"
-    elif "sd-1.5" in bid_lower or "sd15" in bid_lower or "1.5" in bid_lower:
-        family = "sd15"
-    else:
-        family = "sdxl"  # default to sdxl for unknown models
+    arch_key = _detect_arch(base_model_id)
+    arch = ARCH_CONFIGS[arch_key]
 
-    # Map mods model IDs → HuggingFace hub IDs so ai-toolkit can resolve
-    # configs and weights from the hub (cached in ~/.cache/huggingface/).
-    HF_MODEL_MAP = {
-        "flux-dev": "black-forest-labs/FLUX.1-dev",
-        "flux-schnell": "black-forest-labs/FLUX.1-schnell",
-        "sdxl-base-1.0": "stabilityai/stable-diffusion-xl-base-1.0",
-        "sdxl-turbo": "stabilityai/sdxl-turbo",
-        "sd-1.5": "stable-diffusion-v1-5/stable-diffusion-v1-5",
-    }
+    # Resolve HuggingFace hub path
+    model_path = _resolve_model_path(base_model_id)
+    # For non-extension models, also check for a local path override
+    if model_path == base_model_id and model.get("base_model_path"):
+        model_path = model["base_model_path"]
 
-    if family == "flux":
-        model_path = HF_MODEL_MAP.get(base_model_id, base_model_id)
-    else:
-        # For SDXL/SD1.5, prefer the HF map, then store path, then raw ID
-        model_path = HF_MODEL_MAP.get(base_model_id,
-            model.get("base_model_path") or base_model_id)
+    # Build model config from the arch config table
+    model_config = {"name_or_path": model_path}
+    model_config.update(arch["model_flags"])
 
-    # Build model config per architecture family
-    model_config = {
-        "name_or_path": model_path,
-    }
-    if family == "flux":
-        model_config["is_flux"] = True
-        model_config["quantize"] = True
-        model_config["low_vram"] = True
-    elif family == "sdxl":
-        model_config["arch"] = "sdxl"
-
-    # Resolution and dataset config per family
-    resolution = params.get("resolution", 1024 if family != "sd15" else 512)
-    if family == "flux":
-        dataset_resolution = [512, 768, 1024]
-    elif family == "sdxl":
-        dataset_resolution = [768, 1024]
-    else:  # sd15
-        dataset_resolution = [512]
+    # Resolution and dataset config from arch table
+    resolution = params.get("resolution", arch["default_resolution"])
+    dataset_resolution = arch["resolutions"]
 
     # Network config: style uses higher rank for more capacity
     # Alpha = rank gives scale=1.0 (simplest, most stable)
@@ -324,9 +440,9 @@ def spec_to_aitoolkit_config(spec: dict) -> dict:
                             "num_repeats": num_repeats,
                         }
                     ],
-                    "train": _build_train_block(family, params, lora_type),
+                    "train": _build_train_block(arch_key, params, lora_type),
                     "model": model_config,
-                    "sample": _build_sample_block(family, params, resolution, lora_type, original_sample_every),
+                    "sample": _build_sample_block(arch_key, params, resolution, lora_type, original_sample_every),
                 }
             ],
         },

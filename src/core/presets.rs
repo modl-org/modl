@@ -18,6 +18,9 @@ pub struct GpuContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BaseModelFamily {
     Flux,
+    FluxSchnell,
+    ZImage,
+    Chroma,
     Sdxl,
     Sd15,
 }
@@ -26,7 +29,13 @@ impl BaseModelFamily {
     /// Infer family from a base model ID string
     pub fn from_model_id(id: &str) -> Self {
         let lower = id.to_lowercase();
-        if lower.contains("flux") {
+        if lower.contains("z-image") || lower.contains("z_image") || lower.contains("zimage") {
+            Self::ZImage
+        } else if lower.contains("chroma") {
+            Self::Chroma
+        } else if lower.contains("flux") && lower.contains("schnell") {
+            Self::FluxSchnell
+        } else if lower.contains("flux") {
             Self::Flux
         } else if lower.contains("sdxl") || lower.contains("xl") {
             Self::Sdxl
@@ -40,7 +49,7 @@ impl BaseModelFamily {
 
     pub fn default_resolution(&self) -> u32 {
         match self {
-            Self::Flux | Self::Sdxl => 1024,
+            Self::Flux | Self::FluxSchnell | Self::Sdxl | Self::ZImage | Self::Chroma => 1024,
             Self::Sd15 => 512,
         }
     }
@@ -62,10 +71,28 @@ pub fn resolve_params(
     let quantize = vram_mb > 0 && vram_mb < 40_000;
     let img_count = dataset.image_count;
 
+    // Z-Image trains significantly faster than Flux/SDXL (~1.3s/iter on 5090).
+    // For distilled models (ZImage turbo), keep LR at 1e-4 max to avoid
+    // breaking distillation. Style LoRAs need 3000-5000 steps per Ostris.
+    let is_zimage = matches!(family, BaseModelFamily::ZImage);
+
     let (steps, rank, learning_rate) = match (preset, lora_type) {
         // --- Style presets: high rank, many more steps ---
         // Style requires much longer training than character/subject.
         // Reference: ~15 epochs with repeats for proper style transfer.
+        (Preset::Quick, LoraType::Style) if is_zimage => {
+            // Z-Image style trains fast; 3000 steps is a good starting point
+            let steps = compute_steps(img_count, 25, 3000, 5000);
+            (steps, 16, 1e-4)
+        }
+        (Preset::Standard, LoraType::Style) if is_zimage => {
+            let steps = compute_steps(img_count, 50, 3500, 5000);
+            (steps, 16, 1e-4)
+        }
+        (Preset::Advanced, LoraType::Style) if is_zimage => {
+            let steps = compute_steps(img_count, 75, 4000, 6000);
+            (steps, 32, 1e-4)
+        }
         (Preset::Quick, LoraType::Style) => {
             // Quick style: ~5 epochs worth. batch=2, repeats=10
             // epoch ≈ img_count * 10 / 2 steps, so 5 epochs ≈ img * 25
@@ -82,7 +109,16 @@ pub fn resolve_params(
             (steps, 128, 1e-4)
         }
 
-        // --- Character / Object presets: lower rank, lower LR ---
+        // --- Character / Object presets ---
+        (Preset::Quick, _) if is_zimage => {
+            let steps = compute_steps(img_count, 100, 1000, 1500);
+            (steps, 8, 1e-4)
+        }
+        (Preset::Standard, _) if is_zimage => {
+            let steps = compute_steps(img_count, 150, 1500, 3000);
+            let rank = if img_count < 20 { 16 } else { 32 };
+            (steps, rank, 1e-4)
+        }
         (Preset::Quick, _) => {
             let steps = compute_steps(img_count, 150, 1000, 1500);
             (steps, 8, 1e-4)

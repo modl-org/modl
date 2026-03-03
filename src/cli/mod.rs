@@ -49,6 +49,14 @@ const TRAIN_HELP_EXTRA: &str = "\
     Style:     --rank 32  --lr 1e-4   --steps 5000+   --batch-size 2
     Character: --rank 8   --lr 1e-4   --steps 1500    --batch-size 1
 
+  Z-Image-Turbo (z-image-turbo):
+    Style:     --rank 16  --lr 1e-4   --steps 3000-5000  --batch-size 1
+    Character: --rank 16  --lr 1e-4   --steps 1500       --batch-size 1
+    ⚡ Trains very fast (~1.3s/step). Uses training adapter automatically.
+    ⚠  Do not exceed --lr 1e-4 — higher LR breaks distillation.
+    For style: caption images literally (what's depicted, not the style).
+    Inference: 8 steps, CFG 1.0, euler. Remove training adapter for inference.
+
 \x1b[1mOptimizer guide:\x1b[0m
     adamw8bit  Best default. Low VRAM, stable training.
     prodigy    Auto-tunes LR. Set --lr 1.0 and let it adapt.
