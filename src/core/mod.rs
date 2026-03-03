@@ -8,6 +8,7 @@ pub mod executor;
 pub mod gpu;
 pub mod job;
 pub mod manifest;
+pub mod preflight;
 pub mod presets;
 pub mod registry;
 pub mod resolver;

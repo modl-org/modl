@@ -7,6 +7,7 @@ use crate::core::cloud::{CloudExecutor, CloudProvider};
 use crate::core::db::Database;
 use crate::core::executor::{Executor, LocalExecutor};
 use crate::core::job::*;
+use crate::core::preflight;
 
 /// Size presets: aspect ratio → (width, height)
 const SIZE_PRESETS: &[(&str, u32, u32)] = &[
@@ -123,6 +124,14 @@ pub async fn run(
     // Resolve base model
     // -------------------------------------------------------------------
     let base_model = base.unwrap_or("flux-schnell").to_string();
+
+    // -------------------------------------------------------------------
+    // Pre-flight checks (fail fast with actionable hints)
+    // -------------------------------------------------------------------
+    if !cloud {
+        preflight::for_generation(&base_model)?;
+    }
+
     let base_model_path = resolve_base_model_path(&base_model, &db);
 
     // -------------------------------------------------------------------

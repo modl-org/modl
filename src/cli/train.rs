@@ -10,6 +10,7 @@ use crate::core::db::Database;
 use crate::core::executor::{Executor, LocalExecutor};
 use crate::core::gpu;
 use crate::core::job::*;
+use crate::core::preflight;
 use crate::core::presets::{self, DatasetStats, GpuContext};
 
 /// CLI overrides that take precedence over preset-resolved values.
@@ -297,6 +298,13 @@ async fn execute_training(
     cloud: bool,
     provider: Option<CloudProvider>,
 ) -> Result<()> {
+    // -------------------------------------------------------------------
+    // 0. Pre-flight checks (fail fast with actionable hints)
+    // -------------------------------------------------------------------
+    if !cloud {
+        preflight::for_training(&spec.model.base_model_id)?;
+    }
+
     let db = Database::open()?;
 
     let spec_json = serde_json::to_string(&spec)?;

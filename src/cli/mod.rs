@@ -71,6 +71,63 @@ const TRAIN_HELP_EXTRA: &str = "\
     - Use --repeats 10 for small datasets (<50 images)
 ";
 
+const TRAIN_EXAMPLES: &str = "\
+\x1b[1mExamples:\x1b[0m
+  # Train a character LoRA on Flux (interactive prompts fill in the rest)
+  mods train --base flux-dev --lora-type character
+
+  # Quick style LoRA with all flags specified
+  mods train --dataset paintings --base flux-dev --lora-type style \\
+    --name impressionist-v1 --trigger \"in the style of MYPAINT\" --preset quick
+
+  # Resume from a checkpoint
+  mods train --base flux-dev --lora-type character --resume ./checkpoint-500.safetensors
+
+  # Dry-run: see the generated spec without running
+  mods train --dataset headshots --base flux-dev --lora-type character --dry-run
+";
+
+const GENERATE_EXAMPLES: &str = "\
+\x1b[1mExamples:\x1b[0m
+  # Simple generation with default model (flux-schnell)
+  mods generate \"a cat astronaut on the moon\"
+
+  # Use a specific base model + LoRA
+  mods generate \"photo of OHWX person at the beach\" --base flux-dev --lora pedro-v1
+
+  # Generate multiple images with a fixed seed
+  mods generate \"product photo on marble\" --count 4 --seed 42 --size 16:9
+
+  # Landscape format with more steps
+  mods generate \"sunset over mountains\" --size 16:9 --steps 30 --guidance 4.0
+";
+
+const DATASET_EXAMPLES: &str = "\
+\x1b[1mExamples:\x1b[0m
+  # Full pipeline: create → resize → caption in one command
+  mods dataset prepare my-photos --from ~/photos/headshots/
+
+  # Step-by-step: create, then caption, then validate
+  mods dataset create products --from ~/product-photos/
+  mods dataset caption products
+  mods dataset validate products
+
+  # Resize to 512px (SD 1.5) instead of default 1024px
+  mods dataset resize my-dataset --resolution 512
+";
+
+const MODEL_PULL_EXAMPLES: &str = "\
+\x1b[1mExamples:\x1b[0m
+  # Pull a model (auto-selects variant for your GPU)
+  mods model pull flux-dev
+
+  # Force a specific variant
+  mods model pull flux-dev --variant fp8
+
+  # Preview what would be downloaded
+  mods model pull sdxl-base-1.0 --dry-run
+";
+
 /// Auth provider for `mods auth` command.
 #[derive(Clone, Debug, ValueEnum)]
 pub enum AuthProvider {
@@ -94,6 +151,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum ModelCommands {
     /// Download a model, LoRA, VAE, or other asset (with dependency resolution)
+    #[command(after_help = MODEL_PULL_EXAMPLES)]
     Pull {
         /// Model ID from the registry (e.g., flux-dev, realistic-skin-v3)
         id: String,
@@ -220,6 +278,7 @@ pub enum Commands {
     /// Train a LoRA with managed runtime
     #[command(args_conflicts_with_subcommands = true)]
     #[command(after_long_help = TRAIN_HELP_EXTRA)]
+    #[command(after_help = TRAIN_EXAMPLES)]
     Train {
         #[command(subcommand)]
         command: Option<TrainSubcommands>,
@@ -291,6 +350,7 @@ pub enum Commands {
     },
 
     /// Generate images using diffusers
+    #[command(after_help = GENERATE_EXAMPLES)]
     Generate {
         /// Text prompt for image generation
         prompt: String,
@@ -324,6 +384,7 @@ pub enum Commands {
     },
 
     /// Manage datasets for training
+    #[command(after_help = DATASET_EXAMPLES)]
     Dataset {
         #[command(subcommand)]
         command: datasets::DatasetCommands,

@@ -1,8 +1,11 @@
 use anyhow::{Result, bail};
+use console::style;
 use std::sync::mpsc;
 
 use crate::core::executor::{Executor, JobHandle};
 use crate::core::job::{GenerateJobSpec, JobEvent, TrainJobSpec};
+
+const CLOUD_WAITLIST_URL: &str = "https://modl.run/cloud";
 
 // ---------------------------------------------------------------------------
 // Providers
@@ -85,21 +88,13 @@ impl CloudExecutor {
 
 impl Executor for CloudExecutor {
     fn submit(&mut self, _spec: &TrainJobSpec) -> Result<JobHandle> {
-        bail!(
-            "Cloud training via {} is not yet implemented.\n\
-             This feature is coming soon. For now, use local training \
-             (remove the --cloud flag).",
-            self.provider
-        );
+        print_cloud_waitlist("training", self.provider);
+        std::process::exit(0);
     }
 
     fn submit_generate(&mut self, _spec: &GenerateJobSpec) -> Result<JobHandle> {
-        bail!(
-            "Cloud generation via {} is not yet implemented.\n\
-             This feature is coming soon. For now, use local generation \
-             (remove the --cloud flag).",
-            self.provider
-        );
+        print_cloud_waitlist("generation", self.provider);
+        std::process::exit(0);
     }
 
     fn events(&mut self, _job_id: &str) -> Result<mpsc::Receiver<JobEvent>> {
@@ -112,6 +107,50 @@ impl Executor for CloudExecutor {
             self.provider
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Waitlist
+// ---------------------------------------------------------------------------
+
+fn print_cloud_waitlist(action: &str, provider: CloudProvider) {
+    eprintln!();
+    eprintln!(
+        "  {}  Cloud {} is coming soon.",
+        style("☁").cyan().bold(),
+        action
+    );
+    eprintln!();
+    eprintln!(
+        "  We're building managed GPU {} via Modal, Replicate, and RunPod",
+        action
+    );
+    eprintln!(
+        "  so you can run {} without owning hardware.",
+        style(format!(
+            "mods {} --cloud --provider {}",
+            if action == "training" {
+                "train"
+            } else {
+                "generate"
+            },
+            provider
+        ))
+        .bold()
+    );
+    eprintln!();
+    eprintln!(
+        "  {} Sign up for early access: {}",
+        style("→").green().bold(),
+        style(CLOUD_WAITLIST_URL).underlined().bold()
+    );
+    eprintln!();
+    eprintln!(
+        "  For now, use local {} (remove the {} flag).",
+        action,
+        style("--cloud").yellow()
+    );
+    eprintln!();
 }
 
 // ---------------------------------------------------------------------------
@@ -190,55 +229,8 @@ mod tests {
     }
 
     #[test]
-    fn test_cloud_executor_submit_returns_not_implemented() {
-        // Without valid env vars, new() will fail, so test the stub directly
-        let mut executor = CloudExecutor {
-            provider: CloudProvider::Modal,
-            api_key: Some("test-key".into()),
-        };
-
-        let spec = crate::core::job::TrainJobSpec {
-            dataset: crate::core::job::DatasetRef {
-                name: "test".into(),
-                path: "/tmp/test".into(),
-                image_count: 10,
-                caption_coverage: 1.0,
-            },
-            model: crate::core::job::ModelRef {
-                base_model_id: "flux-schnell".into(),
-                base_model_path: None,
-            },
-            output: crate::core::job::OutputRef {
-                lora_name: "test-v1".into(),
-                destination_dir: "/tmp/output".into(),
-            },
-            params: crate::core::job::TrainingParams {
-                preset: crate::core::job::Preset::Quick,
-                lora_type: crate::core::job::LoraType::Character,
-                trigger_word: "OHWX".into(),
-                steps: 1000,
-                rank: 8,
-                learning_rate: 1e-4,
-                optimizer: crate::core::job::Optimizer::Adamw8bit,
-                resolution: 1024,
-                seed: None,
-                quantize: true,
-                batch_size: 0,
-                num_repeats: 0,
-                caption_dropout_rate: -1.0,
-                resume_from: None,
-            },
-            runtime: crate::core::job::RuntimeRef {
-                profile: "trainer-cu124".into(),
-                python_version: Some("3.11.11".into()),
-            },
-            target: crate::core::job::ExecutionTarget::Cloud,
-            labels: std::collections::HashMap::new(),
-        };
-
-        let result = executor.submit(&spec);
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("not yet implemented"));
+    fn test_waitlist_url_is_set() {
+        assert!(!CLOUD_WAITLIST_URL.is_empty());
+        assert!(CLOUD_WAITLIST_URL.starts_with("https://"));
     }
 }

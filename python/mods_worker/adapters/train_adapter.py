@@ -31,6 +31,11 @@ _ERROR_PATTERNS = [
 
 _TAIL_BUFFER_SIZE = 30
 
+# Qwen-Image defaults tuned for 32GB-class cards (e.g. RTX 5090).
+# Users can override the quantization type via env when needed.
+_QWEN_DEFAULT_QTYPE = "uint6"
+_QWEN_24GB_QTYPE = "uint3|ostris/accuracy_recovery_adapters/qwen_image_torchao_uint3.safetensors"
+
 
 def _read_original_intervals(checkpoint_path: str) -> tuple[int | None, int | None]:
     """Infer the original save_every/sample_every from sample files on disk.
@@ -206,6 +211,25 @@ ARCH_CONFIGS: dict[str, dict] = {
         "default_resolution": 1024,
         "sample": {"sampler": "flowmatch", "steps": 25, "guidance": 4.0, "neg": ""},
     },
+    "qwen_image": {
+        "model_flags": {
+            "arch": "qwen_image",
+            "quantize": True,
+            "quantize_te": True,
+            "qtype_te": "qfloat8",
+            "low_vram": True,
+        },
+        "noise_scheduler": "flowmatch",
+        "dtype": "bf16",
+        "train_text_encoder": False,
+        "resolutions": [512, 768, 1024],
+        "default_resolution": 1024,
+        "extra_train": {
+            "cache_text_embeddings": True,
+            "timestep_type": "sigmoid",
+        },
+        "sample": {"sampler": "flowmatch", "steps": 25, "guidance": 3.0, "neg": ""},
+    },
     "sdxl": {
         "model_flags": {"arch": "sdxl"},
         "noise_scheduler": "ddpm",
@@ -235,6 +259,8 @@ MODEL_REGISTRY: dict[str, tuple[str, str]] = {
     "z-image-turbo":  ("zimage_turbo",  "Tongyi-MAI/Z-Image-Turbo"),
     "z-image":        ("zimage",        "Tongyi-MAI/Z-Image"),
     "chroma":         ("chroma",        "lodestones/Chroma"),
+    "qwen-image":     ("qwen_image",    "Qwen/Qwen-Image"),
+    "qwen_image":     ("qwen_image",    "Qwen/Qwen-Image"),
     "sdxl-base-1.0":  ("sdxl",          "stabilityai/stable-diffusion-xl-base-1.0"),
     "sdxl-turbo":     ("sdxl",          "stabilityai/sdxl-turbo"),
     "sd-1.5":         ("sd15",          "stable-diffusion-v1-5/stable-diffusion-v1-5"),
@@ -254,6 +280,8 @@ def _detect_arch(base_model_id: str) -> str:
 
     # Substring heuristics for raw HF paths or unknown IDs
     bid = base_model_id.lower()
+    if "qwen-image" in bid or "qwen_image" in bid:
+        return "qwen_image"
     if "z-image-turbo" in bid or "z_image_turbo" in bid:
         return "zimage_turbo"
     if "z-image" in bid or "z_image" in bid or "zimage" in bid:
@@ -285,6 +313,7 @@ def _build_train_block(arch_key: str, params: dict, lora_type: str) -> dict:
     steps = params.get("steps", 2000)
     is_style = lora_type == "style"
     is_zimage = arch_key.startswith("zimage")
+    is_qwen = arch_key == "qwen_image"
 
     # batch_size: 0 means "let adapter decide" (sentinel from Rust)
     bs = params.get("batch_size", 0)
@@ -296,6 +325,11 @@ def _build_train_block(arch_key: str, params: dict, lora_type: str) -> dict:
     if is_zimage and lr > 1e-4:
         print(f"[mods] WARNING: Clamping LR from {lr} to 1e-4 for Z-Image (higher LR breaks distillation)")
         lr = 1e-4
+    if is_qwen and lora_type == "character":
+        if steps < 3000:
+            print(f"[mods] NOTE: Qwen-Image character LoRAs usually need ~3000+ steps (current: {steps})")
+        if lr < 2e-4:
+            print(f"[mods] NOTE: Qwen-Image character LoRAs often converge better around lr=2e-4 (current: {lr})")
 
     train = {
         "batch_size": bs,
@@ -378,6 +412,22 @@ def spec_to_aitoolkit_config(spec: dict) -> dict:
     # Build model config from the arch config table
     model_config = {"name_or_path": model_path}
     model_config.update(arch["model_flags"])
+    if arch_key == "qwen_image":
+        qtype = os.getenv("MODS_QWEN_QTYPE", _QWEN_DEFAULT_QTYPE).strip()
+        if qtype == "int6":
+            qtype = "uint6"  # ai-toolkit uses uint* naming
+        if not qtype:
+            qtype = _QWEN_DEFAULT_QTYPE
+        model_config["qtype"] = qtype
+        print(
+            f"[mods] Qwen-Image profile active: qtype={qtype}, cache_text_embeddings=true "
+            "(targets ~30GB VRAM on 1024px, e.g. RTX 5090 32GB)"
+        )
+        if qtype == _QWEN_DEFAULT_QTYPE:
+            print(
+                f"[mods] NOTE: For 24GB cards, use MODS_QWEN_QTYPE='{_QWEN_24GB_QTYPE}' "
+                "to reduce VRAM at quality cost."
+            )
 
     # Resolution and dataset config from arch table
     resolution = params.get("resolution", arch["default_resolution"])
@@ -412,6 +462,13 @@ def spec_to_aitoolkit_config(spec: dict) -> dict:
     caption_dropout = params.get("caption_dropout_rate", -1.0)
     if caption_dropout < 0:
         caption_dropout = 0.3 if is_style else 0.05
+    if arch_key == "qwen_image":
+        if caption_dropout > 0:
+            print(
+                f"[mods] NOTE: For Qwen-Image with cached text embeddings, forcing caption_dropout_rate=0.0 "
+                f"(requested {caption_dropout})."
+            )
+        caption_dropout = 0.0
 
     config = {
         "job": "extension",
@@ -434,6 +491,8 @@ def spec_to_aitoolkit_config(spec: dict) -> dict:
                             "folder_path": dataset.get("path", ""),
                             "caption_ext": "txt",
                             "caption_dropout_rate": caption_dropout,
+                            "shuffle_tokens": False,
+                            "cache_text_embeddings": arch_key == "qwen_image",
                             "resolution": dataset_resolution,
                             "cache_latents_to_disk": True,
                             "default_caption": params.get("trigger_word", "OHWX"),
@@ -509,6 +568,18 @@ def run_train(config_path: Path, emitter: EventEmitter) -> int:
         with open(config_path) as f:
             spec = yaml.safe_load(f)
         if isinstance(spec, dict) and "params" in spec:
+            base_model_id = str(spec.get("model", {}).get("base_model_id", "")).lower()
+            if "qwen-image" in base_model_id or "qwen_image" in base_model_id:
+                emitter.emit(
+                    {
+                        "type": "log",
+                        "level": "status",
+                        "message": (
+                            "Qwen-Image profile: plan for ~30GB VRAM at 1024px "
+                            "(32GB-class GPU recommended; 24GB typically needs uint3+ARA)."
+                        ),
+                    }
+                )
             # This is a full TrainJobSpec — translate to ai-toolkit config
             aitk_config = spec_to_aitoolkit_config(spec)
             output_dir = spec.get("output", {}).get("destination_dir")
