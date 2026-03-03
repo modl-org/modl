@@ -26,6 +26,7 @@ mod upgrade;
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use console::style;
 
 use crate::core::cloud::CloudProvider;
 use crate::core::job::{LoraType, Optimizer, Preset};
@@ -56,6 +57,18 @@ const TRAIN_HELP_EXTRA: &str = "\
     ⚠  Do not exceed --lr 1e-4 — higher LR breaks distillation.
     For style: caption images literally (what's depicted, not the style).
     Inference: 8 steps, CFG 1.0, euler. Remove training adapter for inference.
+
+  Qwen-Image (qwen-image):
+    Style:     --rank 16  --lr 2e-4   --steps 3000    --batch-size 1
+    Character: --rank 16  --lr 1e-4   --steps 3000+   --batch-size 1
+    ⚠  20B param model. Style uses 3-bit + ARA (~23GB, fits 24GB cards).
+    ⚠  Character/object uses uint6 (~30GB, needs 32GB GPU like RTX 5090).
+    ❌ Character on 24GB NOT recommended (int4 = severe quality loss).
+    For style: use literal captions, usually no trigger word needed.
+
+  Chroma (chroma):
+    Style:     --rank 16  --lr 1e-4   --steps 5000+   --batch-size 1
+    Character: --rank 16  --lr 1e-4   --steps 2000    --batch-size 1
 
 \x1b[1mOptimizer guide:\x1b[0m
     adamw8bit  Best default. Low VRAM, stable training.
@@ -286,7 +299,7 @@ pub enum Commands {
         #[arg(long)]
         dataset: Option<String>,
         /// Base model id (e.g. flux-dev, sdxl-base-1.0)
-        #[arg(long, required_unless_present = "command")]
+        #[arg(long)]
         base: Option<String>,
         /// Output LoRA name
         #[arg(long)]
@@ -295,12 +308,7 @@ pub enum Commands {
         #[arg(long)]
         trigger: Option<String>,
         /// LoRA type: style, character, object
-        #[arg(
-            long,
-            value_enum,
-            rename_all = "snake_case",
-            required_unless_present = "command"
-        )]
+        #[arg(long, value_enum, rename_all = "snake_case")]
         lora_type: Option<LoraType>,
         /// Training preset: quick, standard, advanced
         #[arg(long, value_enum)]
@@ -477,9 +485,13 @@ pub async fn run(cli: Cli) -> Result<()> {
                 train_status::run(name.as_deref(), watch)?;
                 Ok(())
             }
+            None if base.is_none() || lora_type.is_none() => {
+                print_train_info();
+                Ok(())
+            }
             None => {
-                let base_val = base.as_deref().expect("--base is required for training");
-                let lora_type_val = lora_type.expect("--lora-type is required for training");
+                let base_val = base.as_deref().unwrap();
+                let lora_type_val = lora_type.unwrap();
                 train::run(
                     dataset.as_deref(),
                     base_val,
@@ -580,6 +592,133 @@ async fn run_model(command: ModelCommands) -> Result<()> {
         ModelCommands::Export => export::run().await,
         ModelCommands::Import { path } => import::run(&path).await,
     }
+}
+
+fn print_train_info() {
+    println!(
+        "\n  {} — Train LoRAs on your GPU\n",
+        style("mods train").bold().cyan()
+    );
+
+    println!(
+        "  {} --base <MODEL> --lora-type <TYPE> [OPTIONS]\n",
+        style("Usage:").bold()
+    );
+
+    // ── Supported models ──────────────────────────────────────────
+    println!("  {}", style("Supported models:").bold());
+    println!();
+    println!(
+        "    {:<22} {:<10} {}",
+        style("Model").bold(),
+        style("VRAM").bold(),
+        style("Notes").bold()
+    );
+    println!(
+        "    {}",
+        style("─────────────────────────────────────────────────────────────────").dim()
+    );
+    println!(
+        "    {:<22} {:<10} Best quality/speed balance. Quantized by default.",
+        "flux-dev",
+        style("~12 GB").green()
+    );
+    println!(
+        "    {:<22} {:<10} Fast inference (4 steps). Uses training adapter.",
+        "flux-schnell",
+        style("~12 GB").green()
+    );
+    println!(
+        "    {:<22} {:<10} {}",
+        "z-image-turbo",
+        style("~12 GB").green(),
+        style("Fast training (~1.3s/step). LR capped at 1e-4.").dim()
+    );
+    println!(
+        "    {:<22} {:<10} {}",
+        "z-image",
+        style("~12 GB").green(),
+        style("Non-turbo variant. 30 inference steps.").dim()
+    );
+    println!(
+        "    {:<22} {:<10} Quantized flow matching model.",
+        "chroma",
+        style("~14 GB").green()
+    );
+    println!(
+        "    {:<22} {:<10} 20B params. Style via 3-bit + ARA. Fits 24GB.",
+        "qwen-image (style)",
+        style("~23 GB").yellow()
+    );
+    println!(
+        "    {:<22} {:<10} Needs 32GB GPU (e.g. RTX 5090). uint6 quant.",
+        "qwen-image (char/obj)",
+        style("~30 GB").red()
+    );
+    println!(
+        "    {:<22} {:<10} {}",
+        "sdxl-base-1.0",
+        style("~10 GB").green(),
+        style("Stable classic. Good for style + character.").dim()
+    );
+    println!(
+        "    {:<22} {:<10} {}",
+        "sd-1.5",
+        style("~6 GB").green(),
+        style("Legacy. 512px resolution.").dim()
+    );
+
+    // ── LoRA types ────────────────────────────────────────────────
+    println!();
+    println!("  {}", style("LoRA types:").bold());
+    println!(
+        "    {}    Learn the visual identity of a person (trigger word = their name)",
+        style("character").bold()
+    );
+    println!(
+        "    {}        Learn an artistic style (literal captions, no trigger word for Qwen)",
+        style("style").bold()
+    );
+    println!(
+        "    {}       Learn a specific object or product",
+        style("object").bold()
+    );
+
+    // ── Quick start ───────────────────────────────────────────────
+    println!();
+    println!("  {}", style("Quick start:").bold());
+    println!(
+        "    {} mods train --base flux-dev --lora-type character",
+        style("$").dim()
+    );
+    println!(
+        "    {} mods train --base flux-dev --lora-type style --dataset paintings",
+        style("$").dim()
+    );
+    println!(
+        "    {} mods train --base qwen-image --lora-type style",
+        style("$").dim()
+    );
+
+    // ── Subcommands ───────────────────────────────────────────────
+    println!();
+    println!("  {}", style("Subcommands:").bold());
+    println!(
+        "    {}    Install training dependencies (ai-toolkit + torch)",
+        style("mods train setup").bold()
+    );
+    println!(
+        "    {}   Show live training progress",
+        style("mods train status").bold()
+    );
+
+    // ── More info ─────────────────────────────────────────────────
+    println!();
+    println!(
+        "  Run {} for all flags, presets, and optimizer guide.",
+        style("mods train --help").bold()
+    );
+    println!();
 }
 
 fn dump_cli_schema() {
