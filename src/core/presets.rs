@@ -93,13 +93,20 @@ pub fn resolve_params(
     // Z-Image trains significantly faster than Flux/SDXL (~1.3s/iter on 5090).
     // For distilled models (ZImage turbo), keep LR at 1e-4 max to avoid
     // breaking distillation. Style LoRAs need 3000-5000 steps per Ostris.
-    // For SDXL/Flux style LoRAs, 12k-18k steps is the sweet spot.
+    //
+    // Style LoRA step budget (SDXL/Flux):
+    //   ~100-150 steps/img for tight/consistent datasets
+    //   ~150-200 steps/img for heterogeneous datasets
+    //   Beyond ~200/img risks overfitting (face drift, loss of diversity)
+    //
+    // Character/subject LoRA: ~200-300 steps/img.
+    //
+    // Rank multiplier: r16 ×0.7, r32 ×0.85, r64 ×1.0, r128 ×1.3
     let is_zimage = matches!(family, BaseModelFamily::ZImage);
 
     let (steps, rank, learning_rate) = match (preset, lora_type) {
         // --- Style presets: high rank, many more steps ---
         // Style requires much longer training than character/subject.
-        // Reference: ~15 epochs with repeats for proper style transfer.
         (Preset::Quick, LoraType::Style) if is_zimage => {
             // Z-Image style trains fast; 3000 steps is a good starting point
             let steps = compute_steps(img_count, 25, 3000, 5000);
@@ -114,20 +121,19 @@ pub fn resolve_params(
             (steps, 32, 1e-4)
         }
         (Preset::Quick, LoraType::Style) => {
-            // Quick style: enough to learn the style, not overfit.
-            // ~150 steps/img, floor 6k so small datasets still converge.
-            let steps = compute_steps(img_count, 150, 6000, 12000);
+            // Quick style: ~100 steps/img, floor 3k.
+            let steps = compute_steps(img_count, 100, 3000, 8000);
             (steps, 32, 1e-4)
         }
         (Preset::Standard, LoraType::Style) => {
-            // Standard style: 12k–25k range. Style LoRAs need significantly
-            // more steps than character/object to properly transfer.
-            let steps = compute_steps(img_count, 300, 12000, 25000);
+            // Standard style: ~170 steps/img. Sweet spot for heterogeneous
+            // datasets (mixed media, varied subjects). 47 imgs → ~8k steps.
+            let steps = compute_steps(img_count, 170, 4000, 20000);
             (steps, 64, 1e-4)
         }
         (Preset::Advanced, LoraType::Style) => {
-            // Advanced: full convergence range for large style datasets.
-            let steps = compute_steps(img_count, 400, 15000, 40000);
+            // Advanced: ~200 steps/img at r128 (×1.3 capacity absorbs more).
+            let steps = compute_steps(img_count, 200, 6000, 30000);
             (steps, 128, 1e-4)
         }
 

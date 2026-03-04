@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::io::Write;
 use std::path::PathBuf;
 
 use crate::core::artifacts;
@@ -226,7 +227,16 @@ pub async fn run(
         params.caption_dropout_rate = cd; // -1.0 = let adapter decide
     }
     if overrides.resume.is_some() {
-        params.resume_from = overrides.resume;
+        params.resume_from = overrides.resume.clone();
+
+        // When resuming, inherit steps from the original run's config so the
+        // preset doesn't recompute a different value.
+        if overrides.steps.is_none()
+            && let Some(ref ckpt_path) = overrides.resume
+            && let Some(original_steps) = read_original_steps(ckpt_path)
+        {
+            params.steps = original_steps;
+        }
     }
 
     // -------------------------------------------------------------------
@@ -247,8 +257,8 @@ pub async fn run(
         .join("training_output")
         .join(&lora_name);
 
-    // Guard against overwriting an existing training run
-    if output_dir.exists() {
+    // Guard against overwriting an existing training run (skip when resuming)
+    if params.resume_from.is_none() && output_dir.exists() {
         let has_safetensors = std::fs::read_dir(&output_dir)?
             .filter_map(|e| e.ok())
             .any(|e| e.path().extension().is_some_and(|ext| ext == "safetensors"));
@@ -348,8 +358,18 @@ async fn execute_training(
     };
 
     // -------------------------------------------------------------------
-    // 2. Submit job
+    // 2. Clean up stale jobs + submit
     // -------------------------------------------------------------------
+    // Mark any previous "running"/"queued" jobs for this LoRA as errored
+    // (they crashed without updating the DB).
+    if let Ok(old_jobs) = db.find_jobs_by_lora_name(&spec.output.lora_name) {
+        for j in &old_jobs {
+            if j.status == "running" || j.status == "queued" {
+                let _ = db.update_job_status(&j.job_id, "error");
+            }
+        }
+    }
+
     let handle = executor.submit(&spec)?;
     let job_id = &handle.job_id;
 
@@ -373,6 +393,21 @@ async fn execute_training(
     // -------------------------------------------------------------------
     let rx = executor.events(job_id)?;
     db.update_job_status(job_id, "running")?;
+
+    // Open a log file for the preview server to parse live progress.
+    // training_status.rs reads ~/.modl/training_output/<name>.log
+    let log_path = {
+        let training_output = dirs::home_dir()
+            .expect("home dir")
+            .join(".modl")
+            .join("training_output");
+        training_output.join(format!("{}.log", &spec.output.lora_name))
+    };
+    let mut log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .ok();
 
     let pb = ProgressBar::new(spec.params.steps as u64);
     pb.set_style(
@@ -405,6 +440,24 @@ async fn execute_training(
                 pb.set_position(*step as u64);
                 if let Some(l) = loss {
                     pb.set_message(format!("loss: {l:.4}"));
+                }
+
+                // Write tqdm-style line to log file for the preview server
+                if let Some(ref mut f) = log_file {
+                    let pct = if *total_steps > 0 {
+                        (*step as f32 / *total_steps as f32) * 100.0
+                    } else {
+                        0.0
+                    };
+                    let loss_str = loss.map(|l| format!(" loss: {l:.3e}")).unwrap_or_default();
+                    let _ = write!(
+                        f,
+                        "\r{name}: {pct:5.1}%| {step}/{total} [00:00<00:00,{loss_str}]",
+                        name = spec.output.lora_name,
+                        step = step,
+                        total = total_steps,
+                    );
+                    let _ = f.flush();
                 }
             }
             EventPayload::Artifact { path, .. } => {
@@ -443,6 +496,11 @@ async fn execute_training(
                 recent_logs.push(message.clone());
                 if recent_logs.len() > max_recent {
                     recent_logs.remove(0);
+                }
+
+                // Append to log file for preview server
+                if let Some(ref mut f) = log_file {
+                    let _ = writeln!(f, "{message}");
                 }
 
                 match level.as_str() {
@@ -564,6 +622,36 @@ async fn execute_training(
     }
 
     Ok(())
+}
+
+/// Read the `steps` value from an existing run's config.yaml next to the
+/// checkpoint file. When resuming, we want the original step budget, not
+/// a freshly-computed preset value.
+fn read_original_steps(checkpoint_path: &str) -> Option<u32> {
+    let ckpt = std::path::Path::new(checkpoint_path);
+    // Checkpoint lives at <run_dir>/<run_name>/<name>_<step>.safetensors
+    // config.yaml is at <run_dir>/<run_name>/config.yaml
+    let config_path = ckpt.parent()?.join("config.yaml");
+    let content = std::fs::read_to_string(&config_path).ok()?;
+    // Quick extraction: look for "steps: <N>" in the YAML
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("steps:") {
+            let val = trimmed.trim_start_matches("steps:").trim();
+            return val.parse::<u32>().ok();
+        }
+    }
+    None
+}
+
+/// Extract the step number from a checkpoint filename like
+/// `kids-art-sdxl-v2_000004800.safetensors` → `4800`.
+#[allow(dead_code)]
+fn step_from_checkpoint_path(path: &str) -> Option<u32> {
+    let stem = std::path::Path::new(path).file_stem()?.to_str()?;
+    // Pattern: <name>_<zero-padded-step>
+    let step_str = stem.rsplit('_').next()?;
+    step_str.parse::<u32>().ok()
 }
 
 /// Open text in $EDITOR, return edited content.

@@ -16,10 +16,22 @@ from .arch_config import (
     resolve_qwen_qtype,
 )
 
+import re as _re
 
 # ---------------------------------------------------------------------------
 # Resume helpers
 # ---------------------------------------------------------------------------
+
+def _step_from_checkpoint_path(path: str) -> int | None:
+    """Extract step number from a checkpoint filename.
+
+    Example: ``kids-art-sdxl-v2_000004800.safetensors`` → ``4800``.
+    """
+    stem = Path(path).stem
+    m = _re.search(r"_(\d+)$", stem)
+    if m:
+        return int(m.group(1))
+    return None
 
 def read_original_intervals(checkpoint_path: str) -> tuple[int | None, int | None]:
     """Infer the original save_every/sample_every from sample files on disk.
@@ -106,7 +118,7 @@ def build_sample_prompts(trigger_word: str, lora_type: str, arch_key: str) -> li
 # Train block builder
 # ---------------------------------------------------------------------------
 
-def build_train_block(arch_key: str, params: dict, lora_type: str) -> dict:
+def build_train_block(arch_key: str, params: dict, lora_type: str, resume_step: int | None = None) -> dict:
     """Build the 'train' config block with per-architecture settings."""
     arch = ARCH_CONFIGS.get(arch_key, ARCH_CONFIGS["sdxl"])
     steps = params.get("steps", 2000)
@@ -166,6 +178,10 @@ def build_train_block(arch_key: str, params: dict, lora_type: str) -> dict:
     # Merge any extra train keys from the arch config
     extra = arch.get("extra_train", {})
     train.update(extra)
+
+    # Resume: tell ai-toolkit to start counting from the checkpoint step
+    if resume_step is not None:
+        train["start_step"] = resume_step
 
     return train
 
@@ -253,9 +269,13 @@ def spec_to_aitoolkit_config(spec: dict) -> dict:
     resume_from = params.get("resume_from")
     original_save_every = None
     original_sample_every = None
+    resume_step = None
     if resume_from:
         network_config["pretrained_lora_path"] = resume_from
+        resume_step = _step_from_checkpoint_path(resume_from)
         print(f"[modl] Resuming training from checkpoint: {resume_from}")
+        if resume_step is not None:
+            print(f"[modl] Resuming from step {resume_step}")
         original_save_every, original_sample_every = read_original_intervals(resume_from)
 
     # Dataset repeats & caption dropout
@@ -314,7 +334,7 @@ def spec_to_aitoolkit_config(spec: dict) -> dict:
                             "num_repeats": num_repeats,
                         }
                     ],
-                    "train": build_train_block(arch_key, params, lora_type),
+                    "train": build_train_block(arch_key, params, lora_type, resume_step),
                     "model": model_config,
                     "sample": build_sample_block(
                         arch_key, params, resolution, lora_type, original_sample_every
