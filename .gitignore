@@ -1,3 +1,4 @@
 /target
+src/ui/dist
 __pycache__/
 *.pyc

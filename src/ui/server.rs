@@ -1,16 +1,27 @@
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
-    extract::{Path, Query},
+    extract::{Path, Query, State},
     http::{StatusCode, header},
-    response::{Html, IntoResponse},
-    routing::get,
+    response::{
+        Html, IntoResponse, Sse,
+        sse::{Event, KeepAlive},
+    },
+    routing::{get, post},
 };
+use futures_util::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::{Path as FsPath, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
 use tokio::net::TcpListener;
+use tokio::sync::broadcast;
 
 use crate::core::dataset;
 use crate::core::db::Database;
@@ -341,16 +352,76 @@ struct DatasetImage {
     image_url: String, // /files/datasets/...
 }
 
+#[derive(Serialize)]
+struct GpuStatus {
+    name: Option<String>,
+    vram_total_mb: Option<u64>,
+    vram_free_mb: Option<u64>,
+    training_active: bool,
+}
+
+#[derive(Serialize)]
+struct InstalledModel {
+    id: String,
+    name: String,
+    model_type: String,
+    variant: Option<String>,
+    size_bytes: u64,
+}
+
+#[derive(Clone)]
+struct UiState {
+    generate_events: broadcast::Sender<String>,
+    generate_running: Arc<AtomicBool>,
+}
+
+#[derive(Deserialize)]
+struct GenerateLoraRequest {
+    id: String,
+    strength: f32,
+}
+
+#[derive(Deserialize)]
+struct GenerateRequest {
+    prompt: String,
+    #[serde(default)]
+    negative_prompt: Option<String>,
+    model_id: String,
+    width: u32,
+    height: u32,
+    steps: u32,
+    guidance: f32,
+    #[serde(default)]
+    seed: Option<u64>,
+    num_images: u32,
+    #[serde(default)]
+    loras: Vec<GenerateLoraRequest>,
+}
+
+#[derive(Serialize)]
+struct GenerateAcceptedResponse {
+    status: String,
+}
+
 // ---------------------------------------------------------------------------
 // Server entry point
 // ---------------------------------------------------------------------------
 
 pub async fn start(port: u16, open_browser: bool) -> Result<()> {
-    // Kill any existing server on this port so `modl preview` is always re-entrant
+    // Kill any existing server on this port so `modl serve` is always re-entrant
     kill_existing_on_port(port);
+    let (generate_events, _) = broadcast::channel(256);
+    let state = UiState {
+        generate_events,
+        generate_running: Arc::new(AtomicBool::new(false)),
+    };
 
     let app = Router::new()
         .route("/", get(index_page))
+        .route("/api/gpu", get(api_gpu_status))
+        .route("/api/models", get(api_list_models))
+        .route("/api/generate", post(api_generate))
+        .route("/api/generate/stream", get(api_generate_stream))
         .route("/api/runs", get(api_list_runs))
         .route("/api/runs/{name}", get(api_get_run))
         .route("/api/status", get(api_training_status))
@@ -361,7 +432,9 @@ pub async fn start(port: u16, open_browser: bool) -> Result<()> {
             "/api/outputs",
             get(api_list_outputs).delete(api_delete_output),
         )
-        .route("/files/{*path}", get(serve_file));
+        .route("/assets/{*path}", get(serve_ui_asset))
+        .route("/files/{*path}", get(serve_file))
+        .with_state(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = TcpListener::bind(addr)
@@ -627,9 +700,166 @@ async fn api_list_runs() -> impl IntoResponse {
     Json(runs)
 }
 
+/// Drop guard that resets `generate_running` to `false` when it goes out of scope,
+/// even if the spawned task panics.
+struct RunGuard(Arc<AtomicBool>);
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+async fn api_generate(
+    State(state): State<UiState>,
+    Json(req): Json<GenerateRequest>,
+) -> impl IntoResponse {
+    if state.generate_running.swap(true, Ordering::SeqCst) {
+        return (StatusCode::CONFLICT, "A generate job is already running").into_response();
+    }
+
+    let sender = state.generate_events.clone();
+    let running = state.generate_running.clone();
+
+    tokio::spawn(async move {
+        let _guard = RunGuard(running);
+        let _ = sender.send("queued".to_string());
+
+        if req
+            .negative_prompt
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+        {
+            let _ = sender
+                .send("warning: negative prompt is currently ignored by preview UI".to_string());
+        }
+
+        let size = format!("{}x{}", req.width, req.height);
+        let lora_id = req.loras.first().map(|l| l.id.clone());
+        let lora_strength = req.loras.first().map(|l| l.strength).unwrap_or(1.0);
+        let _ = sender.send("starting generation".to_string());
+
+        let run_result = crate::cli::generate::run(
+            &req.prompt,
+            Some(&req.model_id),
+            lora_id.as_deref(),
+            lora_strength,
+            req.seed,
+            &size,
+            Some(req.steps),
+            Some(req.guidance),
+            req.num_images,
+            false,
+            None,
+            true,
+        )
+        .await;
+
+        match run_result {
+            Ok(()) => {
+                let _ = sender.send("completed".to_string());
+            }
+            Err(err) => {
+                let _ = sender.send(format!("error: {err}"));
+            }
+        }
+
+        // `_guard` drops here, resetting `generate_running` to false
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(GenerateAcceptedResponse {
+            status: "queued".to_string(),
+        }),
+    )
+        .into_response()
+}
+
+async fn api_generate_stream(
+    State(state): State<UiState>,
+) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
+    let running_now = state.generate_running.load(Ordering::SeqCst);
+    let initial = if running_now { "running" } else { "idle" }.to_string();
+
+    let first =
+        stream::once(async move { Ok::<Event, Infallible>(Event::default().data(initial)) });
+
+    let updates = stream::unfold(state.generate_events.subscribe(), |mut rx| async move {
+        match rx.recv().await {
+            Ok(msg) => Some((Ok(Event::default().data(msg)), rx)),
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                let msg = format!("warning: skipped {skipped} progress events");
+                Some((Ok(Event::default().data(msg)), rx))
+            }
+            Err(broadcast::error::RecvError::Closed) => None,
+        }
+    });
+
+    Sse::new(first.chain(updates)).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(5))
+            .text("keepalive"),
+    )
+}
+
+async fn api_gpu_status() -> impl IntoResponse {
+    let training_active = training_status::get_all_status(true)
+        .map(|runs| runs.iter().any(|r| r.is_running))
+        .unwrap_or(false);
+
+    let (name, vram_total_mb, vram_free_mb) = if let Ok(nvml) = nvml_wrapper::Nvml::init() {
+        if let Ok(device) = nvml.device_by_index(0) {
+            let name = device.name().ok();
+            let mem = device.memory_info().ok();
+            (
+                name,
+                mem.as_ref().map(|m| m.total / (1024 * 1024)),
+                mem.as_ref().map(|m| m.free / (1024 * 1024)),
+            )
+        } else {
+            (None, None, None)
+        }
+    } else {
+        (None, None, None)
+    };
+
+    Json(GpuStatus {
+        name,
+        vram_total_mb,
+        vram_free_mb,
+        training_active,
+    })
+}
+
+async fn api_list_models() -> impl IntoResponse {
+    let db = match Database::open() {
+        Ok(db) => db,
+        Err(_) => return Json(Vec::<InstalledModel>::new()).into_response(),
+    };
+
+    let Ok(models) = db.list_installed(None) else {
+        return Json(Vec::<InstalledModel>::new()).into_response();
+    };
+
+    let result: Vec<InstalledModel> = models
+        .iter()
+        .filter(|m| matches!(m.asset_type.as_str(), "checkpoint" | "lora"))
+        .map(|m| InstalledModel {
+            id: m.id.clone(),
+            name: m.name.clone(),
+            model_type: m.asset_type.clone(),
+            variant: m.variant.clone(),
+            size_bytes: m.size,
+        })
+        .collect();
+
+    Json(result).into_response()
+}
+
 async fn api_get_run(Path(name): Path<String>) -> impl IntoResponse {
     match scan_training_run(&name) {
-        Ok(run) => Json(serde_json::to_value(run).unwrap()).into_response(),
+        Ok(run) => Json(run).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Error scanning run: {e}"),
@@ -640,7 +870,7 @@ async fn api_get_run(Path(name): Path<String>) -> impl IntoResponse {
 
 async fn api_training_status() -> impl IntoResponse {
     match training_status::get_all_status(false) {
-        Ok(runs) => Json(serde_json::to_value(runs).unwrap()).into_response(),
+        Ok(runs) => Json(runs).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Error getting training status: {e}"),
@@ -651,7 +881,7 @@ async fn api_training_status() -> impl IntoResponse {
 
 async fn api_training_status_single(Path(name): Path<String>) -> impl IntoResponse {
     match training_status::get_status(&name) {
-        Ok(run) => Json(serde_json::to_value(run).unwrap()).into_response(),
+        Ok(run) => Json(run).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Error getting training status: {e}"),
@@ -853,7 +1083,7 @@ async fn api_get_dataset(
                 images,
             };
 
-            Json(serde_json::to_value(overview).unwrap()).into_response()
+            Json(overview).into_response()
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -897,10 +1127,27 @@ async fn serve_file(Path(path): Path<String>) -> impl IntoResponse {
     }
 }
 
+/// Serve bundled UI assets embedded at compile time.
+async fn serve_ui_asset(Path(path): Path<String>) -> impl IntoResponse {
+    match path.as_str() {
+        "app.js" => (
+            [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+            include_str!("dist/assets/app.js"),
+        )
+            .into_response(),
+        "index.css" => (
+            [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+            include_str!("dist/assets/index.css"),
+        )
+            .into_response(),
+        _ => (StatusCode::NOT_FOUND, "Not found").into_response(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main HTML page (self-contained, no external deps except system fonts)
 // ---------------------------------------------------------------------------
 
 async fn index_page() -> Html<String> {
-    Html(include_str!("index.html").to_string())
+    Html(include_str!("dist/index.html").to_string())
 }

@@ -4,7 +4,7 @@ mod datasets;
 mod doctor;
 mod export;
 mod gc;
-mod generate;
+pub(crate) mod generate;
 mod import;
 mod info;
 mod init;
@@ -13,9 +13,9 @@ mod link;
 mod list;
 mod outputs;
 mod popular;
-mod preview;
 mod runtime;
 mod search;
+mod serve;
 mod space;
 mod train;
 mod train_setup;
@@ -544,9 +544,8 @@ pub enum Commands {
         command: outputs::OutputCommands,
     },
 
-    /// Launch web UI for preview
-    #[command(hide = true)]
-    Preview {
+    /// Launch the web UI
+    Serve {
         /// Port to bind the preview server on
         #[arg(long, default_value = "3333")]
         port: u16,
@@ -705,11 +704,11 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Config { key, value } => config::run(key.as_deref(), value.as_deref()).await,
         Commands::Auth { provider } => auth::run(provider).await,
         Commands::Outputs { command } => outputs::run(command).await,
-        Commands::Preview {
+        Commands::Serve {
             port,
             no_open,
             foreground,
-        } => preview::run(port, no_open, foreground).await,
+        } => serve::run(port, no_open, foreground).await,
         Commands::Upgrade => upgrade::run().await,
         Commands::CliSchema => {
             dump_cli_schema();

@@ -1,23 +1,28 @@
 # modl — Plan & Status
 
-> Last updated: 2026-03-03
+> Last updated: 2026-03-04 (storage layer + business model revision)
 > Single source of truth. Everything else in `docs/` is reference material.
 
 ## What modl is
 
-The sane, opinionated way to run diffusion locally.
+The antidote to ComfyUI config hell and 2-hour YouTube tutorials.
+
+You want to train a LoRA on your art style. You don't want to spend an afternoon
+reading ai-toolkit docs, tuning 40 parameters, writing YAML, and praying the
+venv works. You want: `modl train --dataset my-art --base flux-dev`. Done.
 
 1. **Opinionated model installer** — `modl pull flux-dev`, deps handled, no thinking
 2. **Opinionated LoRA trainer** — presets (quick/standard/advanced), sensible defaults
 3. **Opinionated generator** — simple flags, seeds, batch, size presets, LoRA stacking
+4. **Works anywhere** — your GPU box, your laptop, cloud — same tool, same data
 
-CLI-first. Rust binary + managed Python runtime. Local-first.
+CLI-first. Rust binary + managed Python runtime. Local-first, cloud when needed.
 
 ---
 
 ## Current Status
 
-**~15K Rust LOC, ~2K Python LOC. 55 unit tests passing. On `main` branch.**
+**~15K Rust LOC, ~2K Python LOC. 55 unit tests passing. Active branch: `feat/lora-strength`.**
 
 | Area | Status | Notes |
 |------|--------|-------|
@@ -27,11 +32,12 @@ CLI-first. Rust binary + managed Python runtime. Local-first.
 | Config / Auth / GPU detect | ✅ Done | YAML config, HF/CivitAI tokens, NVML + nvidia-smi |
 | Dataset create/validate/caption | ✅ Done | Florence-2/BLIP auto-captioning, tag, resize |
 | Training (presets + executor) | ✅ Working | SDXL LoRA trained successfully, previews generated |
-| Generation (CLI) | ✅ Built | Flux/SDXL/SD1.5 via diffusers, LoRA loading |
+| Generation (CLI) | ✅ Built | Flux/SDXL/SD1.5 via diffusers, LoRA loading, `--json` output flag |
 | Output management | ✅ Done | `modl outputs` list/show/open/search |
 | Runtime bootstrap | ✅ Done | Python venv + ai-toolkit install |
 | Doctor/GC/Export/Import | ✅ Done | Orphan detection, repair, lockfile round-trip |
 | `modl upgrade` | ✅ Done | Self-update from GitHub releases |
+| Preview UI | 🔄 Active | Training evolution + Outputs gallery + metadata panel; Generate tab incoming |
 
 ---
 
@@ -47,16 +53,33 @@ modl CLI (Rust, single binary)
     ▼
 TrainJobSpec / GenerateJobSpec      ◄── serialization boundary
     │
-    ▼
-LocalExecutor                       ◄── spawn Python, parse JSONL events
-    │
-    ▼
-Python runtime (modl_worker/)
-    ├── train_adapter.py            ── spec → ai-toolkit YAML
-    ├── gen_adapter.py              ── diffusers pipeline loading
-    ├── caption_adapter.py          ── Florence-2/BLIP
-    └── protocol.py                 ── JSON-line events over stdout
+    ├──────────────────┬─────────────────────┐
+    ▼                  ▼                     ▼
+LocalExecutor     CloudExecutor         SyncClient
+(spawn Python)    (Modal API)           (R2 via presigned URLs)
+    │                  │                     │
+    ▼                  │                     ▼
+Python runtime         │              Cloudflare R2
+(modl_worker/)         │              └── users/{id}/
+├── train_adapter.py   │                  ├── datasets/   (content-addressed)
+├── gen_adapter.py     │                  ├── loras/      (trained outputs)
+├── caption_adapter.py │                  └── outputs/    (generated images)
+├── llm_adapter.py     │
+└── protocol.py        │
+    (JSONL events)      │
+                        ▼
+                  modl API (Rust / Axum)
+                  ├── auth (JWT, device tokens)
+                  ├── job dispatch → Modal
+                  ├── R2 presigned URL broker
+                  └── artifact sync registry
 ```
+
+**Storage layer**: Cloudflare R2 (S3-compatible, zero egress cost). The modl API
+never touches the data — it issues short-lived presigned URLs, client uploads/downloads
+direct. Datasets are content-addressed (hash first, skip upload if exists). LoRAs and
+outputs sync back automatically after cloud jobs complete. `modl sync` reconciles
+local DB with cloud state.
 
 ---
 
@@ -80,12 +103,15 @@ The pipeline exists end-to-end. SDXL LoRA training works with preview generation
 - [x] Training previews / samples
 - [x] Dataset annotation
 - [x] Style-mode captioning (`--style` strips medium/technique references)
-- [ ] Upgrade captioner to Qwen2.5-VL-7B-Instruct (instruction-following VLM,
-      no regex post-processing needed — tell it "describe content, not style"
-      and it obeys. Fits 4090 in float16. Add as `--model qwen` option,
+- [ ] Upgrade captioner to Qwen3-VL-8B-Instruct (vision-language model,
+      instruction-following: system prompt controls exactly what to describe.
+      No regex post-processing — tell it "describe visual content only, ignore
+      medium and artistic style" and it obeys. ~4.5GB VRAM in fp8, fits easily
+      on a 4090 alongside other work. Add as `--model qwen` option,
       keep Florence-2 as fast default for non-style captioning)
 - [ ] Flux training E2E validation
-- [ ] Generation E2E validation (`modl generate` → image on disk)
+- [x] Generation E2E validation (`modl generate` → image on disk, metadata written)
+- [x] `--json` flag on `modl generate` — machine-readable output for UI and scripting
 - [ ] Fix integration issues that surface on GPU
 
 ### Phase 3 — Multi-arch training support
@@ -122,41 +148,177 @@ See [specs/persistent-worker.md](specs/persistent-worker.md) for full spec.
 - [ ] Rust worker management (auto-spawn, health check, idle timeout)
 - [ ] Model cache with LRU eviction
 
-### Phase 6 — Web UI (`modl serve`)
+### Phase 6 — Web UI (`modl serve`) 🔄 Current sprint
 
 Prompt-first generate page. Training dashboard. Gallery.
-Build only after the CLI flow is rock-solid.
-See [archive/ui-architecture.md](archive/ui-architecture.md) for product spec.
+The preview UI (`modl serve`) is the foundation — Axum server + single HTML
+file already baked into the binary via `include_str!()`. The train→generate→iterate
+loop is the immediate target.
 
-This is the foundation of the paid product — same UI powers `modl serve`
-(browser, GPU users) and the Tauri native app (Phase 8, Mac/laptop users).
-Build with Svelte, compile to a single JS bundle, `include_str!()` into binary.
+**UI stack: React (Vite, TSX) compiled to `dist/index.html`, replaced in binary.**
+Rationale: React over Svelte because familiarity = velocity. Both compile to a
+self-contained bundle; the binary size difference (~20KB) is irrelevant at this
+scale. Same `include_str!()` embed, same Axum API — only the authoring changes.
 
-- [ ] REST + WebSocket API
-- [ ] Svelte UI compiled into binary (migrate from vanilla JS)
-- [ ] Generate page (prompt → image, LoRA selector)
-- [ ] Training dashboard (launch + monitor from UI)
-- [ ] Output gallery
+**`--json` flag strategy**: CLI commands that the UI drives (`generate`, and
+eventually `train`, `dataset caption`) emit JSONL events on stdout when `--json`
+is passed. The UI calls these via `/api/generate` (which spawns the CLI internally)
+or directly polls the existing JSONL job stream. This keeps the CLI as the
+canonical interface — the UI is a thin shell around it, not a parallel path.
 
-### Phase 7 — Cloud training (`--cloud`)
+**Generate tab spec (10 controls + Advanced):**
+- Prompt + negative prompt (collapsed)
+- Model picker (filtered to installed checkpoints)
+- LoRA stack (add/remove rows: name + strength slider)
+- Size preset (square/portrait/landscape + custom)
+- Seed (randomize + lock toggle)
+- Steps, Guidance, Batch count
+- Generate button + live progress (SSE from job stream)
+- Advanced accordion: sampler, clip skip, raw kwargs override
+- **Prompt field designed as textarea with programmatic fill support** (required by
+  "Open as recipe" and future LLM enhance — do this right from day one)
+- Enhance button slot (hidden/disabled until Phase 9 — hook is there, cost is zero)
 
-`modl train --cloud` submits to a managed API. **This is the monetization
-unlock** — Mac/laptop users with no GPU must use cloud, creating recurring
-revenue. Cloud inference deferred (cold start economics are unfavorable).
-See [archive/cloud-plan.md](archive/cloud-plan.md) for architecture and pricing model.
+**Gallery upgrades:**
+- Search (client-side, across prompt/model/lora)
+- Filter chips: model, LoRA, date
+- "Open as recipe" — loads image metadata back into Generate form (the killer feature)
+- Copy prompt / Copy CLI command
+- Re-generate with new seed
 
-- [ ] modl API service (auth, billing, job dispatch)
-- [ ] Modal GPU backend
-- [ ] CloudExecutor.submit() implementation
+**GPU contention strategy (80/20)**: `GET /api/gpu` returns `{vram_total_mb,
+vram_free_mb, training_active}`. `vram_free_mb` via NVML `memory.free` (already
+have NVML). `training_active` via existing `training_status::is_running`. UI
+shows "GPU busy — training in progress" banner + disables Generate button when
+`training_active=true`. No queue system yet — just a hard lock with clear
+messaging. Full queue (Phase 5) deferred until persistent worker exists.
+
+- [x] Outputs gallery with metadata lightbox and delete
+- [x] Training evolution viewer with live status banner
+- [x] Dataset viewer
+- [x] `POST /api/generate` scaffolding + `--json` flag
+- [ ] `GET /api/gpu` endpoint (`vram_total`, `vram_free`, `training_active`)
+- [ ] `GET /api/models` endpoint (installed checkpoints + LoRAs from DB)
+- [ ] React (Vite) project under `src/ui/web/`, builds to `dist/index.html`
+- [ ] Generate page — 10-control form + GPU lock state
+- [ ] LoRA stack component (add/remove rows, strength slider per row)
+- [ ] SSE progress stream during generation
+- [ ] "Open as recipe" — fills Generate form from image metadata
+- [ ] Gallery search + filter chips (client-side, no new API)
+
+### Phase 7a — Identity + storage sync (`modl auth login` / `modl sync`)
+
+**Goal: your `~/.modl/` follows you to any machine.**
+This is the foundation everything cloud-related builds on. No teams, no orgs —
+just you, logged in, with your data available wherever you sit down.
+
+**Why R2 over Modal Volumes**: Modal Volumes are ephemeral, job-scoped, tied to
+Modal's infrastructure. A trained LoRA must outlive the GPU job and be pullable
+to any machine forever. R2 is $0.015/GB/month, zero egress fees, globally accessible.
+At 1000 users with 5GB each: ~$75/month storage cost, irrelevant.
+
+**Data model**: Three artifact classes, each synced differently:
+| Class | Direction | Strategy |
+|-------|-----------|----------|
+| Datasets | Local → Cloud | Content-addressed upload, skip if hash exists |
+| LoRAs | Cloud → Local (after train) + bidirectional push/pull | Keyed by name+version |
+| Outputs | Cloud → Local (after generate) + optional push | Date-grouped, prunable |
+
+Base models (flux-dev, sdxl, etc.) are **never synced** — Modal pulls them from
+HuggingFace directly into a persistent Modal Volume. Users don't pay egress for 11GB files.
+
+- [ ] `modl auth login` — device flow, JWT stored in `~/.modl/config.yaml`
+- [ ] `modl auth whoami` / `modl auth logout`
+- [ ] modl API service: auth endpoint + R2 presigned URL broker
+- [ ] DB schema: add `sync_state` (local-only/synced/cloud-only) + `owner_id` to artifacts
+- [ ] `modl sync` — reconcile local DB with cloud artifact registry
+- [ ] `modl push <lora-id>` / `modl pull me/<lora-id>` — explicit sync for LoRAs
+- [ ] Auto-sync: datasets before cloud job, LoRAs + outputs after job completes
+
+### Phase 7b — Cloud execution (`--cloud`)
+
+`modl train --cloud` and `modl generate --cloud` submit to Modal via the modl API.
+Builds directly on 7a — auth + R2 are prerequisites.
+See [archive/cloud-plan.md](archive/cloud-plan.md) for architecture detail.
+
+**Execution flow**:
+1. Hash dataset → check R2 → upload only if not cached
+2. POST job spec to modl API → dispatches Modal function
+3. Modal pulls dataset from R2, pulls base model from HF (cached in Modal Volume)
+4. Job runs, streams JSONL events back via SSE
+5. Modal pushes LoRA / outputs to R2
+6. Client auto-downloads artifacts, updates local DB
+
+- [ ] Modal GPU backend (train + generate functions)
+- [ ] `CloudExecutor.submit()` implementation
+- [ ] SSE job stream proxied through modl API
+- [ ] Billing: usage tracking per job, Stripe integration
+- [ ] Pricing: per-workflow flat rate (not GPU seconds shown to user)
+
+### Phase 9 — LLM integration (local-first, agentic assist)
+
+Optional local LLM for prompt intelligence. Same adapter pattern as generation —
+`llm_adapter.py` speaks the same JSONL protocol, `/api/enhance` is the single
+new endpoint. The UI hook is already present from Phase 6 (disabled button).
+
+**Guiding principle**: local-first, opt-in, never required. Users without a GPU
+large enough for the LLM skip this entirely — the tool works the same without it.
+
+**Model fit**: Qwen3.5-4B (~3.5GB VRAM in Q4 — fits alongside a running Flux fp8
+pipeline on a 4090). Qwen3.5-9B also fits but leaves less headroom. Alternatively
+route to any OpenAI-compatible API (Ollama, cloud) via config. One adapter,
+multiple backends.
+
+**Use cases in priority order:**
+1. **Prompt enhance** — short phrase → rich detailed prompt. Single call, instant value.
+2. **Story → batch prompts** — "10 scenes from a fantasy quest" → 10 prompts →
+   feed directly into batch generation. Turns a feature into a workflow.
+3. **Caption critique** — review training captions, suggest improvements.
+   Direct quality feedback on dataset preparation before training.
+4. **LoRA naming / tagging assist** — suggest trigger words from dataset samples.
+
+**What NOT to build**: a chat interface, a general assistant, anything that
+requires internet by default. This is a diffusion tool with a smart prompt field,
+not an AI chatbot that happens to generate images.
+
+- [ ] `llm_adapter.py` — local Qwen3.5-4B or OpenAI-compatible API
+- [ ] `POST /api/enhance` — prompt enhance endpoint (stub exists from Phase 6)
+- [ ] `modl pull qwen3.5-4b-instruct` registry entry
+- [ ] Enhance button active in Generate form
+- [ ] Story → prompts mode (textarea with line-per-prompt output)
+- [ ] Caption critique in dataset viewer
+
+### Implicit preference signals (instrument from day one)
+
+Every time a user generates from a specific checkpoint — not the final one, just any checkpoint mid-run — that's a revealed preference signal. No ratings, no surveys. The signal is: "they stopped here and used it."
+
+**What to record per training run** (local DB, synced to cloud):
+- `base_model`, `lora_type`, `dataset_image_count`, `total_steps`
+- `first_generated_at_step` — the checkpoint step the user first generated from (nullable until they do)
+- `marked_final_step` — if they explicitly pick a "best" checkpoint
+
+**What this becomes at scale**: aggregate across users → "style LoRAs on SDXL with 40–60 images →
+users first generate around 6–8k steps" becomes a data-backed default, not a gut feeling. Surface this
+in the UI as a subtle indicator: "most users like this around step X" during eval.
+
+**Cost to implement**: one nullable column (`first_generated_from_step INTEGER`) on the `training_runs`
+table. Write it when `/api/generate` is called and the request references a checkpoint artifact. Zero
+overhead to collect, compound value over time.
+
+- [ ] Add `first_generated_from_step` + `marked_final_step` columns to training_runs DB
+- [ ] Write `first_generated_from_step` on first generate call referencing a checkpoint
+- [ ] Include in cloud sync (Phase 7a) — aggregate is only useful cross-user
+
+---
 
 ### Phase 8 — Native app (Tauri)
 
-Wrap the Phase 6 Svelte UI in a Tauri native app for Mac/Windows distribution.
+Wrap the Phase 6 React UI in a Tauri native app for Mac/Windows distribution.
 Same UI, same Rust core, native webview instead of `localhost` in a browser.
 Targets the **paying user segment**: creative professionals on laptops with no
 GPU who use cloud training (Phase 7).
 
-- [ ] Tauri shell around existing Axum + Svelte stack
+- [ ] Tauri shell around existing Axum + React stack
 - [ ] Native file pickers, drag-and-drop images, dock/taskbar icon
 - [ ] Code signing + DMG/MSI distribution
 - [ ] Auto-update via Tauri updater
@@ -176,22 +338,49 @@ GPU who use cloud training (Phase 7).
 
 ## Business model
 
-**CLI is free, open source. Cloud + native app is the paid product.**
+**CLI is free, open source. Cloud execution + artifact storage is the paid product.**
 
-Two user segments, different value:
+### The actual value proposition
 
-| Segment | What they use | Revenue | Role |
-|---------|--------------|---------|------|
-| GPU box users (Linux, SSH) | CLI + `modl serve` in browser | Free / low (cloud for heavy models) | Community, testers, contributors |
-| Mac/laptop users (no GPU) | Tauri native app + cloud training | Paid (recurring cloud usage) | Paying customers |
+Not "GPU time for people without GPUs." That's a commodity — Modal, RunPod, and
+Lambda all sell it cheaper. The real product is **the workflow**: dataset prep →
+captioning → training → generation → iterate, with zero configuration overhead.
+The person who was spending a weekend reading ai-toolkit docs now spends 10 minutes.
+That time savings is what people pay for. Price by outcome, not by GPU second.
 
-The CLI builds credibility and community. Open-source model manager that
-"just works" attracts contributors and earns trust. The native app + cloud
-backend is where revenue comes from — creative professionals who want
-polish and don't have (or want to manage) GPU hardware.
+### Pricing structure (don't show users GPU meters)
 
-Pricing model TBD — likely per-minute GPU billing with a markup over
-raw Modal/RunPod costs, or a subscription with included training minutes.
+| Action | Price | What's included |
+|--------|-------|------------------|
+| Train style LoRA | ~$4–6 | Captioning + training + LoRA stored in cloud |
+| Train character LoRA | ~$8–12 | Longer run, more steps |
+| Generate batch (10 images) | ~$0.50–1 | With loaded LoRA, outputs stored |
+| Storage | Free up to 5GB, then $2/10GB | Datasets + LoRAs + outputs |
+
+Users never see "$0.0023/GPU-sec." They see "Train LoRA — $5." This is a
+creative tool, not a cloud provider console.
+
+### User segments
+
+| Segment | How they use it | Revenue |
+|---------|-----------------|----------|
+| GPU box users (Linux) | CLI + `modl serve`, free local usage | Free tier, occasional cloud for heavy models |
+| Any-machine users | CLI + cloud, data synced everywhere | Recurring — they train and generate regularly |
+| Tauri app users (Mac/Windows) | Native app + cloud, no GPU needed | Highest LTV — all compute is cloud |
+
+### Where this is going (honest take)
+
+The endgame isn't a better ComfyUI. It's closer to what **Vercel did for deployment**:
+took something that required deep expertise (servers, nginx, CI, certs) and made
+it a single command. modl is doing the same for diffusion training. The open-source
+CLI is the credibility layer — it proves the tool is serious and attracts the
+people who would otherwise spend weekends in config files. The cloud product
+monetizes the much larger group who want the output without the process.
+
+If traction happens: the natural expansion is **shared LoRA libraries within
+a team/studio** (one person trains the house style, everyone generates with it).
+But don't build that now — let real users ask for it. The individual "works
+anywhere" story is the one to ship first and validate.
 
 ---
 

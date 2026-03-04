@@ -4,10 +4,7 @@ use console::style;
 pub async fn run(port: u16, no_open: bool, foreground: bool) -> Result<()> {
     if foreground {
         // Foreground mode: blocks the terminal, shows logs
-        eprintln!(
-            "{}",
-            style("  Starting training preview UI...").cyan().bold()
-        );
+        eprintln!("{}", style("  Starting modl UI...").cyan().bold());
         return crate::ui::server::start(port, !no_open).await;
     }
 
@@ -16,7 +13,7 @@ pub async fn run(port: u16, no_open: bool, foreground: bool) -> Result<()> {
     if is_listening(port) {
         let url = format!("http://127.0.0.1:{port}");
         eprintln!(
-            "  {} Preview already running at {url}",
+            "  {} modl UI already running at {url}",
             style("✓").green().bold(),
         );
         if !no_open {
@@ -44,7 +41,7 @@ fn spawn_background(port: u16, no_open: bool) -> Result<()> {
     let exe = std::env::current_exe()?;
     let child = Command::new(&exe)
         .args([
-            "preview",
+            "serve",
             "--foreground",
             "--no-open",
             "--port",
@@ -60,7 +57,7 @@ fn spawn_background(port: u16, no_open: bool) -> Result<()> {
 
     let url = format!("http://127.0.0.1:{port}");
     eprintln!(
-        "  {} Preview server started in background (PID {})",
+        "  {} modl UI started (PID {})",
         style("✓").green().bold(),
         child.id()
     );
