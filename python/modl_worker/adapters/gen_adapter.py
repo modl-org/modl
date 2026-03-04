@@ -241,6 +241,7 @@ _HF_MODEL_IDS = {
     "flux-dev": "black-forest-labs/FLUX.1-dev",
     "flux-schnell": "black-forest-labs/FLUX.1-schnell",
     "sdxl": "stabilityai/stable-diffusion-xl-base-1.0",
+    "sdxl-base-1.0": "stabilityai/stable-diffusion-xl-base-1.0",
     "sd-1.5": "stable-diffusion-v1-5/stable-diffusion-v1-5",
 }
 

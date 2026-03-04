@@ -55,10 +55,10 @@ fn resolve_lora(name: &str, weight: f32, db: &Database) -> Result<Option<LoraRef
         }));
     }
 
-    // Look up in installed models
+    // Look up in installed models (match by ID or display name)
     let installed = db.list_installed(None)?;
     for model in &installed {
-        if model.name == name && model.asset_type == "lora" {
+        if (model.name == name || model.id == name) && model.asset_type == "lora" {
             return Ok(Some(LoraRef {
                 name: model.name.clone(),
                 path: model.store_path.clone(),
@@ -92,11 +92,11 @@ fn default_guidance(base_model: &str) -> f32 {
     }
 }
 
-/// Resolve base model path from installed models.
+/// Resolve base model path from installed models (match by ID or display name).
 fn resolve_base_model_path(base_model: &str, db: &Database) -> Option<String> {
     let installed = db.list_installed(None).ok()?;
     for model in &installed {
-        if model.name == base_model
+        if (model.name == base_model || model.id == base_model)
             && (model.asset_type == "checkpoint" || model.asset_type == "diffusion_model")
         {
             return Some(model.store_path.clone());
