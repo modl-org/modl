@@ -12,13 +12,11 @@ use axum::{
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
@@ -103,21 +101,33 @@ struct InstalledModel {
     model_type: String,
     variant: Option<String>,
     size_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trigger_word: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base_model_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sample_image_url: Option<String>,
 }
 
 #[derive(Clone)]
 struct UiState {
     generate_events: broadcast::Sender<String>,
-    generate_running: Arc<AtomicBool>,
+    generate_inner: Arc<tokio::sync::Mutex<GenerateInner>>,
 }
 
-#[derive(Deserialize)]
+/// Internal generation state protected by a Mutex.
+struct GenerateInner {
+    running: bool,
+    queue: VecDeque<GenerateRequest>,
+}
+
+#[derive(Deserialize, Clone)]
 struct GenerateLoraRequest {
     id: String,
     strength: f32,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct GenerateRequest {
     prompt: String,
     #[serde(default)]
@@ -137,6 +147,8 @@ struct GenerateRequest {
 #[derive(Serialize)]
 struct GenerateAcceptedResponse {
     status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    queue_length: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -169,7 +181,10 @@ pub async fn start(port: u16, open_browser: bool) -> Result<()> {
     let (generate_events, _) = broadcast::channel(256);
     let state = UiState {
         generate_events,
-        generate_running: Arc::new(AtomicBool::new(false)),
+        generate_inner: Arc::new(tokio::sync::Mutex::new(GenerateInner {
+            running: false,
+            queue: VecDeque::new(),
+        })),
     };
 
     let app = Router::new()
@@ -178,6 +193,10 @@ pub async fn start(port: u16, open_browser: bool) -> Result<()> {
         .route("/api/models", get(api_list_models))
         .route("/api/generate", post(api_generate))
         .route("/api/generate/stream", get(api_generate_stream))
+        .route(
+            "/api/generate/queue",
+            get(api_queue_status).delete(api_clear_queue),
+        )
         .route("/api/enhance", post(api_enhance_prompt))
         .route("/api/runs", get(api_list_runs))
         .route("/api/runs/{name}", get(api_get_run))
@@ -482,87 +501,219 @@ async fn api_list_runs() -> impl IntoResponse {
     Json(runs)
 }
 
-/// Drop guard that resets `generate_running` to `false` when it goes out of scope,
-/// even if the spawned task panics.
-struct RunGuard(Arc<AtomicBool>);
+// ---------------------------------------------------------------------------
+// Generation queue processing
+// ---------------------------------------------------------------------------
 
-impl Drop for RunGuard {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
+/// Run a single generation request, sending progress to the broadcast channel.
+async fn run_single_generate(sender: &broadcast::Sender<String>, req: GenerateRequest) {
+    eprintln!(
+        "[generate] job started: model={} prompt={:?} size={}x{} steps={} seed={:?}",
+        req.model_id,
+        &req.prompt[..req.prompt.len().min(80)],
+        req.width,
+        req.height,
+        req.steps,
+        req.seed
+    );
+
+    if req
+        .negative_prompt
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        let _ =
+            sender.send("warning: negative prompt is currently ignored by preview UI".to_string());
+    }
+
+    let size = format!("{}x{}", req.width, req.height);
+    let lora_id = req.loras.first().map(|l| l.id.clone());
+    let lora_strength = req.loras.first().map(|l| l.strength).unwrap_or(1.0);
+
+    if let Some(ref id) = lora_id {
+        eprintln!("[generate]   lora={id} strength={lora_strength}");
+    }
+
+    let _ = sender.send("starting generation".to_string());
+
+    let run_result = crate::cli::generate::run(
+        &req.prompt,
+        Some(&req.model_id),
+        lora_id.as_deref(),
+        lora_strength,
+        req.seed,
+        &size,
+        Some(req.steps),
+        Some(req.guidance),
+        req.num_images,
+        false,
+        None,
+        true,
+    )
+    .await;
+
+    match run_result {
+        Ok(()) => {
+            eprintln!("[generate] job completed successfully");
+            let _ = sender.send("completed".to_string());
+        }
+        Err(err) => {
+            eprintln!("[generate] job failed: {err:#}");
+            let _ = sender.send(format!("error: {err}"));
+        }
     }
 }
+
+/// Background loop: process the initial request, then drain the queue.
+async fn generate_loop(
+    sender: broadcast::Sender<String>,
+    inner: Arc<tokio::sync::Mutex<GenerateInner>>,
+    first_req: GenerateRequest,
+) {
+    run_single_generate(&sender, first_req).await;
+
+    loop {
+        let next = {
+            let mut state = inner.lock().await;
+            match state.queue.pop_front() {
+                Some(req) => {
+                    let remaining = state.queue.len();
+                    drop(state);
+                    let _ = sender.send(format!("queue:{remaining}"));
+                    req
+                }
+                None => {
+                    state.running = false;
+                    drop(state);
+                    let _ = sender.send("queue:empty".to_string());
+                    break;
+                }
+            }
+        };
+        run_single_generate(&sender, next).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Generation API handlers
+// ---------------------------------------------------------------------------
 
 async fn api_generate(
     State(state): State<UiState>,
     Json(req): Json<GenerateRequest>,
 ) -> impl IntoResponse {
-    if state.generate_running.swap(true, Ordering::SeqCst) {
-        return (StatusCode::CONFLICT, "A generate job is already running").into_response();
+    // ── Preflight: validate model + runtime before accepting ──────────
+    if let Err(err) = crate::core::preflight::for_generation(&req.model_id) {
+        let msg = format!("{err:#}");
+        eprintln!("[generate] preflight failed: {msg}");
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": msg })),
+        )
+            .into_response();
+    }
+    // Also validate LoRA references
+    if let Some(first_lora) = req.loras.first() {
+        let db = match Database::open() {
+            Ok(db) => db,
+            Err(e) => {
+                let msg = format!("Database error: {e:#}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": msg })),
+                )
+                    .into_response();
+            }
+        };
+        let installed = db.list_installed(None).unwrap_or_default();
+        let found = installed
+            .iter()
+            .any(|m| (m.id == first_lora.id || m.name == first_lora.id) && m.asset_type == "lora");
+        if !found {
+            let msg = format!("LoRA not found: {}", first_lora.id);
+            eprintln!("[generate] preflight failed: {msg}");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": msg })),
+            )
+                .into_response();
+        }
     }
 
+    let mut inner = state.generate_inner.lock().await;
+
+    if inner.running {
+        // Already generating — enqueue
+        inner.queue.push_back(req);
+        let pos = inner.queue.len();
+        drop(inner);
+        let _ = state.generate_events.send(format!("queue:{pos}"));
+        eprintln!("[generate] enqueued (position {pos})");
+        return (
+            StatusCode::ACCEPTED,
+            Json(GenerateAcceptedResponse {
+                status: "queued".to_string(),
+                queue_length: Some(pos as u32),
+            }),
+        )
+            .into_response();
+    }
+
+    inner.running = true;
+    drop(inner);
+
     let sender = state.generate_events.clone();
-    let running = state.generate_running.clone();
+    let gen_inner = state.generate_inner.clone();
+    let _ = sender.send("queued".to_string());
 
     tokio::spawn(async move {
-        let _guard = RunGuard(running);
-        let _ = sender.send("queued".to_string());
-
-        if req
-            .negative_prompt
-            .as_deref()
-            .is_some_and(|s| !s.trim().is_empty())
-        {
-            let _ = sender
-                .send("warning: negative prompt is currently ignored by preview UI".to_string());
-        }
-
-        let size = format!("{}x{}", req.width, req.height);
-        let lora_id = req.loras.first().map(|l| l.id.clone());
-        let lora_strength = req.loras.first().map(|l| l.strength).unwrap_or(1.0);
-        let _ = sender.send("starting generation".to_string());
-
-        let run_result = crate::cli::generate::run(
-            &req.prompt,
-            Some(&req.model_id),
-            lora_id.as_deref(),
-            lora_strength,
-            req.seed,
-            &size,
-            Some(req.steps),
-            Some(req.guidance),
-            req.num_images,
-            false,
-            None,
-            true,
-        )
-        .await;
-
-        match run_result {
-            Ok(()) => {
-                let _ = sender.send("completed".to_string());
-            }
-            Err(err) => {
-                let _ = sender.send(format!("error: {err}"));
-            }
-        }
-
-        // `_guard` drops here, resetting `generate_running` to false
+        generate_loop(sender, gen_inner, req).await;
     });
 
     (
         StatusCode::ACCEPTED,
         Json(GenerateAcceptedResponse {
             status: "queued".to_string(),
+            queue_length: Some(0),
         }),
     )
         .into_response()
 }
 
+async fn api_queue_status(State(state): State<UiState>) -> impl IntoResponse {
+    let inner = state.generate_inner.lock().await;
+    Json(serde_json::json!({
+        "running": inner.running,
+        "queue_length": inner.queue.len(),
+    }))
+}
+
+async fn api_clear_queue(State(state): State<UiState>) -> impl IntoResponse {
+    let mut inner = state.generate_inner.lock().await;
+    let cleared = inner.queue.len();
+    inner.queue.clear();
+    drop(inner);
+    let _ = state.generate_events.send("queue:0".to_string());
+    eprintln!("[generate] queue cleared ({cleared} items)");
+    Json(serde_json::json!({ "cleared": cleared }))
+}
+
 async fn api_generate_stream(
     State(state): State<UiState>,
 ) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
-    let running_now = state.generate_running.load(Ordering::SeqCst);
-    let initial = if running_now { "running" } else { "idle" }.to_string();
+    let inner = state.generate_inner.lock().await;
+    let running_now = inner.running;
+    let queue_len = inner.queue.len();
+    drop(inner);
+    let initial = if running_now {
+        if queue_len > 0 {
+            format!("running:queue:{queue_len}")
+        } else {
+            "running".to_string()
+        }
+    } else {
+        "idle".to_string()
+    };
 
     let first =
         stream::once(async move { Ok::<Event, Infallible>(Event::default().data(initial)) });
@@ -659,12 +810,72 @@ async fn api_list_models() -> impl IntoResponse {
         models
             .iter()
             .filter(|m| matches!(m.asset_type.as_str(), "checkpoint" | "lora"))
-            .map(|m| InstalledModel {
-                id: m.id.clone(),
-                name: m.name.clone(),
-                model_type: m.asset_type.clone(),
-                variant: m.variant.clone(),
-                size_bytes: m.size,
+            .map(|m| {
+                let mut model = InstalledModel {
+                    id: m.id.clone(),
+                    name: m.name.clone(),
+                    model_type: m.asset_type.clone(),
+                    variant: m.variant.clone(),
+                    size_bytes: m.size,
+                    trigger_word: None,
+                    base_model_id: None,
+                    sample_image_url: None,
+                };
+
+                // Enrich LoRAs with artifact metadata + sample image
+                if m.asset_type == "lora" {
+                    // Try to find artifact metadata (trigger_word, base_model)
+                    if let Ok(Some(artifact)) = db.find_artifact(&m.id)
+                        && let Some(ref meta_str) = artifact.metadata
+                        && let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_str)
+                    {
+                        model.trigger_word = meta
+                            .get("trigger_word")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        model.base_model_id = meta
+                            .get("base_model")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                    }
+
+                    // Try to find a sample image from training output
+                    // For trained LoRAs (train:<name>:<hash>), extract name segment
+                    let lora_name = if m.id.starts_with("train:") {
+                        m.id.split(':').nth(1).map(|s| s.to_string())
+                    } else {
+                        None
+                    };
+                    if let Some(name) = &lora_name {
+                        let samples_dir = modl_root()
+                            .join("training_output")
+                            .join(name)
+                            .join(name)
+                            .join("samples");
+                        if samples_dir.exists() {
+                            // Pick the last sample image (highest step)
+                            if let Ok(entries) = std::fs::read_dir(&samples_dir) {
+                                let mut images: Vec<String> = entries
+                                    .filter_map(|e| e.ok())
+                                    .filter(|e| {
+                                        e.path()
+                                            .extension()
+                                            .is_some_and(|ext| ext == "jpg" || ext == "png")
+                                    })
+                                    .map(|e| e.file_name().to_string_lossy().to_string())
+                                    .collect();
+                                images.sort();
+                                if let Some(last) = images.last() {
+                                    model.sample_image_url = Some(format!(
+                                        "training_output/{name}/{name}/samples/{last}"
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                model
             })
             .collect()
     })

@@ -1,4 +1,5 @@
-import { Input } from '@/components/ui/input'
+import { MinusIcon, PlusIcon } from 'lucide-react'
+import { Button } from '@/components/ui/button'
 import type { GenerateFormState } from './generate-state'
 
 type Props = {
@@ -7,33 +8,37 @@ type Props = {
 }
 
 export function BatchPanel({ form, setForm }: Props) {
+  const set = (n: number) => {
+    if (n >= 1 && n <= 16) setForm((prev) => ({ ...prev, batch_count: n }))
+  }
+
   return (
     <div className="space-y-1.5">
-      <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-        Batch
-      </span>
-      <div className="flex items-center gap-2">
-        <label className="flex flex-1 flex-col gap-1">
-          <span className="text-[10px] text-muted-foreground/70">Count</span>
-          <Input
-            type="number"
-            min={1}
-            max={16}
-            value={form.batch_count}
-            className="h-7 bg-background/60 text-xs"
-            onChange={(e) => {
-              const n = Number(e.target.value)
-              if (Number.isFinite(n) && n >= 1 && n <= 16) {
-                setForm((prev) => ({ ...prev, batch_count: Math.floor(n) }))
-              }
-            }}
-          />
-        </label>
-        {form.batch_count > 1 && (
-          <p className="mt-4 text-[10px] text-muted-foreground/50">
-            {form.batch_count} images will be generated
-          </p>
-        )}
+      <span className="text-[11px] font-medium text-muted-foreground">Images</span>
+      <div className="flex items-center gap-1.5">
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          className="size-7"
+          disabled={form.batch_count <= 1}
+          onClick={() => set(form.batch_count - 1)}
+        >
+          <MinusIcon className="size-3" />
+        </Button>
+        <span className="w-6 text-center font-mono text-xs tabular-nums">
+          {form.batch_count}
+        </span>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          className="size-7"
+          disabled={form.batch_count >= 16}
+          onClick={() => set(form.batch_count + 1)}
+        >
+          <PlusIcon className="size-3" />
+        </Button>
       </div>
     </div>
   )

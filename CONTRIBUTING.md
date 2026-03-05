@@ -76,6 +76,31 @@ All three must pass. CI runs these on every PR across Linux, macOS, and Windows.
 
 Model manifests live in a separate repo: [modl-registry](https://github.com/modl-org/modl-registry). See that repo's CONTRIBUTING.md for how to add models.
 
+## Developing the UI (`modl serve`)
+
+The web UI lives in `src/ui/web/` (React + Vite + Tailwind). Assets are embedded into the Rust binary via `include_str!` at compile time, so the production build is fully self-contained.
+
+For development, use the Vite dev server — changes hot-reload instantly without rebuilding Rust:
+
+```bash
+# Terminal 1: run the Rust backend (API + file server on :3333)
+modl serve
+
+# Terminal 2: run Vite dev server with hot-reload on :5173
+cd src/ui/web && npm run dev
+```
+
+Open **http://localhost:5173** (not :3333). Vite proxies `/api` and `/files` requests to the backend automatically.
+
+When you're ready to commit, build the production bundle and recompile:
+
+```bash
+cd src/ui/web && npx vite build   # outputs to src/ui/dist/
+cd ../../../ && cargo build --release
+```
+
+`src/ui/dist/` is checked into git so that `cargo build` works without requiring Node.js.
+
 ## General Guidelines
 
 - Run `cargo fmt` and `cargo clippy -- -D warnings` before submitting

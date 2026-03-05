@@ -1,5 +1,6 @@
+import { useState, useRef, useEffect } from 'react'
+import { SquareIcon, RectangleHorizontalIcon, RectangleVerticalIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import { SIZE_PRESETS, detectSizePreset, type GenerateFormState } from './generate-state'
 
 type Props = {
@@ -7,9 +8,60 @@ type Props = {
   setForm: React.Dispatch<React.SetStateAction<GenerateFormState>>
 }
 
-function parseNum(val: string, fallback: number): number {
-  const n = Number(val)
-  return Number.isFinite(n) && n > 0 ? n : fallback
+/** Snap a value to the nearest multiple of 8, clamped to [128, 2048] */
+function snapTo8(val: number): number {
+  const clamped = Math.max(128, Math.min(2048, val))
+  return Math.round(clamped / 8) * 8
+}
+
+/** Inline editable size value — click to type, blur/Enter to commit */
+function EditableSize({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(String(value))
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (editing) {
+      setDraft(String(value))
+      requestAnimationFrame(() => inputRef.current?.select())
+    }
+  }, [editing, value])
+
+  const commit = () => {
+    setEditing(false)
+    const n = Number(draft)
+    if (Number.isFinite(n) && n > 0) onChange(n)
+  }
+
+  if (editing) {
+    return (
+      <input
+        ref={inputRef}
+        className="w-12 bg-transparent text-center text-xs text-foreground outline-none border-b border-primary/50"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') setEditing(false) }}
+      />
+    )
+  }
+
+  return (
+    <button
+      type="button"
+      className="cursor-text rounded px-1.5 py-0.5 text-xs tabular-nums text-foreground/80 hover:bg-secondary/50"
+      onClick={() => setEditing(true)}
+    >
+      {value}
+    </button>
+  )
+}
+
+/** Map preset aspect label to an icon */
+function presetIcon(label: string) {
+  if (label === '1:1') return <SquareIcon className="size-3" />
+  if (label === '3:4' || label === '9:16') return <RectangleVerticalIcon className="size-3" />
+  return <RectangleHorizontalIcon className="size-3" />
 }
 
 export function SizePanel({ form, setForm }: Props) {
@@ -21,11 +73,7 @@ export function SizePanel({ form, setForm }: Props) {
 
   return (
     <div className="space-y-2.5">
-      <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-        Size
-      </span>
-
-      {/* Preset buttons */}
+      {/* Preset buttons with icons */}
       <div className="flex gap-1">
         {SIZE_PRESETS.map((preset) => (
           <Button
@@ -33,49 +81,28 @@ export function SizePanel({ form, setForm }: Props) {
             type="button"
             size="sm"
             variant={activePreset === preset.label ? 'secondary' : 'outline'}
-            className="h-7 flex-1 px-1 text-[11px]"
+            className="h-7 flex-1 gap-1 px-1 text-[11px]"
             onClick={() => applyPreset(preset.width, preset.height)}
           >
+            {presetIcon(preset.label)}
             {preset.label}
           </Button>
         ))}
       </div>
 
-      {/* Custom dimensions */}
-      <div className="grid grid-cols-2 gap-2">
-        <label className="flex flex-col gap-1">
-          <span className="text-[10px] text-muted-foreground/70">W</span>
-          <Input
-            type="number"
-            min={128}
-            max={2048}
-            step={64}
-            value={form.width}
-            className="h-7 bg-background/60 text-xs"
-            onChange={(e) =>
-              setForm((prev) => ({ ...prev, width: parseNum(e.target.value, prev.width) }))
-            }
-          />
-        </label>
-        <label className="flex flex-col gap-1">
-          <span className="text-[10px] text-muted-foreground/70">H</span>
-          <Input
-            type="number"
-            min={128}
-            max={2048}
-            step={64}
-            value={form.height}
-            className="h-7 bg-background/60 text-xs"
-            onChange={(e) =>
-              setForm((prev) => ({ ...prev, height: parseNum(e.target.value, prev.height) }))
-            }
-          />
-        </label>
+      {/* Dimensions display — click to edit */}
+      <div className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
+        <EditableSize
+          value={form.width}
+          onChange={(v) => setForm((prev) => ({ ...prev, width: snapTo8(v) }))}
+        />
+        <span className="text-muted-foreground/40">×</span>
+        <EditableSize
+          value={form.height}
+          onChange={(v) => setForm((prev) => ({ ...prev, height: snapTo8(v) }))}
+        />
+        <span className="text-[10px] text-muted-foreground/40">px</span>
       </div>
-
-      {activePreset === 'custom' && (
-        <p className="text-[10px] text-muted-foreground/50">Custom dimensions</p>
-      )}
     </div>
   )
 }

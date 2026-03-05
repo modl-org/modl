@@ -1,15 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { Separator } from '@/components/ui/separator'
+import {
+  DownloadIcon,
+  Maximize2Icon,
+  Minimize2Icon,
+} from 'lucide-react'
 import { api, type GeneratedImage, type GenerateRequest, type GpuStatus, type InstalledModel } from '../../api'
 import { useLocalStorage } from '../../hooks/useLocalStorage'
+import { CollapsibleSection } from '../ui/collapsible-section'
 import { BatchPanel } from './BatchPanel'
 import { GenerateActions } from './GenerateActions'
 import { GenerateProgressBar, type GenerateProgressState } from './GenerateProgressBar'
 import { GenerationGallery } from './GenerationGallery'
 import { ImagePreview, type PreviewImage } from './ImagePreview'
-import { Img2ImgPanel } from './Img2ImgPanel'
 import { LoraPanel } from './LoraPanel'
 import { ModelPanel } from './ModelPanel'
 import { PromptPanel } from './PromptPanel'
@@ -18,26 +22,7 @@ import { SizePanel } from './SizePanel'
 import { createDefaultGenerateFormState, type GenerateFormState } from './generate-state'
 
 // ---------------------------------------------------------------------------
-// GenerateView — A1111-inspired generate interface
-//
-// Layout:
-//   ┌─────────────────────────────┬──────────────────┐
-//   │  ImagePreview (center)      │  Controls (right) │
-//   │                             │  ┌──────────────┐ │
-//   │                             │  │ Model        │ │
-//   │                             │  │ LoRA         │ │
-//   │                             │  │ Size         │ │
-//   │                             │  │ Sampling     │ │
-//   │                             │  │ Batch        │ │
-//   │                             │  │ Img2Img      │ │
-//   │                             │  └──────────────┘ │
-//   ├─────────────────────────────┼──────────────────┤
-//   │  Prompt area                │  [Generate]       │
-//   ├─────────────────────────────┴──────────────────┤
-//   │  Progress bar                                   │
-//   ├────────────────────────────────────────────────┤
-//   │  Recent gallery strip                           │
-//   └────────────────────────────────────────────────┘
+// GenerateView — pro sidebar layout with scrollable controls + fixed canvas
 // ---------------------------------------------------------------------------
 
 type Props = {
@@ -56,6 +41,8 @@ export function GenerateView({ setTab: _setTab }: Props) {
   const [progressState, setProgressState] = useState<GenerateProgressState>({ status: 'idle' })
   const [previewImages, setPreviewImages] = useState<PreviewImage[]>([])
   const expectedCountRef = useRef(1)
+  const [canvasFit, setCanvasFit] = useState<'fit' | 'fill'>('fit')
+  const [queueCount, setQueueCount] = useState(0)
 
   // ── Queries ──────────────────────────────────────────────────────────
   const { data: gpu = { training_active: false } as GpuStatus } = useQuery({
@@ -83,15 +70,127 @@ export function GenerateView({ setTab: _setTab }: Props) {
 
   const isGenerating = progressState.status === 'submitting' || progressState.status === 'streaming'
 
-  // ── Submit generation ────────────────────────────────────────────────
+  // Ref to hold the active EventSource so we can close it on unmount
+  const eventSourceRef = useRef<EventSource | null>(null)
+
+  // Clean up EventSource on unmount
+  useEffect(() => {
+    return () => {
+      eventSourceRef.current?.close()
+    }
+  }, [])
+
+  // ── Keyboard shortcut: Ctrl/Cmd + Enter ──────────────────────────────
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault()
+        if (form.prompt.trim() && form.base_model_id) {
+          handleGenerate()
+        }
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  })
+
+  // ── Open / ensure a persistent SSE connection ───────────────────────
+  const ensureSSE = useCallback(() => {
+    if (eventSourceRef.current) return // already open
+
+    const es = new EventSource('/api/generate/stream')
+    eventSourceRef.current = es
+
+    es.onmessage = (event) => {
+      const message: string = event.data
+      // Skip pings
+      if (message === 'idle' || message === 'keepalive') return
+      // Skip initial running / running:queue:N pings
+      if (message === 'running' || message.startsWith('running:queue:')) return
+
+      const lower = message.toLowerCase()
+
+      // Queue status events from server
+      if (lower === 'queue:empty') {
+        setQueueCount(0)
+        return
+      }
+      if (lower.startsWith('queue:')) {
+        const n = parseInt(message.slice(6), 10)
+        if (Number.isFinite(n)) setQueueCount(n)
+        return
+      }
+
+      // Check for error
+      if (lower.startsWith('error:')) {
+        const errMsg = message.slice(6).trim() || 'Generation failed.'
+        console.error('[generate] server error:', errMsg)
+        toast.error(errMsg)
+        setProgressState({ status: 'error', message: errMsg })
+        return
+      }
+
+      // Check for completion
+      if (lower.includes('completed') || lower.includes('done')) {
+        const count = expectedCountRef.current
+
+        // Refresh outputs to find the new images
+        void queryClient.invalidateQueries({ queryKey: ['outputs'] }).then(() => {
+          api.outputs().then((outputs) => {
+            const allImages: PreviewImage[] = []
+            for (const group of outputs) {
+              for (const img of group.images) {
+                allImages.push({ url: `/files/${img.path}`, seed: img.seed })
+              }
+            }
+            allImages.sort((a, b) => b.url.localeCompare(a.url))
+            setPreviewImages(allImages.slice(0, count))
+          }).catch(() => { /* images display on next refresh */ })
+        })
+
+        toast.success(`Generated ${count} image${count !== 1 ? 's' : ''}`)
+        setProgressState({ status: 'done', count, images: [] })
+        return
+      }
+
+      // Update streaming log lines
+      setProgressState((prev) => {
+        if (prev.status !== 'streaming' && prev.status !== 'submitting') return prev
+        const lines = prev.status === 'streaming' ? [...prev.lines.slice(-59), message] : [message]
+        return { status: 'streaming', lines, step: prev.status === 'streaming' ? prev.step : undefined, totalSteps: prev.status === 'streaming' ? prev.totalSteps : undefined }
+      })
+
+      // Try to parse structured step progress
+      try {
+        const parsed = JSON.parse(message)
+        if (parsed.step != null && parsed.total_steps != null) {
+          setProgressState((prev) => {
+            if (prev.status !== 'streaming') return prev
+            return { ...prev, step: parsed.step, totalSteps: parsed.total_steps }
+          })
+        }
+      } catch {
+        // Not JSON — raw log line, already handled above
+      }
+    }
+
+    es.onerror = () => {
+      console.warn('[generate] SSE stream disconnected — will reconnect on next generate')
+      es.close()
+      eventSourceRef.current = null
+      setProgressState((prev) =>
+        prev.status === 'streaming' || prev.status === 'submitting'
+          ? { status: 'error', message: 'Progress stream disconnected.' }
+          : prev,
+      )
+    }
+  }, [queryClient])
+
+  // ── Submit generation (supports enqueue) ─────────────────────────────
   const handleGenerate = useCallback(async () => {
-    if (isGenerating) return
     if (!form.prompt.trim() || !form.base_model_id) return
 
-    expectedCountRef.current = form.batch_count
-    setProgressState({ status: 'submitting' })
-    setPreviewImages([])
-
+    // Build the request
     const req: GenerateRequest = {
       prompt: form.prompt,
       negative_prompt: form.negative_prompt.trim() || undefined,
@@ -105,106 +204,49 @@ export function GenerateView({ setTab: _setTab }: Props) {
       loras: form.loras.map((l) => ({ id: l.id, strength: l.strength })),
     }
 
+    // If not currently generating, this is a fresh start
+    if (!isGenerating) {
+      expectedCountRef.current = form.batch_count
+      setPreviewImages([])
+      setProgressState({ status: 'submitting' })
+    }
+
+    // Ensure SSE is connected
+    ensureSSE()
+
+    console.log('[generate] submitting:', req.model_id, req.prompt.slice(0, 60))
+
     try {
       const res = await api.generate(req)
       if (!res.ok) {
-        const text = await res.text()
-        throw new Error(text || `HTTP ${res.status}`)
+        let message = `HTTP ${res.status}`
+        try {
+          const body = await res.json()
+          if (body.error) message = body.error
+        } catch {
+          const text = await res.text()
+          if (text) message = text
+        }
+        throw new Error(message)
       }
-      setProgressState({ status: 'streaming', lines: [] })
+      const body = await res.json()
+      const queueLen = body.queue_length ?? 0
+      setQueueCount(queueLen)
+
+      if (queueLen > 0) {
+        toast.info(`Enqueued — position ${queueLen}`)
+      } else if (!isGenerating) {
+        setProgressState({ status: 'streaming', lines: [] })
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      setProgressState({ status: 'error', message })
-    }
-  }, [form, isGenerating])
-
-  // ── SSE event stream ─────────────────────────────────────────────────
-  useEffect(() => {
-    if (progressState.status !== 'streaming') return
-
-    let done = false
-    const finish = (nextState: GenerateProgressState) => {
-      if (done) return
-      done = true
-      setProgressState(nextState)
-    }
-
-    const eventSource = new EventSource('/api/generate/stream')
-
-    eventSource.onmessage = (event) => {
-      const message: string = event.data
-
-      setProgressState((prev) => {
-        if (prev.status !== 'streaming') return prev
-        return {
-          status: 'streaming',
-          lines: [...prev.lines.slice(-59), message],
-          step: prev.step,
-          totalSteps: prev.totalSteps,
-        }
-      })
-
-      const lower = message.toLowerCase()
-
-      // Check for error
-      if (lower.startsWith('error:')) {
-        eventSource.close()
-        finish({ status: 'error', message: message.slice(6).trim() || 'Generation failed.' })
-        return
-      }
-
-      // Check for completion
-      if (lower.includes('completed') || lower.includes('done')) {
-        const count = expectedCountRef.current
-        eventSource.close()
-
-        // Refresh outputs to find the new images
-        void queryClient.invalidateQueries({ queryKey: ['outputs'] }).then(() => {
-          // Fetch latest outputs to populate preview
-          api.outputs().then((outputs) => {
-            const allImages: PreviewImage[] = []
-            for (const group of outputs) {
-              for (const img of group.images) {
-                allImages.push({ url: `/files/${img.path}`, seed: img.seed })
-              }
-            }
-            allImages.sort((a, b) => {
-              // Newest first — use url as proxy since they contain timestamps
-              return b.url.localeCompare(a.url)
-            })
-            setPreviewImages(allImages.slice(0, count))
-          }).catch(() => {
-            // Silently handle — images display on next refresh
-          })
-        })
-
-        finish({ status: 'done', count, images: [] })
-        toast.success(`Generated ${count} image${count !== 1 ? 's' : ''}`)
-      }
-
-      // Try to parse structured progress (step/total from JSON events)
-      try {
-        const parsed = JSON.parse(message)
-        if (parsed.step != null && parsed.total_steps != null) {
-          setProgressState((prev) => {
-            if (prev.status !== 'streaming') return prev
-            return { ...prev, step: parsed.step, totalSteps: parsed.total_steps }
-          })
-        }
-      } catch {
-        // Not JSON — that's fine, raw log line
+      console.error('[generate] submit failed:', message)
+      toast.error(message)
+      if (!isGenerating) {
+        setProgressState({ status: 'error', message })
       }
     }
-
-    eventSource.onerror = () => {
-      finish({ status: 'error', message: 'Progress stream disconnected.' })
-      eventSource.close()
-    }
-
-    return () => {
-      eventSource.close()
-    }
-  }, [progressState.status, queryClient])
+  }, [form, isGenerating, ensureSSE])
 
   // ── Gallery click → load params ──────────────────────────────────────
   const handleGallerySelect = useCallback(
@@ -231,86 +273,135 @@ export function GenerateView({ setTab: _setTab }: Props) {
     [models],
   )
 
+  // Download current preview image
+  const downloadImage = useCallback(() => {
+    const img = previewImages[0]
+    if (!img) return
+    const a = document.createElement('a')
+    a.href = img.url
+    a.download = img.url.split('/').pop() ?? 'image.png'
+    a.click()
+  }, [previewImages])
+
+  const activePreviewImage = previewImages[0]
+
   // ── Render ───────────────────────────────────────────────────────────
   return (
-    <div className="flex h-full flex-col">
-      {/* Main content area */}
-      <div className="flex-1 overflow-y-auto p-4 md:p-6">
-        <div className="mx-auto max-w-6xl space-y-4">
-          {/* Warnings */}
+    <div className="flex h-full">
+      {/* ──────────────── Control Panel (Left Sidebar) ──────────────── */}
+      <div className="flex w-[340px] shrink-0 flex-col border-r border-border/40 lg:w-[360px]">
+        {/* Scrollable controls */}
+        <div className="flex-1 overflow-y-auto px-4 py-4">
+          {/* Warning */}
           {checkpointCount === 0 && (
-            <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-              No checkpoint models installed. Run{' '}
-              <code className="rounded bg-secondary px-1.5 py-0.5 font-mono text-xs">
-                modl pull flux-schnell
-              </code>{' '}
-              or{' '}
-              <code className="rounded bg-secondary px-1.5 py-0.5 font-mono text-xs">
+            <div className="mb-4 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+              No checkpoints installed. Run{' '}
+              <code className="rounded bg-secondary px-1 py-0.5 font-mono text-[10px]">
                 modl pull sdxl
               </code>{' '}
               to get started.
             </div>
           )}
 
-          {/* ─── Two-column layout: Preview + Controls ─── */}
-          <div className="grid gap-4 lg:grid-cols-[1fr_300px]">
-            {/* Left: Preview + Prompt + Actions */}
-            <div className="flex flex-col gap-4">
-              {/* Image preview */}
-              <ImagePreview
-                images={previewImages}
-                isGenerating={isGenerating}
-                expectedCount={form.batch_count}
-                width={form.width}
-                height={form.height}
-                onImageClick={(img) => {
-                  // Could open lightbox — for now just log
-                  window.open(img.url, '_blank')
-                }}
-              />
+          {/* ─── Prompt (always at top) ─── */}
+          <PromptPanel
+            form={form}
+            setForm={setForm}
+            modelHint={models.find((m) => m.id === form.base_model_id)?.name}
+          />
 
-              {/* Progress bar */}
-              <GenerateProgressBar state={progressState} />
-
-              {/* Prompt */}
-              <PromptPanel
-                form={form}
-                setForm={setForm}
-                modelHint={models.find((m) => m.id === form.base_model_id)?.name}
-              />
-
-              {/* Generate button */}
-              <GenerateActions
-                form={form}
-                gpu={gpu}
-                isGenerating={isGenerating}
-                onGenerate={handleGenerate}
-                onInterrupt={() => {
-                  // TODO: wire up cancel API
-                  setProgressState({ status: 'idle' })
-                }}
-              />
+          {/* ─── Model & LoRA ─── */}
+          <CollapsibleSection title="Model">
+            <div className="space-y-3">
+              <ModelPanel models={models} form={form} setForm={setForm} />
+              <LoraPanel models={models} form={form} setForm={setForm} />
             </div>
+          </CollapsibleSection>
 
-            {/* Right: Controls sidebar */}
-            <aside className="space-y-1 overflow-y-auto lg:max-h-[calc(100vh-8rem)]">
-              <div className="space-y-4 rounded-lg border border-border/40 bg-card/30 p-3">
-                <ModelPanel models={models} form={form} setForm={setForm} />
-                <Separator className="opacity-30" />
-                <LoraPanel models={models} form={form} setForm={setForm} />
-                <Separator className="opacity-30" />
-                <SizePanel form={form} setForm={setForm} />
-                <Separator className="opacity-30" />
-                <SamplingPanel form={form} setForm={setForm} />
-                <Separator className="opacity-30" />
-                <BatchPanel form={form} setForm={setForm} />
-                <Separator className="opacity-30" />
-                <Img2ImgPanel form={form} setForm={setForm} />
-              </div>
-            </aside>
-          </div>
+          {/* ─── Dimensions ─── */}
+          <CollapsibleSection title="Dimensions">
+            <div className="space-y-3">
+              <SizePanel form={form} setForm={setForm} />
+              <BatchPanel form={form} setForm={setForm} />
+            </div>
+          </CollapsibleSection>
 
-          {/* ─── Bottom gallery strip ─── */}
+          {/* ─── Sampling ─── */}
+          <CollapsibleSection title="Sampling" defaultOpen={false}>
+            <SamplingPanel form={form} setForm={setForm} />
+          </CollapsibleSection>
+        </div>
+
+        {/* ─── Sticky Generate Button (bottom of sidebar) ─── */}
+        <div className="shrink-0 border-t border-border/40 bg-[#0e0e18]/95 px-4 py-3 backdrop-blur">
+          <GenerateActions
+            form={form}
+            gpu={gpu}
+            isGenerating={isGenerating}
+            queueCount={queueCount}
+            onGenerate={handleGenerate}
+            onInterrupt={() => {
+              setProgressState({ status: 'idle' })
+            }}
+            onClearQueue={async () => {
+              await api.clearQueue()
+              setQueueCount(0)
+              toast.info('Queue cleared')
+            }}
+          />
+          <GenerateProgressBar state={progressState} />
+          <p className="mt-1 text-center text-[10px] text-muted-foreground/30">
+            <kbd className="rounded border border-border/40 bg-secondary/20 px-1 py-0.5 font-mono text-[9px]">
+              Ctrl+Enter
+            </kbd>
+          </p>
+        </div>
+      </div>
+
+      {/* ──────────────── Canvas (Right Area) ──────────────── */}
+      <div className="relative flex min-w-0 flex-1 flex-col bg-[#080810]">
+        {/* Main canvas */}
+        <div className="relative flex flex-1 items-center justify-center overflow-hidden p-6">
+          {/* Image preview */}
+          <ImagePreview
+            images={previewImages}
+            isGenerating={isGenerating}
+            expectedCount={form.batch_count}
+            width={form.width}
+            height={form.height}
+            fitMode={canvasFit}
+            onImageClick={(img) => window.open(img.url, '_blank')}
+          />
+
+          {/* Floating toolbar — visible when an image is shown */}
+          {activePreviewImage && !isGenerating && (
+            <div className="absolute right-4 top-4 flex items-center gap-1 rounded-lg border border-border/40 bg-background/80 px-1.5 py-1 shadow-lg backdrop-blur">
+              <button
+                type="button"
+                onClick={() => setCanvasFit((f) => (f === 'fit' ? 'fill' : 'fit'))}
+                className="rounded p-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                title={canvasFit === 'fit' ? 'View at 100%' : 'Fit to screen'}
+              >
+                {canvasFit === 'fit' ? (
+                  <Maximize2Icon className="size-3.5" />
+                ) : (
+                  <Minimize2Icon className="size-3.5" />
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={downloadImage}
+                className="rounded p-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                title="Download"
+              >
+                <DownloadIcon className="size-3.5" />
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* History filmstrip (bottom of canvas) */}
+        <div className="shrink-0 border-t border-border/30 bg-[#0a0a14]/90 px-4 py-2 backdrop-blur">
           <GenerationGallery
             onSelect={handleGallerySelect}
             activePath={previewImages[0]?.url?.replace('/files/', '') ?? null}

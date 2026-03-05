@@ -24,6 +24,8 @@ type Props = {
   expectedCount?: number
   width: number
   height: number
+  /** 'fit' shows the full image; 'fill' shows at 100% (may overflow) */
+  fitMode?: 'fit' | 'fill'
   onImageClick?: (img: PreviewImage) => void
 }
 
@@ -33,6 +35,7 @@ export function ImagePreview({
   expectedCount = 1,
   width,
   height,
+  fitMode = 'fit',
   onImageClick,
 }: Props) {
   const aspectRatio = width / height
@@ -53,8 +56,8 @@ export function ImagePreview({
     // Idle placeholder
     return (
       <div
-        className="relative flex items-center justify-center rounded-lg border border-dashed border-border/40 bg-secondary/10"
-        style={{ aspectRatio: isGrid ? undefined : aspectRatio, minHeight: isGrid ? 300 : undefined }}
+        className="relative flex w-full max-w-lg items-center justify-center rounded-lg border border-dashed border-border/40 bg-secondary/10"
+        style={{ aspectRatio: isGrid ? undefined : aspectRatio, minHeight: isGrid ? 300 : 200 }}
       >
         <div className="flex flex-col items-center gap-2 text-muted-foreground/30">
           <div className="text-4xl">🖼</div>
@@ -120,14 +123,22 @@ export function ImagePreview({
   // Single image
   const img = images[0]
   return (
-    <div className="relative overflow-hidden rounded-lg border border-border/40 bg-secondary/20">
+    <div
+      className={cn(
+        'relative overflow-hidden rounded-lg border border-border/40 bg-secondary/20',
+        fitMode === 'fill' && 'overflow-auto',
+      )}
+    >
       {img ? (
-        <div className="group relative" style={{ aspectRatio }}>
+        <div className="group relative" style={fitMode === 'fit' ? { aspectRatio } : undefined}>
           <img
             src={img.url}
             alt="Generated"
             className={cn(
-              'h-full w-full cursor-pointer object-contain transition-transform hover:scale-[1.01]',
+              'cursor-pointer transition-transform hover:scale-[1.01]',
+              fitMode === 'fit'
+                ? 'h-full w-full object-contain'
+                : 'max-w-none',
               isGenerating && 'opacity-50',
             )}
             onClick={() => onImageClick?.(img)}

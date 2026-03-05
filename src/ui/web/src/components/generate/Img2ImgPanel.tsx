@@ -50,9 +50,7 @@ export function Img2ImgPanel({ form, setForm }: Props) {
 
   return (
     <div className="space-y-2.5">
-      <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-        Image to Image
-      </span>
+      {/* Section label removed — handled by parent CollapsibleSection */}
 
       {/* Drop zone / preview */}
       {form.init_image ? (

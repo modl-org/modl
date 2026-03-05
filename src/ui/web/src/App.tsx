@@ -24,10 +24,16 @@ const PAGE_TITLES: Record<Tab, string> = {
 function App() {
   const searchString = useSearch()
   const [, navigate] = useLocation()
-  const TABS = ['train', 'generate', 'outputs', 'datasets'] as const
+  const TABS = ['generate', 'outputs', 'datasets', 'train'] as const
   const params = new URLSearchParams(searchString)
-  const tab: Tab = TABS.find((t) => t === params.get('tab')) ?? 'train'
+  const tab: Tab = TABS.find((t) => t === params.get('tab')) ?? 'generate'
   const setTab = (next: Tab) => navigate(`/?tab=${next}`)
+
+  // Sidebar collapsed state (persisted)
+  const [sidebarCollapsed, setSidebarCollapsed] = useLocalStorage<boolean>(
+    'modl:sidebar-collapsed',
+    () => false,
+  )
 
   // Form state — used by OutputsGallery "open as recipe" feature
   const [, setForm] = useLocalStorage<GenerateFormState>(
@@ -46,7 +52,12 @@ function App() {
     <div className="flex h-screen overflow-hidden bg-background">
       {/* Desktop sidebar */}
       <div className="hidden md:flex md:flex-col md:h-full">
-        <AppSidebar activeTab={tab} onTabChange={setTab} />
+        <AppSidebar
+          activeTab={tab}
+          onTabChange={setTab}
+          collapsed={sidebarCollapsed}
+          onToggleCollapse={() => setSidebarCollapsed((v) => !v)}
+        />
       </div>
 
       {/* Mobile nav (top bar + bottom bar + drawer) */}
@@ -80,8 +91,8 @@ function App() {
             <TrainingRuns />
           </div>
 
-          {/* Tab: Generate */}
-          <div className={tab === 'generate' ? 'flex h-full flex-col pb-24 pt-16 md:pb-0 md:pt-0' : 'hidden'}>
+          {/* Tab: Generate — full-bleed, no padding, no scroll (component manages its own layout) */}
+          <div className={tab === 'generate' ? 'h-full' : 'hidden'}>
             <GenerateView setTab={(t) => setTab(t as Tab)} />
           </div>
 

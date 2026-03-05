@@ -5,10 +5,10 @@ import type { Tab } from '../App'
 import { AppSidebar } from './AppSidebar'
 
 const NAV_ITEMS: { id: Tab; label: string; icon: React.ElementType }[] = [
-  { id: 'train', label: 'Train', icon: Zap },
   { id: 'generate', label: 'Generate', icon: Sparkles },
   { id: 'outputs', label: 'Outputs', icon: Images },
   { id: 'datasets', label: 'Datasets', icon: Database },
+  { id: 'train', label: 'Train', icon: Zap },
 ]
 
 type Props = {
@@ -75,6 +75,8 @@ export function MobileNav({ activeTab, onTabChange }: Props) {
             onTabChange(tab)
             setOpen(false)
           }}
+          collapsed={false}
+          onToggleCollapse={() => {}}
         />
       </div>
 

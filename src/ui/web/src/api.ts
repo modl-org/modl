@@ -11,6 +11,9 @@ export type InstalledModel = {
   model_type: 'checkpoint' | 'lora'
   variant?: string
   size_bytes: number
+  trigger_word?: string
+  base_model_id?: string
+  sample_image_url?: string
 }
 
 export type GeneratedImage = {
@@ -172,6 +175,9 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req),
     }),
+  queueStatus: () => fetchJson<{ running: boolean; queue_length: number }>('/api/generate/queue'),
+  clearQueue: () =>
+    fetchJson<{ cleared: number }>('/api/generate/queue', { method: 'DELETE' }),
   enhance: (req: EnhanceRequest) =>
     fetchJson<EnhanceResponse>('/api/enhance', {
       method: 'POST',

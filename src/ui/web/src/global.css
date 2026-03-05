@@ -102,20 +102,45 @@
     @apply bg-background text-foreground antialiased;
   }
 
-  /* Subtle scrollbar styling */
+  /* Subtle auto-hiding scrollbar */
   ::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
+    width: 5px;
+    height: 5px;
   }
   ::-webkit-scrollbar-track {
     background: transparent;
   }
   ::-webkit-scrollbar-thumb {
-    background: var(--border);
+    background: transparent;
     border-radius: 9999px;
+    transition: background 0.2s;
+  }
+  *:hover > ::-webkit-scrollbar-thumb,
+  ::-webkit-scrollbar-thumb:hover,
+  *:is(:hover, :focus-within) > &::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.08);
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: var(--muted-foreground);
+    background: rgba(255, 255, 255, 0.15);
+  }
+
+  /* Firefox slim scrollbar */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+  }
+  *:hover {
+    scrollbar-color: rgba(255, 255, 255, 0.08) transparent;
+  }
+
+  /* Hide number input spinners globally */
+  input[type='number']::-webkit-outer-spin-button,
+  input[type='number']::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type='number'] {
+    -moz-appearance: textfield;
   }
 
   /* Violet ambient glow on main content — matches modl-site hero radial */

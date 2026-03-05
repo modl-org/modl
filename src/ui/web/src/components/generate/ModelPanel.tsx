@@ -38,7 +38,7 @@ export function ModelPanel({ models, form, setForm, autoDefaults = true }: Props
 
   return (
     <div className="space-y-1.5">
-      <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+      <span className="text-[11px] font-medium text-muted-foreground">
         Checkpoint
       </span>
       <Select

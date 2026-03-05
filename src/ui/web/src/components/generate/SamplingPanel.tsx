@@ -17,15 +17,13 @@ function parseNum(val: string, fallback: number): number {
 export function SamplingPanel({ form, setForm }: Props) {
   return (
     <div className="space-y-3">
-      <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-        Sampling
-      </span>
+      {/* Section labels removed — handled by CollapsibleSection */}
 
       {/* Steps */}
       <div className="space-y-1">
         <div className="flex items-center justify-between">
-          <span className="text-[10px] text-muted-foreground/70">Steps</span>
-          <span className="font-mono text-[10px] text-muted-foreground">{form.steps}</span>
+          <span className="text-[11px] font-medium text-muted-foreground">Steps</span>
+          <span className="font-mono text-[11px] text-foreground/70">{form.steps}</span>
         </div>
         <Slider
           value={[form.steps]}
@@ -39,8 +37,8 @@ export function SamplingPanel({ form, setForm }: Props) {
       {/* Guidance / CFG Scale */}
       <div className="space-y-1">
         <div className="flex items-center justify-between">
-          <span className="text-[10px] text-muted-foreground/70">CFG Scale</span>
-          <span className="font-mono text-[10px] text-muted-foreground">
+          <span className="text-[11px] font-medium text-muted-foreground">CFG Scale</span>
+          <span className="font-mono text-[11px] text-foreground/70">
             {form.guidance.toFixed(1)}
           </span>
         </div>
@@ -55,7 +53,7 @@ export function SamplingPanel({ form, setForm }: Props) {
 
       {/* Seed */}
       <div className="space-y-1">
-        <span className="text-[10px] text-muted-foreground/70">Seed</span>
+        <span className="text-[11px] font-medium text-muted-foreground">Seed</span>
         <div className="flex gap-1.5">
           <Input
             type="number"
