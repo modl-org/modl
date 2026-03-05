@@ -1,14 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { useLocation, useSearch } from 'wouter'
-import { toast } from 'sonner'
-import { Card, CardContent } from '@/components/ui/card'
-import { api, type GenerateRequest, type GpuStatus } from './api'
+import { api, type GpuStatus } from './api'
 import { AppSidebar } from './components/AppSidebar'
 import { DatasetViewer } from './components/DatasetViewer'
-import { GenerateForm } from './components/GenerateForm'
+import { GenerateView } from './components/generate'
 import { createDefaultGenerateFormState, type GenerateFormState } from './components/generate-form-state'
-import { GenerateProgress, type GenerateState } from './components/GenerateProgress'
 import { GpuBanner } from './components/GpuBanner'
 import { MobileNav } from './components/MobileNav'
 import { OutputsGallery } from './components/OutputsGallery'
@@ -26,8 +22,6 @@ const PAGE_TITLES: Record<Tab, string> = {
 }
 
 function App() {
-  const queryClient = useQueryClient()
-
   const searchString = useSearch()
   const [, navigate] = useLocation()
   const TABS = ['train', 'generate', 'outputs', 'datasets'] as const
@@ -35,12 +29,11 @@ function App() {
   const tab: Tab = TABS.find((t) => t === params.get('tab')) ?? 'train'
   const setTab = (next: Tab) => navigate(`/?tab=${next}`)
 
-  const [form, setForm] = useLocalStorage<GenerateFormState>(
+  // Form state — used by OutputsGallery "open as recipe" feature
+  const [, setForm] = useLocalStorage<GenerateFormState>(
     'modl:generate-form',
     createDefaultGenerateFormState,
   )
-  const [generateState, setGenerateState] = useState<GenerateState>({ status: 'idle' })
-  const expectedCountRef = useRef(1)
 
   const { data: gpu = { training_active: false } as GpuStatus } = useQuery({
     queryKey: ['gpu'],
@@ -48,88 +41,6 @@ function App() {
     refetchInterval: 5000,
     staleTime: 4_000,
   })
-
-  const {
-    data: models = [],
-    error: modelError,
-    isLoading: modelsLoading,
-  } = useQuery({
-    queryKey: ['models'],
-    queryFn: api.models,
-    staleTime: 5 * 60_000,
-  })
-
-  const submitGenerate = async (req: GenerateRequest, expectedCount: number) => {
-    expectedCountRef.current = expectedCount
-    setGenerateState({ status: 'submitting' })
-
-    try {
-      const res = await api.generate(req)
-      if (!res.ok) {
-        const text = await res.text()
-        throw new Error(text || `HTTP ${res.status}`)
-      }
-      setGenerateState({ status: 'streaming', lines: [] })
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      setGenerateState({ status: 'error', message })
-    }
-  }
-
-  useEffect(() => {
-    if (generateState.status !== 'streaming') {
-      return
-    }
-
-    let done = false
-    const finish = (nextState: GenerateState) => {
-      if (done) return
-      done = true
-      setGenerateState(nextState)
-    }
-
-    const eventSource = new EventSource('/api/generate/stream')
-
-    eventSource.onmessage = (event) => {
-      const message = event.data
-
-      setGenerateState((prev) => {
-        if (prev.status !== 'streaming') {
-          return prev
-        }
-
-        return {
-          status: 'streaming',
-          lines: [...prev.lines.slice(-59), message],
-        }
-      })
-
-      const lower = message.toLowerCase()
-
-      if (lower.startsWith('error:')) {
-        eventSource.close()
-        finish({ status: 'error', message: message.slice(6).trim() || 'Generation failed.' })
-        return
-      }
-
-      if (lower.includes('completed') || lower.includes('done')) {
-        const count = expectedCountRef.current
-        eventSource.close()
-        finish({ status: 'done', count })
-        void queryClient.invalidateQueries({ queryKey: ['outputs'] })
-        toast.success(`Generated ${count} image(s).`)
-      }
-    }
-
-    eventSource.onerror = () => {
-      finish({ status: 'error', message: 'Progress stream disconnected.' })
-      eventSource.close()
-    }
-
-    return () => {
-      eventSource.close()
-    }
-  }, [generateState.status, queryClient])
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
@@ -170,42 +81,8 @@ function App() {
           </div>
 
           {/* Tab: Generate */}
-          <div className={tab === 'generate' ? 'mx-auto max-w-3xl space-y-4 px-4 py-6 pb-24 md:px-6 md:pb-6 pt-16 md:pt-6' : 'hidden'}>
-            {modelError ? (
-              <Card>
-                <CardContent className="p-4 text-sm text-destructive">
-                  Models unavailable: {String(modelError)}
-                </CardContent>
-              </Card>
-            ) : null}
-
-            {!modelError ? (
-              <GenerateForm
-                models={models}
-                gpu={gpu}
-                form={form}
-                setForm={setForm}
-                onSubmitGenerate={submitGenerate}
-                isSubmitting={
-                  generateState.status === 'submitting' || generateState.status === 'streaming'
-                }
-              />
-            ) : null}
-
-            {modelsLoading ? (
-              <Card>
-                <CardContent className="p-4 text-sm text-muted-foreground">Loading models…</CardContent>
-              </Card>
-            ) : null}
-
-            <GenerateProgress
-              state={generateState}
-              onReset={() => setGenerateState({ status: 'idle' })}
-              onViewOutputs={() => {
-                setTab('outputs')
-                setGenerateState({ status: 'idle' })
-              }}
-            />
+          <div className={tab === 'generate' ? 'flex h-full flex-col pb-24 pt-16 md:pb-0 md:pt-0' : 'hidden'}>
+            <GenerateView setTab={(t) => setTab(t as Tab)} />
           </div>
 
           {/* Tab: Outputs */}

@@ -4,6 +4,7 @@ pub mod config;
 pub mod dataset;
 pub mod db;
 pub mod download;
+pub mod enhance;
 pub mod executor;
 pub mod gpu;
 pub mod huggingface;

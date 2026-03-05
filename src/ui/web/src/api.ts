@@ -119,6 +119,18 @@ export type GenerateRequest = {
   loras: Array<{ id: string; strength: number }>
 }
 
+export type EnhanceRequest = {
+  prompt: string
+  model_hint?: string
+  intensity?: 'subtle' | 'moderate' | 'aggressive'
+}
+
+export type EnhanceResponse = {
+  original: string
+  enhanced: string
+  backend: string
+}
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init)
   if (!res.ok) {
@@ -156,6 +168,12 @@ export const api = {
     }),
   generate: (req: GenerateRequest) =>
     fetch('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+    }),
+  enhance: (req: EnhanceRequest) =>
+    fetchJson<EnhanceResponse>('/api/enhance', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req),

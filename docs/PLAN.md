@@ -83,6 +83,47 @@ local DB with cloud state.
 
 ---
 
+## GPU Resource Management
+
+Training, generation, captioning, and prompt enhancement all compete for the
+same GPU. These run as separate CLI processes, so in-process mutexes don't work.
+Users have wildly different GPUs (8GB–48GB+), so static rules are too coarse.
+
+See [specs/gpu-resource-management.md](specs/gpu-resource-management.md) for
+full design. Summary:
+
+**Core mechanism**: File-based activity lock (`~/.modl/gpu.lock`) with PID-based
+stale detection and RAII guards. Every GPU-touching command acquires a lock
+before spawning Python, releases on completion/crash.
+
+**Rules:**
+1. Training is exclusive — blocks everything else
+2. One diffusion pipeline at a time (generation XOR captioning)
+3. Small models (LLM enhance ≤4GB) can coexist with a pipeline on 24GB+ GPUs
+4. Zero-GPU tasks (builtin enhancer, remote API) bypass the lock entirely
+5. `--force` overrides all checks for power users
+
+**VRAM budget**: Each task declares an estimated VRAM footprint from a static
+table (registry already has `vram_required_mb` per variant). Decision is
+`vram_free ≥ task_estimate`, not precise accounting. ±20% is fine — the goal
+is preventing obvious conflicts, not a GPU scheduler.
+
+**Enhance graceful degradation**: The enhance feature has a natural fallback
+chain — GPU LLM → CPU LLM → builtin rules → remote API. The ✨ button always
+works; it just gets faster with more resources.
+
+```
+$ modl generate "a cat"
+✗ GPU busy: training sdxl (PID 12345, started 2h 14m ago)
+  Use --force to override, --cloud for cloud GPU, or --wait.
+
+$ modl gpu
+GPU: NVIDIA RTX 4090 (24576 MB total, 2564 MB free)
+Active: training sdxl  PID 12345  22012 MB est.  2h 14m
+```
+
+---
+
 ## Phases
 
 ### Phase 1 — Bulletproof install + setup ✅
@@ -131,8 +172,13 @@ Priority order (by real-world demand):
 | 6 | FLUX.2 | ❌ Needs arch entry | ~30min |
 | 7 | Qwen-Image | ❌ Needs qtype + quant for 24GB | ~1h |
 
-### Phase 4 — Polish & batch
+### Phase 4 — Polish, batch & GPU resource management
 
+- [ ] `GpuLock` file-based lock (`~/.modl/gpu.lock`) + `GpuGuard` RAII drop guard
+- [ ] Gate `modl generate`, `modl train`, `modl dataset caption` behind GPU lock
+- [ ] `modl gpu` command — show GPU info, active tasks, release stale locks
+- [ ] `--force` flag to override GPU lock on all GPU commands
+- [ ] `modl doctor` GPU diagnostics (CUDA check, driver version, stale locks)
 - [ ] Batch generation (`modl generate --batch prompts.txt`)
 - [ ] Reproducible export (`modl outputs export <id>` → full YAML spec)
 - [ ] Registry curation: core tier (flux-dev, flux-schnell, sdxl) vs experimental
@@ -146,7 +192,8 @@ See [specs/persistent-worker.md](specs/persistent-worker.md) for full spec.
 
 - [ ] Python serve mode (`modl_worker serve` on Unix socket)
 - [ ] Rust worker management (auto-spawn, health check, idle timeout)
-- [ ] Model cache with LRU eviction
+- [ ] Model cache with LRU eviction (explicit VRAM tracking per loaded model)
+- [ ] Worker owns GPU lock while alive — individual requests don't re-acquire
 
 ### Phase 6 — Web UI (`modl serve`) 🔄 Current sprint
 
@@ -186,22 +233,24 @@ canonical interface — the UI is a thin shell around it, not a parallel path.
 - Copy prompt / Copy CLI command
 - Re-generate with new seed
 
-**GPU contention strategy (80/20)**: `GET /api/gpu` returns `{vram_total_mb,
-vram_free_mb, training_active}`. `vram_free_mb` via NVML `memory.free` (already
-have NVML). `training_active` via existing `training_status::is_running`. UI
-shows "GPU busy — training in progress" banner + disables Generate button when
-`training_active=true`. No queue system yet — just a hard lock with clear
-messaging. Full queue (Phase 5) deferred until persistent worker exists.
+**GPU contention strategy**: Replaced the frontend-only `training_active` check
+with the cross-process GPU lock from Phase 4. `GET /api/gpu` now returns lock
+activity (task type, PID, VRAM estimate, elapsed time), not just a boolean.
+Server-side `/api/generate` checks `GpuLock::try_acquire()` and returns
+structured error with activity details. No queue system — just a hard lock with
+clear messaging. Full queue deferred to Phase 5 persistent worker.
+See [specs/gpu-resource-management.md](specs/gpu-resource-management.md).
 
 - [x] Outputs gallery with metadata lightbox and delete
 - [x] Training evolution viewer with live status banner
 - [x] Dataset viewer
 - [x] `POST /api/generate` scaffolding + `--json` flag
-- [ ] `GET /api/gpu` endpoint (`vram_total`, `vram_free`, `training_active`)
+- [ ] `GET /api/gpu` endpoint — return GPU lock activity, VRAM, active tasks
+- [ ] Replace `AtomicBool` in server.rs with `GpuLock::try_acquire()`
 - [ ] `GET /api/models` endpoint (installed checkpoints + LoRAs from DB)
-- [ ] React (Vite) project under `src/ui/web/`, builds to `dist/index.html`
-- [ ] Generate page — 10-control form + GPU lock state
-- [ ] LoRA stack component (add/remove rows, strength slider per row)
+- [x] React (Vite) project under `src/ui/web/`, builds to `dist/index.html`
+- [x] Generate page — 10-control form + GPU lock state
+- [x] LoRA stack component (add/remove rows, strength slider per row)
 - [ ] SSE progress stream during generation
 - [ ] "Open as recipe" — fills Generate form from image metadata
 - [ ] Gallery search + filter chips (client-side, no new API)
@@ -282,9 +331,12 @@ requires internet by default. This is a diffusion tool with a smart prompt field
 not an AI chatbot that happens to generate images.
 
 - [ ] `llm_adapter.py` — local Qwen3.5-4B or OpenAI-compatible API
-- [ ] `POST /api/enhance` — prompt enhance endpoint (stub exists from Phase 6)
+- [x] `POST /api/enhance` — endpoint implemented (builtin rule-based backend)
+- [x] `modl enhance` CLI command with `--model`, `--intensity`, `--json` flags
+- [x] `PromptEnhancer` trait + pluggable backend architecture (`src/core/enhance.rs`)
+- [x] Enhance button active in Generate form (✨ with intensity selector)
+- [ ] Enhance auto-negotiation: GPU LLM → CPU LLM → builtin → remote API
 - [ ] `modl pull qwen3.5-4b-instruct` registry entry
-- [ ] Enhance button active in Generate form
 - [ ] Story → prompts mode (textarea with line-per-prompt output)
 - [ ] Caption critique in dataset viewer
 
@@ -393,6 +445,7 @@ anywhere" story is the one to ship first and validate.
 | [specs/jobs-schema-v1.md](specs/jobs-schema-v1.md) | Job/event/artifact JSON schemas | Implemented, canonical |
 | [specs/worker-protocol.md](specs/worker-protocol.md) | JSONL protocol between Rust and Python | Implemented, canonical |
 | [specs/execution-target.md](specs/execution-target.md) | Executor trait contract | Implemented (local), stubbed (cloud) |
+| [specs/gpu-resource-management.md](specs/gpu-resource-management.md) | Cross-process GPU lock, VRAM budget, enhance fallback | Phase 4 spec |
 | [specs/persistent-worker.md](specs/persistent-worker.md) | Daemon architecture for fast generation | Phase 5 spec |
 | [archive/ui-architecture.md](archive/ui-architecture.md) | Web UI product spec | Phase 6 reference |
 | [archive/cloud-plan.md](archive/cloud-plan.md) | Cloud platform architecture + pricing | Phase 7 reference |

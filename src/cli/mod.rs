@@ -2,7 +2,9 @@ mod auth;
 mod config;
 mod datasets;
 mod doctor;
+mod enhance;
 mod export;
+mod fmt;
 mod gc;
 pub(crate) mod generate;
 mod import;
@@ -100,6 +102,21 @@ const TRAIN_EXAMPLES: &str = "\
   modl train --dataset headshots --base flux-dev --lora-type character --dry-run
 ";
 
+const ENHANCE_EXAMPLES: &str = "\
+\x1b[1mExamples:\x1b[0m
+  # Enhance a prompt with moderate intensity (default)
+  modl enhance \"a cat on the moon\"
+
+  # Subtle enhancement — just quality tags
+  modl enhance \"portrait of a woman\" --intensity subtle
+
+  # Aggressive enhancement with model-specific tags
+  modl enhance \"sunset over mountains\" --intensity aggressive --model sdxl
+
+  # Output as JSON for scripting
+  modl enhance \"product photo\" --json
+";
+
 const GENERATE_EXAMPLES: &str = "\
 \x1b[1mExamples:\x1b[0m
   # Simple generation with default model (flux-schnell)
@@ -165,103 +182,6 @@ pub struct Cli {
 }
 
 #[derive(Subcommand)]
-pub enum ModelCommands {
-    /// Download a model, LoRA, VAE, or other asset (with dependency resolution)
-    #[command(after_help = MODEL_PULL_EXAMPLES)]
-    Pull {
-        /// Model ID from the registry (e.g., flux-dev, realistic-skin-v3)
-        id: String,
-        /// Force a specific variant (e.g., fp16, fp8, gguf-q4)
-        #[arg(long)]
-        variant: Option<String>,
-        /// Show what would be installed without doing it
-        #[arg(long)]
-        dry_run: bool,
-        /// Force re-download even if files already exist
-        #[arg(long)]
-        force: bool,
-    },
-
-    /// Remove an installed model
-    Rm {
-        /// Model ID to remove
-        id: String,
-        /// Force removal even if other items depend on this
-        #[arg(long)]
-        force: bool,
-    },
-
-    /// List installed models
-    Ls {
-        /// Filter by asset type (checkpoint, lora, vae, text_encoder, etc.)
-        #[arg(long, short = 't', value_enum)]
-        r#type: Option<AssetType>,
-    },
-
-    /// Show detailed info about a model
-    Info {
-        /// Model ID to inspect
-        id: String,
-    },
-
-    /// Search the registry
-    Search {
-        /// Search query
-        query: String,
-        /// Filter by asset type
-        #[arg(long, short = 't', value_enum)]
-        r#type: Option<AssetType>,
-        /// Filter by compatible base model
-        #[arg(long)]
-        r#for: Option<String>,
-        /// Filter by tag
-        #[arg(long)]
-        tag: Option<String>,
-        /// Minimum rating
-        #[arg(long)]
-        min_rating: Option<f32>,
-    },
-
-    /// Show popular/trending models
-    Popular {
-        /// Filter by asset type
-        #[arg(long, short = 't', value_enum)]
-        r#type: Option<AssetType>,
-        /// Filter by compatible base model
-        #[arg(long)]
-        r#for: Option<String>,
-    },
-
-    /// Link an existing tool's model folder into modl
-    Link {
-        /// Path to ComfyUI installation
-        #[arg(long)]
-        comfyui: Option<String>,
-        /// Path to A1111 installation
-        #[arg(long)]
-        a1111: Option<String>,
-    },
-
-    /// Fetch latest registry index
-    Update,
-
-    /// Show disk usage breakdown
-    Space,
-
-    /// Garbage collect — remove unreferenced files from the store
-    Gc,
-
-    /// Export installed state to a lock file
-    Export,
-
-    /// Import and install from a lock file
-    Import {
-        /// Path to modl.lock file
-        path: String,
-    },
-}
-
-#[derive(Subcommand)]
 pub enum TrainSubcommands {
     /// Prepare managed training dependencies (ai-toolkit + torch stack)
     Setup {
@@ -312,6 +232,9 @@ pub enum Commands {
         /// Filter by asset type (checkpoint, lora, vae, text_encoder, etc.)
         #[arg(long, short = 't', value_enum)]
         r#type: Option<AssetType>,
+        /// Show disk usage summary grouped by type
+        #[arg(long)]
+        summary: bool,
     },
 
     /// Show detailed info about a model
@@ -322,8 +245,8 @@ pub enum Commands {
 
     /// Search the registry
     Search {
-        /// Search query
-        query: String,
+        /// Search query (optional with --popular)
+        query: Option<String>,
         /// Filter by asset type
         #[arg(long, short = 't', value_enum)]
         r#type: Option<AssetType>,
@@ -336,6 +259,9 @@ pub enum Commands {
         /// Minimum rating
         #[arg(long)]
         min_rating: Option<f32>,
+        /// Show popular/trending models (ignores query)
+        #[arg(long)]
+        popular: bool,
     },
 
     /// Train a LoRA with managed runtime
@@ -447,6 +373,22 @@ pub enum Commands {
         json: bool,
     },
 
+    /// Enhance a prompt using AI (adds quality tags, descriptors, structure)
+    #[command(after_help = ENHANCE_EXAMPLES)]
+    Enhance {
+        /// Text prompt to enhance
+        prompt: String,
+        /// Target model family hint (e.g., sdxl, flux, sd3) for model-specific tags
+        #[arg(long)]
+        model: Option<String>,
+        /// Enhancement intensity: subtle, moderate, aggressive
+        #[arg(long, default_value = "moderate")]
+        intensity: String,
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Manage datasets for training
     #[command(after_help = DATASET_EXAMPLES)]
     Dataset {
@@ -497,9 +439,6 @@ pub enum Commands {
     /// Remove unreferenced files from the store
     Gc,
 
-    /// Show disk usage breakdown
-    Space,
-
     /// Update modl CLI to the latest release
     Upgrade,
 
@@ -507,17 +446,6 @@ pub enum Commands {
     /// Interactive first-run setup
     #[command(hide = true)]
     Init,
-
-    /// Show popular/trending models
-    #[command(hide = true)]
-    Popular {
-        /// Filter by asset type
-        #[arg(long, short = 't', value_enum)]
-        r#type: Option<AssetType>,
-        /// Filter by compatible base model
-        #[arg(long)]
-        r#for: Option<String>,
-    },
 
     /// Export installed state to a lock file
     #[command(hide = true)]
@@ -530,15 +458,7 @@ pub enum Commands {
         path: String,
     },
 
-    /// Manage models (use top-level commands instead)
-    #[command(hide = true)]
-    Model {
-        #[command(subcommand)]
-        command: ModelCommands,
-    },
-
     /// Browse and manage generated outputs
-    #[command(hide = true)]
     Outputs {
         #[command(subcommand)]
         command: outputs::OutputCommands,
@@ -578,7 +498,13 @@ pub async fn run(cli: Cli) -> Result<()> {
             force,
         } => install::run(&id, variant.as_deref(), dry_run, force).await,
         Commands::Rm { id, force } => uninstall::run(&id, force).await,
-        Commands::Ls { r#type } => list::run(r#type).await,
+        Commands::Ls { r#type, summary } => {
+            if summary {
+                space::run().await
+            } else {
+                list::run(r#type).await
+            }
+        }
         Commands::Info { id } => info::run(&id).await,
         Commands::Search {
             query,
@@ -586,7 +512,18 @@ pub async fn run(cli: Cli) -> Result<()> {
             r#for,
             tag,
             min_rating,
-        } => search::run(&query, r#type, r#for.as_deref(), tag.as_deref(), min_rating).await,
+            popular,
+        } => {
+            if popular {
+                popular::run(r#type, r#for.as_deref()).await
+            } else {
+                let q = query.as_deref().unwrap_or("");
+                if q.is_empty() {
+                    anyhow::bail!("Search query required (or use --popular)");
+                }
+                search::run(q, r#type, r#for.as_deref(), tag.as_deref(), min_rating).await
+            }
+        }
         Commands::Link {
             path,
             comfyui,
@@ -596,13 +533,10 @@ pub async fn run(cli: Cli) -> Result<()> {
             link::run(comfy.as_deref(), a1111.as_deref()).await
         }
         Commands::Update => update::run().await,
-        Commands::Popular { r#type, r#for } => popular::run(r#type, r#for.as_deref()).await,
-        Commands::Space => space::run().await,
         Commands::Gc => gc::run().await,
         Commands::Export => export::run().await,
         Commands::Import { path } => import::run(&path).await,
         Commands::Init => init::run().await,
-        Commands::Model { command } => run_model(command).await,
         Commands::Train {
             command,
             dataset,
@@ -695,6 +629,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
+        Commands::Enhance {
+            prompt,
+            model,
+            intensity,
+            json,
+        } => enhance::run(&prompt, model.as_deref(), &intensity, json).await,
         Commands::Dataset { command } => datasets::run(command).await,
         Commands::Runtime { command } => runtime::run(command).await,
         Commands::Doctor {
@@ -714,36 +654,6 @@ pub async fn run(cli: Cli) -> Result<()> {
             dump_cli_schema();
             Ok(())
         }
-    }
-}
-
-async fn run_model(command: ModelCommands) -> Result<()> {
-    match command {
-        ModelCommands::Pull {
-            id,
-            variant,
-            dry_run,
-            force,
-        } => install::run(&id, variant.as_deref(), dry_run, force).await,
-        ModelCommands::Rm { id, force } => uninstall::run(&id, force).await,
-        ModelCommands::Ls { r#type } => list::run(r#type).await,
-        ModelCommands::Info { id } => info::run(&id).await,
-        ModelCommands::Search {
-            query,
-            r#type,
-            r#for,
-            tag,
-            min_rating,
-        } => search::run(&query, r#type, r#for.as_deref(), tag.as_deref(), min_rating).await,
-        ModelCommands::Popular { r#type, r#for } => popular::run(r#type, r#for.as_deref()).await,
-        ModelCommands::Link { comfyui, a1111 } => {
-            link::run(comfyui.as_deref(), a1111.as_deref()).await
-        }
-        ModelCommands::Update => update::run().await,
-        ModelCommands::Space => space::run().await,
-        ModelCommands::Gc => gc::run().await,
-        ModelCommands::Export => export::run().await,
-        ModelCommands::Import { path } => import::run(&path).await,
     }
 }
 

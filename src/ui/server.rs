@@ -139,6 +139,26 @@ struct GenerateAcceptedResponse {
     status: String,
 }
 
+#[derive(Deserialize)]
+struct EnhanceApiRequest {
+    prompt: String,
+    #[serde(default)]
+    model_hint: Option<String>,
+    #[serde(default = "default_intensity")]
+    intensity: String,
+}
+
+fn default_intensity() -> String {
+    "moderate".to_string()
+}
+
+#[derive(Serialize)]
+struct EnhanceApiResponse {
+    original: String,
+    enhanced: String,
+    backend: String,
+}
+
 // ---------------------------------------------------------------------------
 // Server entry point
 // ---------------------------------------------------------------------------
@@ -158,6 +178,7 @@ pub async fn start(port: u16, open_browser: bool) -> Result<()> {
         .route("/api/models", get(api_list_models))
         .route("/api/generate", post(api_generate))
         .route("/api/generate/stream", get(api_generate_stream))
+        .route("/api/enhance", post(api_enhance_prompt))
         .route("/api/runs", get(api_list_runs))
         .route("/api/runs/{name}", get(api_get_run))
         .route("/api/status", get(api_training_status))
@@ -562,6 +583,27 @@ async fn api_generate_stream(
             .interval(Duration::from_secs(5))
             .text("keepalive"),
     )
+}
+
+async fn api_enhance_prompt(Json(req): Json<EnhanceApiRequest>) -> impl IntoResponse {
+    use crate::core::enhance::{self, EnhanceIntensity};
+
+    let intensity: EnhanceIntensity = match req.intensity.parse() {
+        Ok(i) => i,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+        }
+    };
+
+    match enhance::enhance_prompt(&req.prompt, req.model_hint.as_deref(), intensity) {
+        Ok(result) => Json(EnhanceApiResponse {
+            original: result.original,
+            enhanced: result.enhanced,
+            backend: result.backend,
+        })
+        .into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
 }
 
 async fn api_gpu_status() -> impl IntoResponse {
