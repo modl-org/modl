@@ -153,6 +153,17 @@ export function TrainingRuns() {
     staleTime: 5 * 60_000,
   })
 
+  const { data: statusRuns = [] } = useQuery({
+    queryKey: ['status'],
+    queryFn: api.status,
+    refetchInterval: 3000,
+  })
+
+  const runningNames = useMemo(
+    () => new Set(statusRuns.filter((r) => r.is_running).map((r) => r.name)),
+    [statusRuns],
+  )
+
   const currentRun = selectedRun && runs.includes(selectedRun) ? selectedRun : (runs.at(-1) ?? null)
 
   const {
@@ -180,17 +191,33 @@ export function TrainingRuns() {
     return Math.max(samplePrompts.length, inferPromptCount(runDetail.samples))
   }, [runDetail, samplePrompts])
 
+  // Calculate expected total sample columns from config (steps / sample_every)
+  const expectedColumns = useMemo(() => {
+    if (!runDetail) return 0
+    const totalSteps = processCfg?.train?.steps
+    const sampleEvery = processCfg?.sample?.sample_every
+    if (totalSteps && sampleEvery && sampleEvery > 0) {
+      return Math.ceil(totalSteps / sampleEvery)
+    }
+    return runDetail.samples.length
+  }, [runDetail, processCfg])
+
+  const totalColumns = Math.max(expectedColumns, runDetail?.samples.length ?? 0)
+
   const promptRows = useMemo(() => {
     if (!runDetail || promptCount === 0) {
       return []
     }
 
+    // Pad imagesByStep to totalColumns so future steps show placeholders
     return Array.from({ length: promptCount }, (_, idx) => ({
       id: idx,
       label: samplePrompts[idx] ?? `Prompt ${idx + 1}`,
-      imagesByStep: runDetail.samples.map((sample) => sample.images[idx]),
+      imagesByStep: Array.from({ length: totalColumns }, (_, col) =>
+        runDetail.samples[col]?.images[idx] ?? null,
+      ),
     }))
-  }, [runDetail, promptCount, samplePrompts])
+  }, [runDetail, promptCount, samplePrompts, totalColumns])
 
   const detailFields: DetailField[] = useMemo(() => {
     if (!runDetail || !processCfg) {
@@ -246,20 +273,26 @@ export function TrainingRuns() {
           </p>
         </div>
         <div className="flex-1 overflow-y-auto py-2">
-          {runs.map((name) => (
-            <button
-              key={name}
-              type="button"
-              onClick={() => setSelectedRun(name)}
-              className={`w-full truncate px-4 py-2 text-left text-sm transition-colors ${
-                name === currentRun
-                  ? 'bg-primary/10 font-medium text-primary'
-                  : 'text-muted-foreground hover:bg-accent hover:text-foreground'
-              }`}
-            >
-              {name}
-            </button>
-          ))}
+          {runs.map((name) => {
+            const isRunning = runningNames.has(name)
+            return (
+              <button
+                key={name}
+                type="button"
+                onClick={() => setSelectedRun(name)}
+                className={`flex w-full items-center gap-2 px-4 py-2 text-left text-sm transition-colors ${
+                  name === currentRun
+                    ? 'bg-primary/10 font-medium text-primary'
+                    : 'text-muted-foreground hover:bg-accent hover:text-foreground'
+                }`}
+              >
+                {isRunning ? (
+                  <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-emerald-400" />
+                ) : null}
+                <span className="truncate">{name}</span>
+              </button>
+            )
+          })}
           {!runsLoading && runs.length === 0 && !runsError ? (
             <p className="px-4 py-3 text-xs text-muted-foreground">No training runs found.</p>
           ) : null}
@@ -285,7 +318,13 @@ export function TrainingRuns() {
                 <h2 className="truncate text-sm font-semibold text-foreground">{runDetail.name}</h2>
                 {runDetail.lineage?.dataset_name ? (
                   <p className="mt-0.5 text-xs text-muted-foreground">
-                    Dataset: {runDetail.lineage.dataset_name}
+                    Dataset:{' '}
+                    <a
+                      href={`/?tab=datasets&dataset=${encodeURIComponent(runDetail.lineage.dataset_name)}`}
+                      className="text-primary hover:underline"
+                    >
+                      {runDetail.lineage.dataset_name}
+                    </a>
                   </p>
                 ) : null}
               </div>
@@ -380,17 +419,30 @@ export function TrainingRuns() {
                   <div
                     className="grid gap-2"
                     style={{
-                      gridTemplateColumns: `repeat(${runDetail.samples.length}, minmax(120px, 1fr))`,
+                      gridTemplateColumns: `repeat(${totalColumns}, minmax(120px, 1fr))`,
                     }}
                   >
-                    {runDetail.samples.map((sample) => (
-                      <div
-                        key={sample.step}
-                        className="rounded bg-secondary/60 px-2 py-1.5 text-center text-[10px] font-medium uppercase tracking-wide text-muted-foreground"
-                      >
-                        Step {sample.step.toLocaleString()}
-                      </div>
-                    ))}
+                    {Array.from({ length: totalColumns }, (_, idx) => {
+                      const sample = runDetail.samples[idx]
+                      const sampleEvery = processCfg?.sample?.sample_every
+                      const stepLabel = sample
+                        ? sample.step.toLocaleString()
+                        : sampleEvery
+                          ? ((idx + 1) * sampleEvery).toLocaleString()
+                          : '—'
+                      return (
+                        <div
+                          key={idx}
+                          className={`rounded px-2 py-1.5 text-center text-[10px] font-medium uppercase tracking-wide ${
+                            sample
+                              ? 'bg-secondary/60 text-muted-foreground'
+                              : 'bg-secondary/20 text-muted-foreground/40'
+                          }`}
+                        >
+                          Step {stepLabel}
+                        </div>
+                      )
+                    })}
 
                     {promptRows.map((row) => (
                       <Fragment key={row.id}>
@@ -424,7 +476,7 @@ export function TrainingRuns() {
                                 }
                               />
                             ) : (
-                              <div className="aspect-square w-full bg-secondary/20" />
+                              <div className="aspect-square w-full rounded bg-secondary/20 border border-dashed border-border/30" />
                             )}
                           </div>
                         ))}

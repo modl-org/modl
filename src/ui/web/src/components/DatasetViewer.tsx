@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useSearch } from 'wouter'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -17,8 +18,19 @@ const PAGE_SIZE = 50
 type LightboxImage = DatasetImage & { datasetName: string }
 
 export function DatasetViewer() {
+  const searchString = useSearch()
   const [selectedDataset, setSelectedDataset] = useState<string | null>(null)
   const [page, setPage] = useState(0)
+
+  // Auto-select dataset from URL param (e.g. ?tab=datasets&dataset=kids-art)
+  useEffect(() => {
+    const params = new URLSearchParams(searchString)
+    const ds = params.get('dataset')
+    if (ds) {
+      setSelectedDataset(ds)
+      setPage(0)
+    }
+  }, [searchString])
   const [lightbox, setLightbox] = useState<LightboxImage | null>(null)
   const [gridSize, setGridSize] = useState<'s' | 'm' | 'l'>('m')
 
