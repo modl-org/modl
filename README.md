@@ -170,6 +170,35 @@ After linking, `modl model pull` will automatically symlink new models into all 
 | `modl runtime upgrade` | Upgrade runtime to latest version |
 | `modl runtime reset` | Reset runtime state |
 
+## Pre-Release Smoke Test
+
+Run this end-to-end before tagging a release. Covers the critical user path.
+
+```bash
+# 1. Fresh setup
+modl init
+
+# 2. Pull a model (tests: registry fetch, resolver, download, SHA256, symlinks, DB)
+modl pull flux-schnell
+
+# 3. Launch web UI (tests: axum boots, frontend loads, GPU detected)
+modl serve
+#    -> open browser, generate an image, check gallery shows it
+#    -> favorite it, then delete it
+
+# 4. Dataset + training round-trip
+modl dataset create smoke-test --from ~/some-images/
+modl train --dataset smoke-test --base flux-schnell --name smoke-lora --preset quick --steps 50
+
+# 5. Generate with the trained LoRA
+modl generate "a photo of OHWX in a garden" --lora smoke-lora
+
+# 6. Health check
+modl doctor
+```
+
+If all six steps complete without errors, ship it.
+
 ## Variant Selection
 
 Models come in multiple variants. Modl picks the best one for your GPU automatically:
