@@ -1,220 +1,166 @@
 # LLM / VL Runtime Architecture
 
-> **STATUS: PLANNED — Phase 9.** Decisions captured from architecture review.
+> **STATUS: PHASE 1 IMPLEMENTED.** Rust-native `LlmBackend` trait with three backends (Local, Cloud, Builtin). Agent framework with tool-use loop. Studio UI wired up.
 
 ---
 
-## Runtime decision: llama.cpp
+## Runtime decision: Rust-native trait
 
-**llama.cpp** (via `llama-cpp-python` bindings), not transformers/vllm.
+The LLM runtime is a **Rust trait** (`LlmBackend`) with pluggable backends, following the same pattern as `Executor` and `PromptEnhancer`. The agent doesn't know or care where inference runs.
 
-Same embedding pattern as:
-- **ollama** — bundles llama.cpp, manages GGUF models, exposes API
-- **ai-toolkit embed** — managed Python runtime, spawned from Rust CLI
+### Why Rust-native (not llama-cpp-python worker)
 
-### Why llama.cpp
+The original plan called for a separate Python worker on a Unix socket (like the diffusion worker). We went with Rust-native instead:
 
-| Concern | llama.cpp | transformers/vllm |
-|---------|-----------|-------------------|
-| Quantization | Native GGUF (Q4-Q8), first-class | Bolt-on (bitsandbytes, GPTQ) |
-| 9B-30B sweet spot | Exactly its target | Overkill for small models |
-| GPU memory | Very efficient | Heavier overhead |
-| VL support | Qwen2.5-VL, LLaVA via mmproj | Broader but heavier |
-| Startup time | Fast | Slow (torch import ~3s) |
-| Dependency weight | Single .so + Python bindings | PyTorch + transformers + tokenizers |
-| Model format | GGUF files (fit modl store) | HF repos (dirs with configs) |
+| Concern | Rust-native (chosen) | Python worker (original plan) |
+|---------|---------------------|-------------------------------|
+| Dependencies | Zero Python deps for LLM | Needs llama-cpp-python in managed runtime |
+| Startup | Instant (compiled in) | 2-4s (Python import) |
+| VRAM management | Direct control | Socket coordination |
+| Distribution | Single binary | Binary + Python runtime |
+| Cloud backend | Just HTTP client | Would still need HTTP client |
+| VL support | Via llama-cpp-2 crate (TODO) | Via llama-cpp-python |
 
-### Why not ollama
-
-Ollama wraps llama.cpp but adds: a separate daemon process, its own model
-management (conflicts with modl's store), Go binary dependency, API layer we
-don't need. We already have the model management — just embed the runtime
-directly, same as we embed ai-toolkit for diffusion.
+The local backend uses the `llama-cpp-2` Rust crate (behind `--features llm` cargo flag). When the feature is disabled, `resolve_backend()` skips local and falls through to cloud or builtin.
 
 ---
 
 ## Architecture
 
 ```
-modl CLI (Rust)
+LlmBackend trait
+    ├── LocalLlmBackend (llama-cpp-2, GGUF models from store)
+    │   ├── GPU mode (fast, ~3-5GB VRAM)
+    │   └── CPU mode (slow, fallback)
     │
-    ├── modl enhance "prompt"          (text LLM)
-    ├── modl dataset caption --model qwen-vl   (vision-language)
+    ├── CloudLlmBackend (HTTP → modl API, OpenAI-compatible)
+    │   ├── POST /v1/chat/completions (text + tool use)
+    │   └── POST /v1/vision (images + prompt)
     │
-    ▼
-LlmExecutor (same Executor trait pattern)
-    │
-    ├── LocalLlmExecutor
-    │   ├── Persistent worker mode (preferred)
-    │   │   └── llama-cpp-python server on Unix socket
-    │   │       ├── Model cache (same LRU pattern as diffusion worker)
-    │   │       ├── GGUF model loaded from modl store
-    │   │       └── mmproj loaded for VL models
-    │   │
-    │   └── One-shot mode (fallback)
-    │       └── spawn python -m modl_worker.main llm --config <spec>
-    │
-    ├── ApiLlmExecutor
-    │   ├── OpenAI-compatible API (Ollama, vLLM, LM Studio)
-    │   └── Configured via ~/.modl/config.yaml
-    │
-    └── CloudLlmExecutor
-        └── modl API → cloud LLM endpoint
+    └── BuiltinLlmBackend (rule-based, zero deps, always works)
 ```
 
-### Worker integration
+### Graceful degradation chain
 
-The LLM worker follows the same pattern as the diffusion persistent worker:
-
-- **Socket**: `~/.modl/llm-worker.sock` (separate from `worker.sock`)
-- **Protocol**: Same JSONL event stream (protocol.py)
-- **Cache**: Keep model loaded in VRAM between requests
-- **Idle timeout**: Auto-shutdown after 5min idle (LLM models are fast to reload)
-- **GPU coexistence**: Small LLMs (4B Q4 ~3GB) can coexist with diffusion
-  pipeline on 24GB+ GPUs. Larger LLMs (30B) need exclusive access.
-
-### Model registry
-
-LLM/VL models go in `modl-registry/manifests/` as new asset types:
-
-```yaml
-# manifests/language_models/qwen3.5-4b-instruct.yaml
-id: qwen3.5-4b-instruct
-name: "Qwen 3.5 4B Instruct"
-type: language_model
-architecture: qwen3
-
-variants:
-  - id: q4-k-m
-    file: qwen3.5-4b-instruct-Q4_K_M.gguf
-    url: https://huggingface.co/...
-    sha256: "..."
-    size: 2800000000
-    format: gguf
-    precision: q4_k_m
-    vram_required: 3072
-    vram_recommended: 4096
-
-  - id: q8-0
-    file: qwen3.5-4b-instruct-Q8_0.gguf
-    url: https://huggingface.co/...
-    sha256: "..."
-    size: 4600000000
-    format: gguf
-    precision: q8_0
-    vram_required: 5120
-    vram_recommended: 6144
-
-defaults:
-  context_length: 8192
-  temperature: 0.7
-
-tags: [llm, instruct, multilingual]
+```
+resolve_backend(prefer_cloud: bool)
+    if prefer_cloud → try Cloud
+    → try Local GPU
+    → try Local CPU
+    → try Cloud (if not already tried)
+    → Builtin (always succeeds)
 ```
 
-For VL models, add mmproj as a dependency:
+With `--cloud` flag, starts at cloud. The enhance button / Studio agent **always works** — quality scales with available resources.
 
-```yaml
-# manifests/vision_language/qwen2.5-vl-7b.yaml
-id: qwen2.5-vl-7b
-name: "Qwen 2.5 VL 7B"
-type: vision_language
-architecture: qwen2_vl
+---
 
-variants:
-  - id: q4-k-m
-    file: qwen2.5-vl-7b-Q4_K_M.gguf
-    ...
+## Key files
 
-requires:
-  - id: qwen2.5-vl-7b-mmproj
-    type: clip_vision
-    reason: "Vision projection model for image understanding"
-```
+| File | Role |
+|------|------|
+| `src/core/llm.rs` | `LlmBackend` trait, all three backends, resolution logic |
+| `src/core/agent.rs` | Agent loop, session state, tool definitions, system prompt |
+| `src/core/agent_tools.rs` | Tool implementations wrapping existing modl services |
+| `src/cli/llm.rs` | `modl llm pull/chat/ls` CLI commands |
+| `src/ui/server.rs` | Studio API endpoints (session CRUD, SSE streaming) |
 
-### VRAM budget (coexistence targets)
+---
+
+## Model management
+
+GGUF models stored in `~/.modl/store/llm/<model_id>/`. Registry manifests for:
+
+| Model | Size | Use case |
+|-------|------|----------|
+| `qwen3.5-4b-instruct-q4` | ~3GB | Text reasoning (agent, enhance) |
+| `qwen3-vl-8b-instruct-q4` | ~5GB | Vision-language (captioning, image analysis) |
+
+Auto-download on first Studio use if not installed.
+
+### VRAM coexistence targets
 
 | Config | Diffusion | LLM | Total | GPU |
 |--------|-----------|-----|-------|-----|
 | Flux fp8 + Qwen 4B Q4 | ~12GB | ~3GB | ~15GB | 24GB OK |
 | Z-Image bf16 + Qwen 4B Q4 | ~14GB | ~3GB | ~17GB | 24GB OK |
-| Flux fp8 + Qwen 9B Q4 | ~12GB | ~6GB | ~18GB | 24GB tight |
-| Z-Image bf16 + Qwen 30B Q4 | ~14GB | ~18GB | ~32GB | needs 48GB or exclusive |
 
-### Use cases (priority order)
-
-1. **Prompt enhance** — short phrase to rich prompt. Single LLM call.
-2. **Dataset captioning** — VL model describes training images.
-   Replace Florence-2 with Qwen2.5-VL for instruction-following captions.
-3. **Story to batch** — "10 fantasy scenes" → 10 prompts → batch generate.
-4. **Caption critique** — review and improve training captions.
-
-### Python adapter
-
-```
-modl_worker/
-├── adapters/
-│   ├── llm_adapter.py      # llama-cpp-python inference
-│   └── ...
-├── llm_serve.py             # Persistent LLM worker (Unix socket)
-└── ...
-```
-
-`llm_adapter.py` wraps `llama-cpp-python`:
-- `run_completion(spec, emitter)` — text completion
-- `run_chat(spec, emitter)` — chat completion with system prompt
-- `run_vision(spec, emitter)` — image + prompt → text (VL models)
-
-All emit standard JSONL events via the existing protocol.
-
-### Config
-
-```yaml
-# ~/.modl/config.yaml
-llm:
-  # Default model for enhance/caption (auto-selected by VRAM if not set)
-  model: qwen3.5-4b-instruct
-  variant: q4-k-m
-
-  # Optional: use external API instead of local model
-  # api:
-  #   url: http://localhost:11434/v1   # Ollama
-  #   model: qwen3.5:4b
-```
-
-### Graceful degradation
-
-```
-Local GPU LLM (best quality, ~3GB VRAM)
-    ↓ no VRAM / model not pulled
-Local CPU LLM (slow but works, via llama.cpp CPU mode)
-    ↓ too slow / not installed
-Builtin rules (existing PromptEnhancer, zero deps)
-    ↓ user has cloud auth
-Cloud API (modl cloud or user's own API)
-```
-
-The enhance button always works. Quality scales with available resources.
+When training is active, the agent should unload the LLM or fall back to cloud/builtin.
 
 ---
 
-## Implementation plan
+## Cloud backend contract
 
-1. Add `language_model` and `vision_language` asset types to registry schema
-2. Add GGUF model manifests to modl-registry
-3. Add `llama-cpp-python` to the managed Python runtime
-4. Implement `llm_adapter.py` (completion + chat + vision)
-5. Implement `llm_serve.py` (persistent worker on separate socket)
-6. Wire up `modl enhance` to use local LLM backend
-7. Wire up `modl dataset caption --model qwen-vl` to use VL backend
-8. Add VRAM coexistence checks to GPU resource manager
+The cloud backend calls a modl-managed API (same endpoint used by Tauri desktop app for non-GPU users):
 
-## Open questions
+```
+POST {api_base}/v1/chat/completions
+  Authorization: Bearer {auth_token}
+  Body: { messages, tools, model }
 
-- **llama.cpp build**: bundle pre-built wheels (llama-cpp-python has CUDA wheels
-  on PyPI) or compile from source in `modl runtime install`? Pre-built is
-  simpler but may lag behind llama.cpp releases.
-- **Context length**: 8K is fine for enhance/caption. Story mode may need 16K+.
-  GGUF models support dynamic context via rope scaling.
-- **Streaming**: enhance could stream tokens to the UI for responsiveness.
-  The SSE infrastructure already exists.
+POST {api_base}/v1/vision
+  Authorization: Bearer {auth_token}
+  Body: { images (base64), prompt, model }
+```
+
+Config in `~/.modl/auth.yaml`:
+```yaml
+cloud:
+  api_base: https://api.modl.run
+  token: modl_key_...
+```
+
+---
+
+## Agent framework
+
+The agent uses the LLM with tool-use to orchestrate Studio sessions:
+
+1. Analyze uploaded photos (VL model via `llm.vision()`)
+2. Create + caption dataset
+3. Select base model + train LoRA
+4. Generate output images
+
+### Tools
+
+| Tool | Maps to | Description |
+|------|---------|-------------|
+| `analyze_images` | `llm.vision()` | VL model describes uploaded photos |
+| `create_dataset` | `core::dataset` | Create dataset from uploads |
+| `caption_images` | `llm.vision()` per image | Generate training captions |
+| `select_base_model` | DB query | Choose best base model |
+| `train_lora` | executor pipeline | Train LoRA |
+| `generate_images` | `cli::generate::run()` | Generate images |
+| `enhance_prompt` | `llm.complete()` | Craft detailed prompts |
+
+### DB schema
+
+```sql
+studio_sessions (id, intent, status, created_at, completed_at)
+session_events (session_id, sequence, event_json, timestamp)
+session_images (session_id, image_path, role)
+```
+
+---
+
+## Implementation status
+
+| Component | Status |
+|-----------|--------|
+| `LlmBackend` trait + 3 backends | ✅ Done |
+| `LocalLlmBackend` (placeholder, needs llama-cpp-2 wiring) | 🟡 Stub |
+| `CloudLlmBackend` (OpenAI-compat HTTP) | ✅ Done |
+| `BuiltinLlmBackend` (rule-based fallback) | ✅ Done |
+| Agent loop + 7 tools | ✅ Done |
+| Studio API (Axum endpoints, SSE) | ✅ Done |
+| Studio UI (React) | ✅ Done |
+| `modl llm pull/chat/ls` CLI | ✅ Done |
+| llama-cpp-2 actual inference | ❌ Not started |
+| VRAM coexistence with gpu.lock | ❌ Not started |
+
+## Next steps
+
+1. Wire `llama-cpp-2` crate into `LocalLlmBackend` (complete/vision methods)
+2. Test VL inference with Qwen3-VL GGUF
+3. Integrate `GpuLock` (see gpu-resource-management.md) for VRAM coordination
+4. Connect Studio agent to actual executor for real training/generation
