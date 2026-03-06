@@ -101,6 +101,7 @@ After linking, `modl model pull` will automatically symlink new models into all 
 | `modl config [key] [value]` | View or update configuration |
 | `modl auth <provider>` | Configure authentication (HuggingFace, Civitai) |
 | `modl upgrade` | Update modl CLI to the latest release |
+| `modl serve [--port]` | Launch web UI (opens browser) |
 
 ### Models (`modl model`)
 
@@ -110,7 +111,7 @@ After linking, `modl model pull` will automatically symlink new models into all 
 | `modl model rm <id>` | Remove an installed model |
 | `modl model ls` | List installed models |
 | `modl model info <id>` | Show detailed info about a model |
-| `modl model search <query>` | Search the registry |
+| `modl model search <query>` | Search the registry + HuggingFace |
 | `modl model popular` | Show trending models |
 | `modl model link` | Adopt existing tool model folders |
 | `modl model update` | Fetch latest registry index |
@@ -118,12 +119,20 @@ After linking, `modl model pull` will automatically symlink new models into all 
 | `modl model gc` | Remove unreferenced files from the store |
 | `modl model export` / `import` | Shareable lock files for reproducible setups |
 
+### Generation
+
+| Command | Description |
+|---------|-------------|
+| `modl generate "prompt"` | Generate images (`--base`, `--lora`, `--count`, `--size`, `--steps`, `--guidance`, `--seed`) |
+| `modl enhance "prompt"` | AI-enhanced prompt expansion |
+
 ### Training (`modl train`)
 
 | Command | Description |
 |---------|-------------|
 | `modl train` | Train a LoRA (interactive or with flags) |
 | `modl train setup` | Install training dependencies (ai-toolkit + PyTorch) |
+| `modl train status [--watch]` | Monitor live training progress |
 
 ### Datasets (`modl dataset`)
 
@@ -131,12 +140,29 @@ After linking, `modl model pull` will automatically symlink new models into all 
 |---------|-------------|
 | `modl dataset create <name> --from <dir>` | Create a managed dataset from images |
 | `modl dataset ls` | List all managed datasets |
+| `modl dataset rm <name>` | Delete a dataset |
 | `modl dataset validate <name>` | Validate a dataset for training |
+| `modl dataset resize <name> --resolution <px>` | Resize images |
+| `modl dataset tag <name>` | Auto-tag images (VL model) |
+| `modl dataset caption <name>` | Auto-caption images (VL model) |
+| `modl dataset prepare <name> --from <dir>` | Full pipeline (create + resize + caption) |
 
-### Runtime (`modl runtime`)
+### Outputs (`modl outputs`)
 
 | Command | Description |
 |---------|-------------|
+| `modl outputs ls [--limit] [--favorites]` | List generated images |
+| `modl outputs show <id>` | Show image metadata |
+| `modl outputs open <id>` | Open image in viewer |
+| `modl outputs search <query>` | Search by prompt text |
+| `modl outputs fav <id>` / `unfav <id>` | Toggle favorites |
+| `modl outputs rm <id>` | Delete output |
+
+### Worker & Runtime
+
+| Command | Description |
+|---------|-------------|
+| `modl worker start` / `stop` / `status` | Manage persistent GPU worker |
 | `modl runtime install` | Install managed Python runtime |
 | `modl runtime status` | Show runtime installation status |
 | `modl runtime doctor` | Run runtime health checks |

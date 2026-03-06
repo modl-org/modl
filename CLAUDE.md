@@ -1,24 +1,62 @@
-# CLAUDE.md — Modl: Model Manager
+# CLAUDE.md — Modl
 
 ## What is Modl?
 
-Modl is a CLI model manager for the AI image generation ecosystem. It handles downloading, dependency resolution, variant selection, and folder placement for models, LoRAs, VAEs, text encoders, ControlNets, and other assets used by tools like ComfyUI, A1111, and InvokeAI.
+Modl is a local-first image generation app. One binary. Pull models from a registry, generate images through a curated web UI, train LoRAs, organize outputs. Like a self-hosted Midjourney alternative with the simplicity of Fooocus and the model ecosystem of Ollama.
 
-Think of it as **npm/Homebrew for image gen models**. `modl install flux-dev` downloads the model, its required VAE, its text encoders — everything — to the right folders, with verified hashes and compatibility checking.
+```
+curl -fsSL https://modl.run/install.sh | bash
+modl pull flux-schnell
+modl serve
+# -> browser opens, type prompt, get image
+```
 
-## Project Vision
+The core loop: **pull models -> generate images -> train LoRAs -> manage outputs**. Everything through CLI or web UI, backed by a single Rust binary + Python worker for GPU inference.
 
-Modl is the foundational piece of a larger **modl** platform — a next-generation alternative to ComfyUI and similar tools. The full vision:
+## Product Vision
 
-1. **modl** (this repo) — CLI model manager. Independently useful, well-crafted, and complete on its own.
-2. **modl-registry** — Community-contributed model manifests (separate repo).
-3. **Pipelines (future)** — LLM-first pipeline authoring via natural language instead of node graphs. Text in, pipeline out.
-4. **Deploy (future)** — One-click deployment to Modal.com, Replicate, RunPod, and others.
-5. **AI UX (future)** — LLM with tools/context to assist with parameter tuning, workflow sharing, and end-to-end generation.
+Modl occupies the "Easy to use + Full control" quadrant: Fooocus simplicity + Ollama model management + LoRA training. Local-first, single binary, curated UX.
 
-The key differentiator vs ComfyUI: **LLM-native, text-first UX** instead of node-based visual programming. Better params input, easier sharing, easier deployment. But **this repo is strictly the model manager**. It must stand on its own before anything else gets built.
+The 80/20 features that cover ~95% of daily usage:
 
-**GitHub org:** [github.com/modl](https://github.com/modl)
+| Feature | Priority | Status |
+|---------|----------|--------|
+| txt2img | P0 | Built (CLI + UI) |
+| img2img | P0 | Built (UI) |
+| LoRA application | P0 | Built (CLI + UI) |
+| LoRA training | P0 | Built (CLI + UI) |
+| Model registry + pull | P0 | Built |
+| Gallery / DAM | P1 | Built |
+| Inpainting | P1 | Not built |
+| Upscale | P1 | Not built |
+| Video gen | P2 | Not built |
+
+What to deliberately NOT build: node/graph editor, ControlNet UI, regional prompting, custom scheduler picker, textual inversions, multi-model pipelines. ComfyUI owns that space.
+
+### Studio / Agent Workflow (Experimental)
+
+The Studio is modl's agentic mode: the user provides an intent ("train a LoRA on these product photos and generate lifestyle shots") plus a folder of images, and an LLM-driven agent orchestrates the entire pipeline end-to-end.
+
+The agent loop (`core/agent.rs`) runs as a tool-use cycle:
+
+1. **Analyze** uploaded images (VL model via `LlmBackend::vision()`)
+2. **Create + caption** a dataset (`core/dataset`, per-image captioning via VL)
+3. **Select base model** from installed models (`core/db` + `core/registry`)
+4. **Train** a LoRA (existing training pipeline via `core/executor`)
+5. **Generate** output images with the trained LoRA
+
+Each step emits `AgentEvent`s (Thinking, ToolStart, ToolProgress, ToolComplete, OutputReady, Error) streamed to the web UI via SSE. The UI shows a real-time timeline of agent decisions and progress.
+
+The architecture is intentionally decoupled:
+- `core/agent.rs` -- Event-driven tool-use loop. Calls `LlmBackend` in a cycle, dispatches tool calls, emits events. No terminal output, no direct DB access.
+- `core/agent_tools.rs` -- Tool implementations that wrap existing modl services (dataset create, train, generate). The agent doesn't have its own inference code; it calls the same functions the CLI uses.
+- `core/llm.rs` -- `LlmBackend` trait with pluggable implementations: `BuiltinLlmBackend` (rule-based, zero deps), `CloudLlmBackend` (API), `LocalLlmBackend` (llama-cpp, pending).
+
+Studio sessions are persisted in SQLite (intent, status, events, input/output images) and accessible via both the web UI (`/api/studio/sessions/*`) and the database directly.
+
+This is experimental but first-class -- the agentic "intent in, results out" UX is the direction modl is heading. The manual CLI/UI workflow remains the primary interface for now.
+
+**GitHub org:** [github.com/modl-org](https://github.com/modl-org)
 
 ## Tech Stack
 
@@ -27,48 +65,139 @@ The key differentiator vs ComfyUI: **LLM-native, text-first UX** instead of node
 - **Terminal UX:** `indicatif` (progress bars), `console` (colors/styling), `dialoguer` (interactive prompts), `comfy-table` (tables)
 - **Serialization:** `serde` + `serde_yaml` + `serde_json`
 - **HTTP:** `reqwest` with `stream` + `rustls-tls` features, `tokio` async runtime
+- **Web server:** `axum` 0.8 with SSE (Server-Sent Events) for real-time progress
 - **Database:** `rusqlite` with `bundled` feature (SQLite compiled into binary)
 - **Hashing:** `sha2` crate (SHA256)
 - **GPU detection:** `nvml-wrapper` with fallback to parsing `nvidia-smi` output
+- **Frontend:** React 19 + TypeScript + Tailwind CSS + Radix UI + TanStack Query + Vite (compiled to `src/ui/dist/`, embedded in binary)
 - **Dirs:** `dirs` crate for platform-specific paths
 
-### Why Rust
+### Two-Process Architecture
 
-Modl downloads and manages files. It does NOT do ML inference. No PyTorch, no CUDA, no Python runtime needed. Rust gives us:
-- Single static binary (~10-15MB) — no runtime dependencies for users
-- Distribution via `brew install`, `cargo install`, curl one-liner, or direct download
-- Fast SHA256 verification on 24GB model files (seconds, not minutes)
-- Cross-platform: Linux, macOS, Windows from one codebase
+| Process | Language | Lifecycle | Role |
+|---------|----------|-----------|------|
+| **modl** (Rust) | Rust | CLI or long-running (`modl serve`) | HTTP API, web UI, CLI, job orchestration, DB |
+| **Worker** | Python | Auto-spawned, idle timeout | Model loading, inference, training, VRAM management |
+
+The Rust binary handles everything except GPU compute. The Python worker handles inference and training via ai-toolkit/diffusers. Communication is via subprocess stdout (JSON events) or Unix socket (persistent worker).
 
 ## Architecture Overview
 
 ```
-┌───────────────────┐
-│  Modl Registry    │  ← Git repo of YAML manifests (separate repo)
-│  (GitHub repo)    │    Community contributes via PRs
-└────────┬──────────┘
-         │
-  modl update (fetches compiled index.json)
-         │
-┌────────┴──────────┐
-│   Modl CLI        │  ← This repo. Single Rust binary.
-│   + Local DB      │    SQLite for installed state
-└────┬─────────┬────┘
-     │         │
-  downloads    │  symlinks
-     │         │
-┌────┴─────┐  ┌┴──────────┐
-│ ~/modl/  │  │ ComfyUI/  │
-│ store/   │──│ A1111/    │
-│ (content │  │ Invoke/   │
-│ addressed│  │ (linked)  │
-└──────────┘  └───────────┘
++-----------------------------------------------------------------+
+|                     modl (Rust binary)                           |
+|                                                                 |
+|  CLI Layer              API Layer           Core Layer           |
+|  +-- model pull/ls      +-- GET /models     +-- store.rs        |
+|  +-- generate           +-- POST /generate  +-- executor.rs     |
+|  +-- train              +-- POST /train     +-- dataset.rs      |
+|  +-- dataset ...        +-- GET /outputs    +-- db.rs           |
+|  +-- outputs            +-- GET /gpu        +-- cloud.rs        |
+|  +-- worker start/stop  +-- SSE /stream     +-- artifacts.rs    |
+|  +-- serve              +-- Static UI       +-- outputs.rs      |
+|       |                                                         |
+|       +-- starts API server + manages persistent worker         |
++-----------------------------------------------------------------+
+              | REST/SSE          | Unix socket / subprocess
+              |                   |
+    +---------+----+    +---------+-----------+
+    |  Browser     |    | Persistent Worker   |
+    |  localhost   |    | (Python daemon)     |
+    |  or remote   |    | model cache, VRAM   |
+    +--------------+    | LoRA hot-swap       |
+                        +---------------------+
 ```
 
-### Two Repos
+### Data Flow
 
-1. **modl** (`modl/modl`) — The CLI tool. Rust. This repo.
-2. **modl-registry** (`modl/modl-registry`) — YAML manifest files + CI that compiles `index.json`. Community contributes manifests here.
+```
++-----------------------+
+|  Modl Registry        |  <- Git repo of YAML manifests (separate repo)
+|  (GitHub repo)        |     Community contributes via PRs
++-----------+-----------+
+            |
+  modl update (fetches compiled index.json)
+            |
++-----------+-----------+
+|   Modl CLI + Server   |  <- This repo. Single Rust binary.
+|   + Local DB (SQLite) |     Tracks installed state, jobs, artifacts
++-----+----------+------+
+      |          |
+   downloads     |  symlinks
+      |          |
++-----+------+  ++-----------+
+| ~/modl/    |  | ComfyUI/   |
+| store/     |--| A1111/     |
+| (content   |  | Invoke/    |
+| addressed) |  | (linked)   |
++------------+  +------------+
+```
+
+## Source Code Organization
+
+```
+src/
++-- main.rs              Entry point, tokio runtime, background update check
++-- cli/                  One file per command (30+ handlers)
+|   +-- mod.rs            Clap definitions, command dispatch
+|   +-- install.rs        modl pull / modl model pull
+|   +-- generate.rs       modl generate
+|   +-- train.rs          modl train
+|   +-- datasets.rs       modl dataset *
+|   +-- outputs.rs        modl outputs *
+|   +-- serve.rs          modl serve
+|   +-- worker.rs         modl worker *
+|   +-- ...
++-- core/                 Business logic (27 modules). No terminal output.
+|   +-- config.rs         Load/save ~/.modl/config.yaml
+|   +-- db.rs             SQLite (installed models, jobs, artifacts, favorites)
+|   +-- store.rs          Content-addressed storage paths + hash verification
+|   +-- manifest.rs       Registry manifest type definitions
+|   +-- registry.rs       Load/search registry index.json
+|   +-- resolver.rs       Dependency resolution algorithm
+|   +-- download.rs       Resilient HTTP streaming downloads
+|   +-- executor.rs       Executor trait + LocalExecutor (subprocess management)
+|   +-- cloud.rs          CloudExecutor stub (future)
+|   +-- job.rs            TrainJobSpec, GenerateJobSpec (serializable specs)
+|   +-- presets.rs         Training parameter resolution (preset + GPU + model)
+|   +-- preflight.rs      Pre-flight checks before expensive operations
+|   +-- runtime.rs        Managed Python runtime (venv, pip, ai-toolkit)
+|   +-- dataset.rs        Dataset listing, validation, path resolution
+|   +-- outputs.rs        Service layer for generated images (list, delete, fav)
+|   +-- training.rs       Worker path resolution
+|   +-- training_status.rs Training progress parsing
+|   +-- artifacts.rs      Training artifact registration
+|   +-- gpu.rs            GPU detection (NVML / nvidia-smi fallback)
+|   +-- symlink.rs        Symlink management for tool folders
+|   +-- huggingface.rs    HuggingFace API integration
+|   +-- llm.rs            LlmBackend trait (local/cloud/builtin)
+|   +-- agent.rs          Tool-use agent loop (event-driven)
+|   +-- agent_tools.rs    Agent tool implementations
+|   +-- enhance.rs        Prompt enhancement
+|   +-- update_check.rs   Background CLI update check
++-- auth/                 Auth provider implementations
+|   +-- huggingface.rs    HF token management
+|   +-- civitai.rs        Civitai API key management
++-- compat/               Tool-specific folder layouts
+|   +-- layouts.rs        ComfyUI, A1111, InvokeAI path mappings
++-- ui/                   Web UI
+    +-- mod.rs            UI module
+    +-- server.rs         Axum web server, SSE, all API endpoints (1600 LOC)
+    +-- web/              React frontend (TypeScript + Tailwind + Radix)
+    |   +-- src/
+    |   |   +-- App.tsx
+    |   |   +-- api.ts
+    |   |   +-- components/
+    |   |       +-- generate/     Generate page components
+    |   |       +-- studio/       Agent/studio components
+    |   |       +-- ui/           Shared UI primitives (shadcn/radix)
+    |   |       +-- OutputsGallery.tsx
+    |   |       +-- TrainingRuns.tsx
+    |   |       +-- DatasetViewer.tsx
+    |   |       +-- ...
+    |   +-- package.json          React 19, TanStack Query, Radix, Tailwind
+    +-- dist/             Built frontend assets (embedded in binary)
+```
 
 ## Key Concepts
 
@@ -86,14 +215,12 @@ Different tools expect models in different places. Modl supports multiple layout
 ```yaml
 # ~/.modl/config.yaml
 storage:
-  root: ~/modl           # Where modl keeps its store
+  root: ~/modl
 
 targets:
   - path: ~/ComfyUI
     type: comfyui
-    symlink: true         # Symlink from store into ComfyUI folders
-
-  # Can target multiple installations simultaneously
+    symlink: true
   - path: ~/stable-diffusion-webui
     type: a1111
     symlink: true
@@ -102,8 +229,6 @@ targets:
 Layouts define where each asset type goes for each tool:
 - **ComfyUI:** `models/checkpoints/`, `models/loras/`, `models/vae/`, etc.
 - **A1111:** `models/Stable-diffusion/`, `models/Lora/`, `models/VAE/`, etc.
-- **InvokeAI:** Uses its own model management but we can integrate
-- **Custom:** User defines arbitrary paths per asset type
 
 `modl init` auto-detects installed tools and configures this.
 
@@ -112,7 +237,6 @@ Layouts define where each asset type goes for each tool:
 Manifests declare dependencies. Installing a checkpoint automatically installs its required VAE and text encoders:
 
 ```yaml
-# flux-dev manifest declares:
 requires:
   - id: flux-vae
     type: vae
@@ -122,11 +246,7 @@ requires:
     type: text_encoder
 ```
 
-`modl install flux-dev` installs all 4 items. The resolver handles:
-- Transitive dependencies
-- Already-installed items (skip)
-- Variant matching (if user requests fp8, also get fp8 text encoders if available)
-- Circular dependency detection (shouldn't happen, but be safe)
+`modl pull flux-dev` installs all 4 items. The resolver handles transitive dependencies, already-installed items (skip), variant matching, and circular dependency detection.
 
 ### Variant Selection
 
@@ -139,7 +259,7 @@ Models come in variants (fp16, fp8, GGUF quantizations). Modl auto-selects based
 | 8-11GB | gguf-q4 (6.8GB) | Quantized, needs GGUF loader |
 | <8GB | gguf-q2 (4.2GB) | Lower quality, functional |
 
-User can always override: `modl install flux-dev --variant fp8`
+User can always override: `modl pull flux-dev --variant fp8`
 
 ### Gated Models (Authentication)
 
@@ -152,6 +272,137 @@ Models like Flux Dev require accepting terms on HuggingFace. Modl handles this:
 
 Supports: HuggingFace (`hf_...` tokens), Civitai (API keys).
 
+### Executor Trait (Local vs Cloud)
+
+The `Executor` trait abstracts job submission:
+- `LocalExecutor` — Spawns Python worker subprocess, streams events via stdout
+- `CloudExecutor` — Stub for future Modal.com integration (same interface)
+
+Both CLI and web UI use the same executor. Jobs are submitted as serializable specs (`TrainJobSpec`, `GenerateJobSpec`) written to `~/.modl/runtime/jobs/`.
+
+### Event Streaming for Long Tasks
+
+Training and generation emit structured `JobEvent` objects (JSON via stdout). These are consumed by:
+- CLI: Progress bars via `indicatif`
+- Web UI: Broadcast channel -> SSE to browser
+
+Standard interface: `mpsc::Receiver<JobEvent>` (sync) or broadcast channel (async).
+
+## CLI Commands
+
+### System
+
+| Command | Description |
+|---------|-------------|
+| `modl init` | First-time setup — detect tools, configure storage |
+| `modl doctor` | Check symlinks, hashes, deps, runtime health |
+| `modl config [key] [value]` | View or update configuration |
+| `modl auth <provider>` | Configure auth (HuggingFace, Civitai) |
+| `modl upgrade` | Self-update modl CLI |
+| `modl serve [--port] [--no-open]` | Launch web UI (axum server, opens browser) |
+
+### Models
+
+| Command | Description |
+|---------|-------------|
+| `modl pull <id>` | Download model with all dependencies (alias: `modl model pull`) |
+| `modl rm <id>` | Remove an installed model |
+| `modl ls [--type <type>]` | List installed models |
+| `modl info <id>` | Show detailed model info |
+| `modl search <query>` | Search the registry + HuggingFace |
+| `modl popular` | Show trending models |
+| `modl link [--comfyui <path>]` | Adopt existing model folders |
+| `modl update` | Fetch latest registry index |
+| `modl space` | Show disk usage breakdown |
+| `modl gc` | Remove unreferenced store files |
+| `modl export` / `import` | Lock files for reproducible setups |
+
+### Generation
+
+| Command | Description |
+|---------|-------------|
+| `modl generate "prompt"` | Generate images (flags: `--base`, `--lora`, `--count`, `--size`, `--steps`, `--guidance`, `--seed`, `--cloud`) |
+| `modl enhance "prompt"` | AI-enhanced prompt expansion |
+
+### Training
+
+| Command | Description |
+|---------|-------------|
+| `modl train` | Train a LoRA (interactive or with flags: `--base`, `--dataset`, `--lora-type`, `--preset`, `--rank`, `--lr`, `--steps`) |
+| `modl train setup` | Install training dependencies (ai-toolkit + PyTorch) |
+| `modl train status [--watch]` | Monitor live training progress |
+
+### Datasets
+
+| Command | Description |
+|---------|-------------|
+| `modl dataset create <name> --from <dir>` | Create managed dataset from images |
+| `modl dataset ls` | List all managed datasets |
+| `modl dataset rm <name>` | Delete a dataset |
+| `modl dataset validate <name>` | Validate dataset for training |
+| `modl dataset resize <name> --resolution <px>` | Resize images |
+| `modl dataset tag <name>` | Auto-tag images (VL model) |
+| `modl dataset caption <name>` | Auto-caption images (VL model) |
+| `modl dataset prepare <name> --from <dir>` | Full pipeline (create + resize + caption) |
+
+### Outputs
+
+| Command | Description |
+|---------|-------------|
+| `modl outputs ls [--limit] [--favorites]` | List generated images |
+| `modl outputs show <id>` | Show image metadata |
+| `modl outputs open <id>` | Open image in viewer |
+| `modl outputs search <query>` | Search by prompt text |
+| `modl outputs fav <id>` / `unfav <id>` | Toggle favorites |
+| `modl outputs rm <id>` | Delete output |
+
+### Worker & Runtime
+
+| Command | Description |
+|---------|-------------|
+| `modl worker start` / `stop` / `status` | Manage persistent GPU worker |
+| `modl runtime install` | Install managed Python runtime |
+| `modl runtime status` / `doctor` | Check runtime health |
+| `modl runtime upgrade` / `reset` | Manage runtime lifecycle |
+
+### LLM (experimental)
+
+| Command | Description |
+|---------|-------------|
+| `modl llm pull <model>` | Download GGUF models |
+| `modl llm chat <prompt>` | Local LLM inference |
+| `modl llm ls` | List installed LLMs |
+
+## Web UI
+
+The web UI (`modl serve`) is the primary user experience. Built with React 19 + TypeScript + Tailwind + Radix UI.
+
+### Pages
+
+1. **Generate** — Prompt input, model/LoRA selection, aspect ratio, sampling params, img2img upload, output feed
+2. **Gallery** — Grid of all outputs, search, filter, metadata panel, favorites, delete
+3. **Training** — Training run list, live progress bars, sample image viewer, new training form
+4. **Studio** — Agent-driven workflow (experimental): intent input, timeline, result gallery
+5. **Datasets** — Dataset viewer
+
+### API Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/gpu` | GPU status |
+| `GET /api/models` | List installed models |
+| `POST /api/generate` | Submit generation job |
+| `GET /api/generate/stream` | SSE stream of generation progress |
+| `GET /api/generate/queue` | Queue status |
+| `GET /api/training` | List training runs |
+| `POST /api/train` | Submit training job |
+| `POST /api/enhance` | Enhance prompt |
+| `GET /api/datasets` | List datasets |
+| `GET /api/outputs` | List generated images |
+| `DELETE /api/outputs/:id` | Delete output |
+| `POST /api/outputs/:id/fav` | Toggle favorite |
+| `GET /files/*` | Serve generated files |
+
 ## Manifest Schema
 
 Every item in the registry is a YAML file. Here's the complete schema:
@@ -159,10 +410,10 @@ Every item in the registry is a YAML file. Here's the complete schema:
 ### Checkpoint
 
 ```yaml
-id: flux-dev                    # Unique identifier
-name: "FLUX.1 Dev"              # Human-readable name
-type: checkpoint                # Asset type
-architecture: flux              # Model architecture family
+id: flux-dev
+name: "FLUX.1 Dev"
+type: checkpoint
+architecture: flux
 author: black-forest-labs
 license: flux-1-dev-non-commercial
 homepage: https://huggingface.co/black-forest-labs/FLUX.1-dev
@@ -173,12 +424,12 @@ variants:
   - id: fp16
     file: flux1-dev.safetensors
     url: https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/flux1-dev.safetensors
-    sha256: "a1b2c3d4..."       # REQUIRED for verification
-    size: 23800000000            # Size in bytes
+    sha256: "a1b2c3d4..."
+    size: 23800000000
     format: safetensors
     precision: fp16
-    vram_required: 24576         # MB
-    vram_recommended: 24576      # MB
+    vram_required: 24576
+    vram_recommended: 24576
   - id: fp8
     file: flux1-dev-fp8-e4m3fn.safetensors
     url: https://huggingface.co/Kijai/flux-fp8/resolve/main/flux1-dev-fp8-e4m3fn.safetensors
@@ -188,26 +439,22 @@ variants:
     precision: fp8-e4m3fn
     vram_required: 12288
     vram_recommended: 16384
-    note: "Quantized. Slight quality reduction vs fp16."
 
-requires:                       # Dependencies — installed automatically
+requires:
   - id: flux-vae
     type: vae
-    reason: "Flux models require the Flux-specific VAE"
   - id: t5-xxl-fp16
     type: text_encoder
-    reason: "T5-XXL for prompt processing"
-    optional_variant: t5-xxl-fp8  # Suggested for low-VRAM
+    optional_variant: t5-xxl-fp8
   - id: clip-l
     type: text_encoder
-    reason: "CLIP-L for secondary encoding"
 
 auth:
   provider: huggingface
   terms_url: https://huggingface.co/black-forest-labs/FLUX.1-dev
   gated: true
 
-defaults:                       # Sensible defaults (informational)
+defaults:
   steps: 20
   cfg: 3.5
   sampler: euler
@@ -226,8 +473,7 @@ name: "Realistic Skin Texture v3"
 type: lora
 author: civitai-user-xyz
 license: cc-by-nc-4.0
-
-base_models: [flux-dev, flux-schnell]   # Compatible base models
+base_models: [flux-dev, flux-schnell]
 
 file:
   url: https://civitai.com/api/download/models/123456
@@ -242,199 +488,24 @@ auth:
 trigger_words: ["realistic skin texture"]
 recommended_weight: 0.7
 weight_range: [0.4, 1.0]
-
-preview_images:
-  - https://image.civitai.com/...
-
 tags: [portrait, skin, realistic, photography]
 rating: 4.8
 downloads: 12400
 added: 2025-01-10
 ```
 
-### Other types follow the same pattern:
-- **vae:** Similar to checkpoint but simpler (usually single variant, no deps)
+### Other asset types
+- **vae:** Single variant, no deps
 - **text_encoder:** Has `architecture` field (t5, clip, etc.)
-- **controlnet:** Has `preprocessor` field and `base_models` compatibility
+- **controlnet:** Has `preprocessor` field and `base_models`
 - **upscaler:** Has `scale_factor` field
 - **embedding:** Has `base_models` and `trigger_words`
 - **ipadapter:** Has `clip_vision_model` dependency
-
-## CLI Commands
-
-### modl init
-Interactive first-run setup:
-- Auto-detect ComfyUI / A1111 / Invoke installations
-- Ask user which to target (can target multiple)
-- Choose symlink mode (recommended) or direct mode
-- Scan existing model files, match by hash to registry entries
-- Generate `~/.modl/config.yaml`
-
-### modl install <id> [--variant <v>] [--dry-run]
-- Resolve dependencies (full install tree)
-- Auto-select variant based on GPU VRAM (unless --variant specified)
-- Check auth requirements, guide user if needed
-- Download with progress bars (indicatif)
-- Verify SHA256 hash
-- Store in content-addressed store
-- Create symlinks to configured targets
-- Update local SQLite database
-- `--dry-run` shows what would be installed without doing it
-
-### modl uninstall <id>
-- Check if other installed items depend on this
-- Warn user if so, require --force to proceed
-- Remove symlinks
-- Mark as uninstalled in DB
-- Actual store file removed on next `modl gc` (safe)
-
-### modl list [--type <type>]
-- Table output: Name, Type, Variant, Size, Location
-- Filter by type: checkpoint, lora, vae, text_encoder, controlnet, upscaler, embedding, ipadapter
-- Show total disk usage at bottom
-
-### modl info <id>
-- Full details: all variants, VRAM requirements, dependencies, description, tags
-- If installed: show location, installed variant, disk usage
-- If not installed: show download sizes, auth requirements
-
-### modl search <query> [--type <t>] [--for <base_model>] [--tag <tag>] [--min-rating <r>]
-- Search the registry index
-- Filterable by type, compatible base model, tag, minimum rating
-- Results: name, type, rating, downloads, size
-
-### modl space
-- Tree view of disk usage by type and by model
-- Show total store size
-- Suggest cleanup candidates (old versions, unused items)
-
-### modl doctor
-- Check for broken symlinks
-- Verify hashes of installed files (detect corruption)
-- Check LoRA/base model compatibility
-- Check for missing dependencies
-- Report any issues with suggested fixes
-
-### modl gc
-- Remove files in store not referenced by any installed entry
-- Show space recovered
-- Require confirmation
-
-### modl link --comfyui <path> | --a1111 <path>
-- Scan the tool's model folders
-- Hash each file, match against registry
-- Register matched files in modl' database (no copy/move)
-- Set up symlink configuration for future installs
-
-### modl auth <provider>
-- Interactive: prompt for token/key
-- Store in `~/.modl/auth.yaml`
-- Verify token works (test API call)
-- Providers: huggingface, civitai
-
-### modl update
-- Fetch latest registry index.json
-- Show if any installed items have newer versions available
-- Does NOT auto-upgrade (user runs `modl upgrade` for that)
-
-### modl export
-- Generate `modl.lock` file listing all installed items with exact versions and hashes
-- Shareable — anyone can reproduce the environment
-
-### modl import <modl.lock>
-- Install everything from a lock file
-- Respects exact variants and versions specified
-
-### modl popular [type] [--for <base_model>] [--period <day|week|month>]
-- Show trending items from registry
-- Useful for discovery
-
-## Code Style & Conventions
-
-### Rust
-- Use `clap` derive macros for CLI definition (not builder pattern)
-- Use `anyhow` for error handling in CLI layer, `thiserror` for library errors
-- Use `tokio` async runtime for downloads (parallel download support)
-- Async only where needed (downloads, HTTP). Keep file I/O synchronous — it's simpler and fast enough
-- Prefer `reqwest` streaming for large file downloads (don't buffer 24GB in memory)
-- Use `indicatif::MultiProgress` for parallel download progress bars
-- `serde` derive on all manifest/config structs — YAML in, structs out
-- SQLite for local state (installed items, hashes, paths) — NOT JSON files
-- All paths handled via `std::path::PathBuf`, cross-platform aware
-- Symlinks: use `std::os::unix::fs::symlink` on Unix, `std::os::windows::fs::symlink_file` on Windows
-
-### File Organization
-- `src/cli/` — One file per command. Each exposes a function that `main.rs` calls.
-- `src/core/` — Business logic. No terminal output. Returns Results.
-- `src/auth/` — Auth provider implementations.
-- `src/compat/` — Tool-specific folder layouts and scanning.
-- `tests/` — Integration tests. Unit tests are inline (`#[cfg(test)]` modules).
-
-### Error Handling
-- CLI layer: use `anyhow::Result` with context. Print user-friendly errors.
-- Core/library: use `thiserror` enums. Be specific about what went wrong.
-- Never panic in normal operation. Downloads fail gracefully with retry.
-- Always clean up partial downloads on failure (don't leave half-downloaded 12GB files).
-
-### Testing
-- Unit tests: inline `#[cfg(test)]` modules in each file
-- Integration tests: in `tests/` directory
-- Mock HTTP responses for download tests (don't hit real servers in CI)
-- Test manifest parsing extensively (it's the most likely source of bugs)
-- Test dependency resolution with various graph shapes
-- Test symlink creation on the actual filesystem (use temp dirs)
-
-## Registry (Separate Repo: forge-registry)
-
-```
-modl-registry/
-  manifests/
-    checkpoints/
-      flux-dev.yaml
-      flux-schnell.yaml
-      sdxl-base.yaml
-      ...
-    loras/
-      realistic-skin-v3.yaml
-      ...
-    vae/
-    text_encoders/
-    controlnet/
-    upscalers/
-    embeddings/
-    ipadapters/
-  schemas/
-    checkpoint.json           # JSON Schema for validation
-    lora.json
-    ...
-  scripts/
-    build_index.py            # CI script: compile all manifests → index.json
-    validate_manifests.py     # CI script: validate all YAML against schema
-  index.json                  # Compiled index (auto-generated, don't edit)
-  CONTRIBUTING.md
-```
-
-### CI on the registry repo:
-- On every PR: validate manifest schema, check URLs are accessible (optional, can be slow)
-- On merge to main: regenerate index.json, publish as GitHub Release asset
-- The CLI fetches `index.json` from the latest release on `modl update`
-
-### Initial catalog to create manually:
-**Checkpoints:** flux-dev, flux-schnell, sdxl-base-1.0, sd-3.5-large, sd-3.5-medium, sd-1.5, playground-v2.5
-**VAEs:** flux-vae, sdxl-vae-fp16, sd-vae-ft-mse
-**Text Encoders:** t5-xxl-fp16, t5-xxl-fp8, clip-l, clip-g, clip-vit-large
-**ControlNets:** depth (flux), canny (flux), depth (sdxl), canny (sdxl), openpose (sdxl)
-**LoRAs:** Top 30 from Civitai by downloads for Flux + SDXL
-**Upscalers:** 4x-UltraSharp, RealESRGAN-x4plus, SwinIR-4x
-**IP-Adapters:** ip-adapter-plus (sdxl), ip-adapter-faceid
-
-~80 manifests total covering 90% of what users actually download.
 
 ## Config Files
 
 ### ~/.modl/config.yaml
 ```yaml
-# Created by `modl init`, editable by user
 storage:
   root: ~/modl
 
@@ -442,16 +513,13 @@ targets:
   - path: ~/ComfyUI
     type: comfyui
     symlink: true
-  # Can add more targets
 
-# GPU override (auto-detected if not set)
 # gpu:
 #   vram_mb: 24576
 ```
 
 ### ~/.modl/auth.yaml
 ```yaml
-# Created by `modl auth`
 huggingface:
   token: "hf_..."
 civitai:
@@ -460,8 +528,6 @@ civitai:
 
 ### modl.lock
 ```yaml
-# Generated by `modl export`
-# Machine-readable, reproducible environment specification
 generated: 2026-02-22T14:30:00Z
 modl_version: 0.1.0
 
@@ -473,29 +539,20 @@ items:
   - id: flux-vae
     type: vae
     sha256: "x1y2z3..."
-  - id: t5-xxl-fp16
-    type: text_encoder
-    sha256: "..."
-  - id: clip-l
-    type: text_encoder
-    sha256: "..."
-  - id: realistic-skin-v3
-    type: lora
-    sha256: "..."
 ```
 
 ## Design Principles
 
 ### CLI is the master for all operations
 
-Every user-facing operation (install, delete, favourite, generate, etc.) **must** be available as a CLI command first. The web UI is a convenience layer that calls the same underlying logic — it must never be the only way to do something.
+Every user-facing operation (install, delete, favourite, generate, etc.) **must** be available as a CLI command first. The web UI is a convenience layer that calls the same underlying logic -- it must never be the only way to do something.
 
 When adding a new feature:
 1. Implement the core logic in `src/core/` (database, filesystem, etc.)
 2. Expose it as a CLI subcommand in `src/cli/`
 3. Wire it up in the web UI server (`src/ui/server.rs`) and frontend (`src/ui/web/`)
 
-The CLI and web UI should have **full feature parity**. If the UI can do it, the CLI can do it, and vice versa. The CLI is the source of truth.
+The CLI and web UI should have **full feature parity**. If the UI can do it, the CLI can do it, and vice versa.
 
 ### Service layer abstraction (`src/core/`)
 
@@ -503,18 +560,62 @@ The web UI server and CLI must **never** talk to the database or filesystem dire
 
 ```
   CLI handler (src/cli/)           UI handler (src/ui/server.rs)
-         │                                  │
-         └──────────┐          ┌────────────┘
-                    ▼          ▼
+         |                                  |
+         +----------+          +------------+
+                    v          v
             Service layer (src/core/outputs.rs, etc.)
-                    │
-                    ▼
+                    |
+                    v
             DB + Filesystem
 ```
 
-This abstraction exists so that the storage backend can be swapped later (e.g., local filesystem → cloud storage) without changing the CLI or UI code. The service layer is the only place that knows *how* data is stored.
+**Example:** `core::outputs` handles `list_outputs()`, `delete_output()`, `toggle_favorite()`. Both `cli::outputs` and `ui::server` call these functions instead of touching `Database` or `std::fs` directly.
 
-**Example:** `core::outputs` handles `list_outputs()`, `delete_output()`, `toggle_favorite()`, `set_favorite()`. Both `cli::outputs` and `ui::server` call these functions instead of touching `Database` or `std::fs` directly for output operations.
+### Pluggable backends (traits)
+
+- **Executor trait:** `LocalExecutor` vs `CloudExecutor` (same interface for job submission)
+- **LlmBackend trait:** `BuiltinLlmBackend` vs `CloudLlmBackend` vs `LocalLlmBackend`
+
+Swap implementations at instantiation; calling code doesn't care which backend runs.
+
+### Specification-driven execution
+
+`TrainJobSpec` and `GenerateJobSpec` are serializable (YAML/JSON). Specs are:
+- Written to disk before execution
+- Stored in DB for provenance
+- Immutable after submission
+- Enable reproducibility, async submission, and audit trail
+
+## Code Style & Conventions
+
+### Rust
+- Use `clap` derive macros for CLI definition (not builder pattern)
+- Use `anyhow` for error handling in CLI layer, `thiserror` for library errors
+- Use `tokio` async runtime for downloads (parallel download support)
+- Async only where needed (downloads, HTTP, web server). Keep file I/O synchronous.
+- Prefer `reqwest` streaming for large file downloads (don't buffer 24GB in memory)
+- `serde` derive on all manifest/config structs
+- SQLite for local state -- NOT JSON files
+- All paths handled via `std::path::PathBuf`, cross-platform aware
+
+### CLI handlers should be thin
+- Parse args, call `core/` service, format output
+- Business logic belongs in `src/core/`, not in CLI handlers
+- Terminal output (progress bars, styled text) is the only CLI-specific code
+
+### Error Handling
+- CLI layer: use `anyhow::Result` with context. Print user-friendly errors.
+- Core/library: use `thiserror` enums. Be specific about what went wrong.
+- Never panic in normal operation. Downloads fail gracefully with retry.
+- Always clean up partial downloads on failure.
+
+### Testing
+- Unit tests: inline `#[cfg(test)]` modules in each file
+- Integration tests: in `tests/` directory
+- Mock HTTP responses for download tests
+- Test manifest parsing extensively
+- Test dependency resolution with various graph shapes
+- Test symlink creation on the actual filesystem (use temp dirs)
 
 ## Important Implementation Notes
 
@@ -527,32 +628,60 @@ This abstraction exists so that the storage backend can be swapped later (e.g., 
 
 ### Symlink Strategy
 - Modl store: `~/modl/store/<type>/<hash>/<filename>`
-- Symlinks: `~/ComfyUI/models/checkpoints/flux1-dev.safetensors` → `~/modl/store/checkpoints/<hash>/flux1-dev.safetensors`
-- If the target already has a real file (not symlink) with matching hash, register it but don't replace it
-- Cross-device symlinks may not work — detect and warn, suggest same-device storage
+- Symlinks: `~/ComfyUI/models/checkpoints/flux1-dev.safetensors` -> store
+- If the target already has a real file with matching hash, register it but don't replace it
+- Cross-device symlinks may not work -- detect and warn
 
 ### GPU Detection
 - Primary: NVML (nvidia-smi programmatic API via `nvml-wrapper`)
 - Fallback: Parse `nvidia-smi` CLI output
-- Fallback: No GPU detected — skip variant auto-selection, default to smallest variant with a note
+- Fallback: No GPU detected -- default to smallest variant with a note
 - Cache GPU info in config after first detection
 
-### First Run Experience
-If no `~/.modl/config.yaml` exists, `modl install` (or any command) should suggest running `modl init` first, but still work with sensible defaults (store in `~/modl/`, no symlinks).
-
 ### Port killing (SSH safety)
-When killing processes on a port (e.g. preview server restart), **always** use `lsof -sTCP:LISTEN` to match only listeners. Plain `lsof -ti :PORT` also returns PIDs of processes with client connections to that port — including VS Code Remote SSH port-forwarding. Killing those drops the SSH session. See `kill_existing_on_port()` in `src/ui/server.rs`.
+When killing processes on a port (e.g. server restart), **always** use `lsof -sTCP:LISTEN` to match only listeners. Plain `lsof -ti :PORT` also returns PIDs of processes with client connections to that port -- including VS Code Remote SSH port-forwarding. Killing those drops the SSH session. See `kill_existing_on_port()` in `src/ui/server.rs`.
 
 ### Training runs via SSH
-`modl train` runs the worker as a direct child process. If the SSH session drops, SIGHUP cascades and kills training. Users should run long training jobs inside `tmux` or `screen`. A future improvement would be to daemonize the worker, but that requires the worker to write events directly to the DB instead of stdout.
+`modl train` runs the worker as a direct child process. If the SSH session drops, SIGHUP cascades and kills training. Users should run long training jobs inside `tmux` or `screen`.
 
-## Non-Goals (for now)
-- Custom node management (ComfyUI Manager's domain)
-- Pipeline definitions / execution
-- LLM agent / copilot
-- Web dashboard / GUI
-- Cloud deployment
-- Model training
-- Image generation / inference
+### Frontend build
+The web frontend is a React app in `src/ui/web/`. Build with `cd src/ui/web && npm run build`, which outputs to `src/ui/dist/`. The dist files are embedded in the Rust binary. Don't commit `node_modules/`.
 
-These are future layers in the larger **modl** platform. This repo is the model manager only.
+## Registry (Separate Repo: modl-registry)
+
+```
+modl-registry/
+  manifests/
+    checkpoints/
+      flux-dev.yaml
+      flux-schnell.yaml
+      ...
+    loras/
+    vae/
+    text_encoders/
+    controlnet/
+    upscalers/
+    embeddings/
+    ipadapters/
+  schemas/
+    checkpoint.json
+    lora.json
+    ...
+  scripts/
+    build_index.py
+    validate_manifests.py
+  index.json                  # Auto-generated, don't edit
+```
+
+CI on the registry repo:
+- On every PR: validate manifest schema
+- On merge to main: regenerate index.json, publish as GitHub Release asset
+- The CLI fetches `index.json` from the latest release on `modl update`
+
+## What is NOT built yet
+
+- **Persistent worker warm path** -- Worker restarts per job; no VRAM caching between generations yet
+- **CloudExecutor** -- Stub only. Modal.com integration is Phase 4.
+- **Local LLM inference** -- llama-cpp-2 integration pending
+- **Inpainting / upscale** -- Not implemented
+- **Video generation** -- Phase 2

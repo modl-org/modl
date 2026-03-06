@@ -2,3 +2,4 @@
 __pycache__/
 *.pyc
 /scripts/storybook
+node_modules/

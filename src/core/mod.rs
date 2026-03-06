@@ -10,6 +10,7 @@ pub mod enhance;
 pub mod executor;
 pub mod gpu;
 pub mod huggingface;
+pub mod install;
 pub mod job;
 pub mod llm;
 pub mod manifest;
