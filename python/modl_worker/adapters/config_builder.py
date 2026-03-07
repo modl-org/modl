@@ -337,7 +337,7 @@ def spec_to_aitoolkit_config(spec: dict) -> dict:
                     "type": "sd_trainer",
                     "training_folder": output.get("destination_dir", "output"),
                     "device": "cuda:0",
-                    "trigger_word": params.get("trigger_word", "OHWX"),
+                    "trigger_word": _resolve_trigger_word(params, arch_key, lora_type),
                     "network": network_config,
                     "save": {
                         "dtype": "float16",
@@ -357,10 +357,7 @@ def spec_to_aitoolkit_config(spec: dict) -> dict:
                             "cache_text_embeddings": arch_key in ("qwen_image", "zimage_turbo"),
                             "resolution": dataset_resolution,
                             "cache_latents_to_disk": True,
-                            "default_caption": (
-                                "" if arch_key == "qwen_image"
-                                else params.get("trigger_word", "OHWX")
-                            ),
+                            "default_caption": _resolve_trigger_word(params, arch_key, lora_type),
                             "num_repeats": num_repeats,
                         }
                     ],
@@ -383,6 +380,20 @@ def spec_to_aitoolkit_config(spec: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _resolve_trigger_word(params: dict, arch_key: str, lora_type: str) -> str:
+    """Resolve trigger word, returning empty string for no-trigger style training.
+
+    For Z-Image Turbo and Qwen-Image style LoRAs, Ostris recommends no trigger
+    word — the style is learned implicitly from literal captions. ai-toolkit
+    treats empty/None trigger_word as "no trigger" and won't prepend anything.
+    """
+    tw = params.get("trigger_word", "OHWX")
+    no_trigger_style = arch_key in ("qwen_image", "zimage_turbo") and lora_type == "style"
+    if no_trigger_style and tw.upper() in ("NONE", ""):
+        return ""
+    return tw
+
 
 def _apply_qwen_model_config(model_config: dict, lora_type: str) -> None:
     """Apply Qwen-Image specific model config (quantization, logging)."""
