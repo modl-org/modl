@@ -1,5 +1,5 @@
 /target
 __pycache__/
 *.pyc
-/scripts/storybook
+/scripts/storybook*
 node_modules/

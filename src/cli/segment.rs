@@ -2,7 +2,19 @@ use anyhow::{Context, Result};
 use console::style;
 use std::path::PathBuf;
 
+use crate::core::db::Database;
 use crate::core::job::SegmentJobSpec;
+
+/// Resolve the store path for an installed segmentation model.
+fn resolve_segmentation_model_path(model_id: &str, db: &Database) -> Option<String> {
+    let installed = db.list_installed(None).ok()?;
+    for model in &installed {
+        if (model.id == model_id || model.name == model_id) && model.asset_type == "segmentation" {
+            return Some(model.store_path.clone());
+        }
+    }
+    None
+}
 
 pub async fn run(
     image: &str,
@@ -48,6 +60,26 @@ pub async fn run(
         None
     };
 
+    // Resolve model path from modl store based on method
+    let db = Database::open()?;
+    let (model_id, model_path) = match method {
+        "sam" => {
+            let path = resolve_segmentation_model_path("sam-vit-base", &db);
+            if path.is_none() {
+                anyhow::bail!("SAM model not installed. Run `modl pull sam-vit-base` first.");
+            }
+            ("sam-vit-base".to_string(), path)
+        }
+        "background" => {
+            let path = resolve_segmentation_model_path("birefnet-dis", &db);
+            if path.is_none() {
+                anyhow::bail!("BiRefNet model not installed. Run `modl pull birefnet-dis` first.");
+            }
+            ("birefnet-dis".to_string(), path)
+        }
+        _ => ("sam-vit-base".to_string(), None),
+    };
+
     // Default output path
     let output_mask = output.map(String::from).unwrap_or_else(|| {
         let stem = image_path.file_stem().unwrap_or_default().to_string_lossy();
@@ -63,8 +95,8 @@ pub async fn run(
         method: method.to_string(),
         bbox: bbox_arr,
         point: point_arr,
-        model: "sam-vit-base".to_string(),
-        model_path: None,
+        model: model_id,
+        model_path,
         expand_px,
     };
     let yaml = serde_yaml::to_string(&spec).context("Failed to serialize segment spec")?;

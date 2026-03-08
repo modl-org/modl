@@ -1,4 +1,7 @@
-"""Upscale adapter — magnify images using Real-ESRGAN.
+"""Upscale adapter — magnify images using spandrel (Real-ESRGAN, etc).
+
+Uses spandrel to load upscaler .pth files directly — no basicsr dependency.
+Same model files that ComfyUI uses internally.
 
 Reads an upscale job spec YAML containing:
   image_paths: list[str]  — paths to images to upscale
@@ -10,9 +13,6 @@ Reads an upscale job spec YAML containing:
 import hashlib
 import time
 from pathlib import Path
-
-import numpy as np
-from PIL import Image
 
 from modl_worker.protocol import EventEmitter
 
@@ -33,30 +33,27 @@ def _resolve_images(image_paths: list[str]) -> list[Path]:
     return result
 
 
-def _load_realesrgan(model_path: str, scale: int, emitter: EventEmitter):
-    """Load Real-ESRGAN model from a local .pth file."""
+def _load_upscaler(model_path: str, emitter: EventEmitter):
+    """Load an upscaler model via spandrel."""
     try:
-        import torch
-        from basicsr.archs.rrdbnet_arch import RRDBNet
-        from realesrgan import RealESRGANer
+        import spandrel
     except ImportError as exc:
         raise ImportError(
-            f"Missing dependency: {exc}. Install with: pip install realesrgan"
+            f"Missing dependency: {exc}. Install with: pip install spandrel"
         ) from exc
 
-    # RealESRGAN x4plus uses RRDBNet with these params
-    model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
+    import torch
 
-    upsampler = RealESRGANer(
-        scale=scale,
-        model_path=model_path,
-        model=model,
-        tile=0,
-        tile_pad=10,
-        pre_pad=0,
-        half=torch.cuda.is_available(),
-    )
-    return upsampler
+    emitter.info(f"Loading upscaler via spandrel: {Path(model_path).name}")
+    model = spandrel.ModelLoader().load_from_file(model_path)
+
+    if torch.cuda.is_available():
+        model = model.cuda()
+        if model.supports_half:
+            model = model.half()
+
+    model.eval()
+    return model
 
 
 def run_upscale(config_path: Path, emitter: EventEmitter, model_cache: dict | None = None) -> int:
@@ -97,16 +94,17 @@ def run_upscale(config_path: Path, emitter: EventEmitter, model_cache: dict | No
     emitter.job_started(config=str(config_path))
 
     # Load model (use cache if available)
-    cache_key = f"realesrgan_{scale}x"
+    import torch
+
+    cache_key = f"upscaler_{model_path}"
     try:
         if model_cache is not None and cache_key in model_cache:
-            upsampler = model_cache[cache_key]
-            emitter.info("Using cached Real-ESRGAN model")
+            model = model_cache[cache_key]
+            emitter.info("Using cached upscaler model")
         else:
-            emitter.info(f"Loading Real-ESRGAN ({scale}x)...")
-            upsampler = _load_realesrgan(model_path, scale, emitter)
+            model = _load_upscaler(model_path, emitter)
             if model_cache is not None:
-                model_cache[cache_key] = upsampler
+                model_cache[cache_key] = model
     except Exception as exc:
         emitter.error("MODEL_LOAD_FAILED", f"Failed to load upscaler: {exc}", recoverable=False)
         return 1
@@ -123,18 +121,42 @@ def run_upscale(config_path: Path, emitter: EventEmitter, model_cache: dict | No
         try:
             t0 = time.time()
 
-            # Load with OpenCV (Real-ESRGAN expects BGR numpy array)
-            import cv2
-            img = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
-            if img is None:
-                raise ValueError(f"Could not read image: {image_path}")
+            # Load image as tensor
+            from PIL import Image
+            import numpy as np
+
+            img_pil = Image.open(image_path).convert("RGB")
+            w, h = img_pil.size
+            img_np = np.array(img_pil).astype(np.float32) / 255.0
+            img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).unsqueeze(0)
+
+            if torch.cuda.is_available():
+                img_tensor = img_tensor.cuda()
+                if model.supports_half:
+                    img_tensor = img_tensor.half()
 
             # Run upscaling
-            output_img, _ = upsampler.enhance(img, outscale=scale)
+            with torch.no_grad():
+                output_tensor = model(img_tensor)
+
+            # If model scale != requested scale, resize to match
+            model_scale = model.scale
+            if model_scale != scale:
+                target_h, target_w = h * scale, w * scale
+                output_tensor = torch.nn.functional.interpolate(
+                    output_tensor, size=(target_h, target_w), mode="bicubic", antialias=True,
+                )
+
+            # Convert back to image
+            output_np = output_tensor.squeeze(0).float().clamp(0, 1).cpu().numpy()
+            output_np = (output_np.transpose(1, 2, 0) * 255).astype(np.uint8)
+            output_img = Image.fromarray(output_np)
+
+            ow, oh = output_img.size
 
             # Save output
             output_path = output_dir / f"{image_path.stem}_{scale}x.png"
-            cv2.imwrite(str(output_path), output_img)
+            output_img.save(str(output_path))
 
             elapsed = time.time() - t0
 
@@ -142,9 +164,6 @@ def run_upscale(config_path: Path, emitter: EventEmitter, model_cache: dict | No
             with open(output_path, "rb") as f:
                 sha256 = hashlib.sha256(f.read()).hexdigest()
             size_bytes = output_path.stat().st_size
-
-            h, w = img.shape[:2]
-            oh, ow = output_img.shape[:2]
 
             emitter.artifact(path=str(output_path), sha256=sha256, size_bytes=size_bytes)
             emitter.info(f"[{i + 1}/{total}] {image_path.name} ({w}x{h} → {ow}x{oh}, {elapsed:.1f}s)")

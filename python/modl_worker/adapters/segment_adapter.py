@@ -52,38 +52,64 @@ def _mask_from_bbox(image_path: Path, bbox: list[float], expand_px: int) -> Imag
 def _mask_from_birefnet(
     image_path: Path, emitter: EventEmitter, model_path: str | None = None, model_cache: dict | None = None
 ) -> Image.Image:
-    """Generate foreground mask using BiRefNet."""
+    """Generate foreground mask using BiRefNet loaded from modl store."""
     import torch
-    from torchvision import transforms
 
-    # Try loading from transformers pipeline (simpler)
-    try:
-        from transformers import pipeline
+    if not model_path or not Path(model_path).exists():
+        raise ValueError("BiRefNet weights not found. Run `modl pull birefnet-dis` first.")
 
-        if model_cache is not None and "birefnet_pipe" in model_cache:
-            pipe = model_cache["birefnet_pipe"]
-            emitter.info("Using cached BiRefNet pipeline")
-        else:
-            emitter.info("Loading BiRefNet model...")
-            pipe = pipeline("image-segmentation", model="ZhengPeng7/BiRefNet", trust_remote_code=True, device="cuda")
+    if model_cache is not None and "birefnet_model" in model_cache:
+        model = model_cache["birefnet_model"]
+        emitter.info("Using cached BiRefNet model")
+    else:
+        emitter.info("Loading BiRefNet model...")
+        try:
+            from transformers import AutoModelForImageSegmentation
+            model = AutoModelForImageSegmentation.from_pretrained(
+                "ZhengPeng7/BiRefNet", trust_remote_code=True
+            )
+            # Load local weights
+            state_dict = torch.load(model_path, map_location="cpu", weights_only=False)
+            model.load_state_dict(state_dict, strict=False)
+            model = model.cuda().eval()
+        except Exception:
+            # Fallback: try loading via transformers pipeline with local model
+            from transformers import pipeline as hf_pipeline
+            pipe = hf_pipeline(
+                "image-segmentation", model="ZhengPeng7/BiRefNet",
+                trust_remote_code=True, device="cuda"
+            )
             if model_cache is not None:
                 model_cache["birefnet_pipe"] = pipe
+            img = Image.open(image_path).convert("RGB")
+            result = pipe(img)
+            if result and isinstance(result, list):
+                return result[0]["mask"].convert("L")
+            raise ValueError("BiRefNet failed to produce a mask")
 
-        img = Image.open(image_path).convert("RGB")
-        result = pipe(img)
-        # Pipeline returns list of dicts with 'mask' key
-        if result and isinstance(result, list):
-            mask = result[0]["mask"].convert("L")
-            return mask
-    except Exception:
-        pass
+        if model_cache is not None:
+            model_cache["birefnet_model"] = model
 
-    # Fallback: manual loading
-    emitter.info("Falling back to manual BiRefNet loading...")
+    from torchvision import transforms
+
     img = Image.open(image_path).convert("RGB")
-    # Simple thresholding fallback - return full white mask
-    emitter.warning("BIREFNET_FALLBACK", "Could not load BiRefNet, returning full mask")
-    return Image.new("L", img.size, 255)
+    w, h = img.size
+
+    transform = transforms.Compose([
+        transforms.Resize((1024, 1024)),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ])
+    input_tensor = transform(img).unsqueeze(0).cuda()
+
+    with torch.no_grad():
+        preds = model(input_tensor)[-1].sigmoid().cpu()
+
+    pred = preds[0].squeeze()
+    mask = (pred * 255).byte().numpy()
+    mask_img = Image.fromarray(mask).resize((w, h), Image.BILINEAR)
+
+    return mask_img
 
 
 def _mask_from_sam(
@@ -104,19 +130,8 @@ def _mask_from_sam(
         emitter.info("Loading SAM model...")
 
         sam_checkpoint = model_path
-        if not sam_checkpoint:
-            # Try common locations
-            home = Path.home()
-            candidates = [
-                home / ".modl" / "store" / "segmentation" / "sam_vit_b_01ec64.pth",
-            ]
-            for c in candidates:
-                if c.exists():
-                    sam_checkpoint = str(c)
-                    break
-
-        if not sam_checkpoint:
-            raise ValueError("SAM checkpoint not found. Run: modl pull sam-vit-base")
+        if not sam_checkpoint or not Path(sam_checkpoint).exists():
+            raise ValueError("SAM weights not found. Run `modl pull sam-vit-base` first.")
 
         from segment_anything import SamPredictor, sam_model_registry
 
