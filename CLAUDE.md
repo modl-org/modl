@@ -27,7 +27,7 @@ The 80/20 features that cover ~95% of daily usage:
 | LoRA training | P0 | Built (CLI + UI) |
 | Model registry + pull | P0 | Built |
 | Gallery / DAM | P1 | Built |
-| Inpainting | P1 | Not built |
+| Inpainting | P1 | Built (CLI + worker, UI via img2img+mask) |
 | Upscale | P1 | Not built |
 | Video gen | P2 | Not built |
 
@@ -683,5 +683,5 @@ CI on the registry repo:
 - **Persistent worker warm path** -- Worker restarts per job; no VRAM caching between generations yet
 - **CloudExecutor** -- Stub only. Modal.com integration is Phase 4.
 - **Local LLM inference** -- llama-cpp-2 integration pending
-- **Inpainting / upscale** -- Not implemented
+- **Upscale** -- Not implemented
 - **Video generation** -- Phase 2
