@@ -219,6 +219,7 @@ impl LocalExecutor {
     ///
     /// Returns `Ok(Some(handle))` if the worker accepted the job, `Ok(None)`
     /// if the socket is not available (fall back to one-shot).
+    #[cfg(unix)]
     fn try_submit_via_socket(
         &mut self,
         job_id: &str,
@@ -277,6 +278,15 @@ impl LocalExecutor {
             job_id: job_id.to_string(),
             child_pid: None,
         }))
+    }
+
+    #[cfg(not(unix))]
+    fn try_submit_via_socket(
+        &mut self,
+        _job_id: &str,
+        _spec: &GenerateJobSpec,
+    ) -> Result<Option<JobHandle>> {
+        Ok(None)
     }
 
     /// One-shot generation: spawn a fresh Python process (cold start).

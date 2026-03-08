@@ -20,6 +20,7 @@ pub struct AnalysisResult {
 ///
 /// Returns `Ok(Some(receiver))` if the worker accepted the job,
 /// `Ok(None)` if no worker is running (socket doesn't exist or refused).
+#[cfg(unix)]
 fn try_analysis_via_socket(
     action: &str,
     job_id: &str,
@@ -66,6 +67,15 @@ fn try_analysis_via_socket(
     });
 
     Ok(Some(rx))
+}
+
+#[cfg(not(unix))]
+fn try_analysis_via_socket(
+    _action: &str,
+    _job_id: &str,
+    _spec_yaml: &str,
+) -> Result<Option<mpsc::Receiver<JobEvent>>> {
+    Ok(None)
 }
 
 /// Spawn a Python worker for an analysis operation and stream progress.

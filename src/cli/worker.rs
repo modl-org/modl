@@ -1,14 +1,66 @@
+#[cfg(not(unix))]
+use anyhow::{Result, bail};
+
+#[cfg(unix)]
 use anyhow::{Context, Result, bail};
+#[cfg(unix)]
 use console::style;
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::Command;
+#[cfg(unix)]
 use std::time::Duration;
 
+#[cfg(unix)]
 use crate::core::runtime;
+#[cfg(unix)]
 use crate::core::training::resolve_worker_python_root;
 
+// ---------------------------------------------------------------------------
+// Windows stubs — worker requires Unix sockets, not available on Windows
+// ---------------------------------------------------------------------------
+
+#[cfg(not(unix))]
+pub fn try_connect() -> Option<()> {
+    None
+}
+
+#[cfg(not(unix))]
+pub fn is_worker_running() -> bool {
+    false
+}
+
+#[cfg(not(unix))]
+pub async fn start(_timeout: u32) -> Result<()> {
+    bail!("Worker daemon requires Unix sockets and is not supported on Windows");
+}
+
+#[cfg(not(unix))]
+pub async fn stop() -> Result<()> {
+    bail!("Worker daemon requires Unix sockets and is not supported on Windows");
+}
+
+#[cfg(not(unix))]
+pub async fn status() -> Result<()> {
+    bail!("Worker daemon requires Unix sockets and is not supported on Windows");
+}
+
+#[cfg(not(unix))]
+#[allow(dead_code)]
+pub async fn auto_spawn_if_needed() -> bool {
+    false
+}
+
+// ---------------------------------------------------------------------------
+// Unix implementation
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
 /// Path to the worker Unix socket.
 fn socket_path() -> PathBuf {
     dirs::home_dir()
@@ -17,6 +69,7 @@ fn socket_path() -> PathBuf {
         .join("worker.sock")
 }
 
+#[cfg(unix)]
 /// Path to the worker PID file.
 fn pid_path() -> PathBuf {
     dirs::home_dir()
@@ -25,6 +78,7 @@ fn pid_path() -> PathBuf {
         .join("worker.pid")
 }
 
+#[cfg(unix)]
 /// Check if a process with the given PID is alive.
 fn is_pid_alive(pid: u32) -> bool {
     // kill -0 checks process existence without sending a signal
@@ -38,6 +92,7 @@ fn is_pid_alive(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(unix)]
 /// Read the PID from the PID file, if it exists and the process is alive.
 fn read_worker_pid() -> Option<u32> {
     let path = pid_path();
@@ -52,17 +107,20 @@ fn read_worker_pid() -> Option<u32> {
     }
 }
 
+#[cfg(unix)]
 /// Try to connect to the worker socket.
 pub fn try_connect() -> Option<UnixStream> {
     let sock = socket_path();
     UnixStream::connect(&sock).ok()
 }
 
+#[cfg(unix)]
 /// Check if the worker is running (PID alive + socket connectable).
 pub fn is_worker_running() -> bool {
     read_worker_pid().is_some() && try_connect().is_some()
 }
 
+#[cfg(unix)]
 /// Start the persistent worker daemon in the background.
 pub async fn start(timeout: u32) -> Result<()> {
     // Check if already running
@@ -171,6 +229,7 @@ pub async fn start(timeout: u32) -> Result<()> {
     }
 }
 
+#[cfg(unix)]
 /// Stop the running worker daemon.
 pub async fn stop() -> Result<()> {
     // Try graceful shutdown via socket first
@@ -206,6 +265,7 @@ pub async fn stop() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 /// Show worker status.
 pub async fn status() -> Result<()> {
     let pid = read_worker_pid();
@@ -340,6 +400,7 @@ pub async fn status() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 /// Spawn the worker automatically if not running. Returns true if worker is
 /// available after this call. Used by the executor before attempting socket
 /// connection.
@@ -363,6 +424,7 @@ pub async fn auto_spawn_if_needed() -> bool {
     }
 }
 
+#[cfg(unix)]
 fn format_duration(secs: u64) -> String {
     if secs < 60 {
         format!("{}s", secs)
