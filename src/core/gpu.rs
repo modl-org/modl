@@ -1,5 +1,3 @@
-use anyhow::Result;
-
 /// Detected GPU information
 #[derive(Debug, Clone)]
 pub struct GpuInfo {
@@ -63,21 +61,6 @@ pub fn select_variant(vram_mb: u64, variants: &[(String, u64)]) -> Option<String
     // Sort descending by VRAM requirement (prefer highest quality that fits)
     candidates.sort_by(|a, b| b.1.cmp(&a.1));
     candidates.first().map(|(id, _)| id.clone())
-}
-
-/// Get VRAM or return None with a helpful message
-#[allow(dead_code)]
-pub fn get_vram() -> Result<Option<u64>> {
-    match detect() {
-        Some(info) => {
-            eprintln!("Detected GPU: {} ({} MB VRAM)", info.name, info.vram_mb);
-            Ok(Some(info.vram_mb))
-        }
-        None => {
-            eprintln!("No GPU detected. Variant auto-selection disabled.");
-            Ok(None)
-        }
-    }
 }
 
 #[cfg(test)]

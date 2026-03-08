@@ -1,21 +1,30 @@
+mod analysis;
 mod auth;
+mod compare;
 mod config;
 mod datasets;
+mod detect;
 mod doctor;
+mod enhance;
 mod export;
+mod face_restore;
+mod fmt;
 mod gc;
-mod generate;
+pub(crate) mod generate;
 mod import;
 mod info;
 mod init;
 mod install;
 mod link;
 mod list;
+mod llm;
 mod outputs;
 mod popular;
-mod preview;
 mod runtime;
+mod score;
 mod search;
+mod segment;
+mod serve;
 mod space;
 mod train;
 mod train_setup;
@@ -23,6 +32,7 @@ mod train_status;
 mod uninstall;
 mod update;
 mod upgrade;
+pub(crate) mod worker;
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
@@ -51,12 +61,25 @@ const TRAIN_HELP_EXTRA: &str = "\
     Character: --rank 8   --lr 1e-4   --steps 1500    --batch-size 1
 
   Z-Image-Turbo (z-image-turbo):
-    Style:     --rank 16  --lr 1e-4   --steps 3000-5000  --batch-size 1
+    Style:     --rank 16  --lr 1e-4   --steps 3000-3500  --batch-size 1
     Character: --rank 16  --lr 1e-4   --steps 1500       --batch-size 1
-    ⚡ Trains very fast (~1.3s/step). Uses training adapter automatically.
-    ⚠  Do not exceed --lr 1e-4 — higher LR breaks distillation.
-    For style: caption images literally (what's depicted, not the style).
-    Inference: 8 steps, CFG 1.0, euler. Remove training adapter for inference.
+    ⚡ Only 6B params — trains very fast (~2 it/s on 4090, ~1.3s on 5090).
+    ⚡ No quantization needed on 24GB+ cards (~17GB VRAM without quantize).
+    ⚠  Do NOT exceed --lr 1e-4 — higher LR breaks turbo distillation.
+    ⚠  Uses a DD (de-distillation) training adapter automatically.
+       The adapter prevents breaking the 8-step turbo during training.
+       Works for ~5k-10k steps; beyond ~20k distillation degrades.
+    Style presets auto-apply these settings (per Ostris / ai-toolkit):
+      • Differential guidance (scale=3): overshoots target to converge.
+      • Literal captions: describe content, not style. E.g. \"a bear\"
+        not \"a child's drawing of a bear\". Style is learned implicitly.
+      • Trigger word optional (modl still asks for one as a fallback).
+      • cache_text_embeddings=true: unloads text encoder after caching.
+    For extreme style (e.g. children's art), Ostris recommends resuming
+      from ~2000 steps with high-noise timestep bias to rebuild composition.
+      This is a two-phase approach: balanced first, then high-noise.
+    Character LoRAs use balanced timesteps, trigger word required.
+    Inference: 8 steps, guidance 1.0 (no CFG). Adapter removed automatically.
 
   Qwen-Image (qwen-image):
     Style:     --rank 16  --lr 2e-4   --steps 3000    --batch-size 1
@@ -98,6 +121,21 @@ const TRAIN_EXAMPLES: &str = "\
 
   # Dry-run: see the generated spec without running
   modl train --dataset headshots --base flux-dev --lora-type character --dry-run
+";
+
+const ENHANCE_EXAMPLES: &str = "\
+\x1b[1mExamples:\x1b[0m
+  # Enhance a prompt with moderate intensity (default)
+  modl enhance \"a cat on the moon\"
+
+  # Subtle enhancement — just quality tags
+  modl enhance \"portrait of a woman\" --intensity subtle
+
+  # Aggressive enhancement with model-specific tags
+  modl enhance \"sunset over mountains\" --intensity aggressive --model sdxl
+
+  # Output as JSON for scripting
+  modl enhance \"product photo\" --json
 ";
 
 const GENERATE_EXAMPLES: &str = "\
@@ -165,100 +203,46 @@ pub struct Cli {
 }
 
 #[derive(Subcommand)]
-pub enum ModelCommands {
-    /// Download a model, LoRA, VAE, or other asset (with dependency resolution)
-    #[command(after_help = MODEL_PULL_EXAMPLES)]
+pub enum WorkerSubcommands {
+    /// Start the persistent worker daemon (keeps models in VRAM)
+    Start {
+        /// Idle timeout in seconds (worker shuts down after this long without requests)
+        #[arg(long, default_value = "600")]
+        timeout: u32,
+    },
+
+    /// Stop the persistent worker daemon
+    Stop,
+
+    /// Show worker status (loaded models, VRAM, uptime)
+    Status,
+}
+
+#[derive(Subcommand)]
+pub enum LlmSubcommands {
+    /// Download an LLM model (GGUF) to the local store
     Pull {
-        /// Model ID from the registry (e.g., flux-dev, realistic-skin-v3)
-        id: String,
-        /// Force a specific variant (e.g., fp16, fp8, gguf-q4)
-        #[arg(long)]
-        variant: Option<String>,
-        /// Show what would be installed without doing it
-        #[arg(long)]
-        dry_run: bool,
-        /// Force re-download even if files already exist
-        #[arg(long)]
-        force: bool,
+        /// Model ID (e.g., qwen3.5-4b-instruct-q4, qwen3-vl-8b-instruct-q4)
+        model: String,
     },
 
-    /// Remove an installed model
-    Rm {
-        /// Model ID to remove
-        id: String,
-        /// Force removal even if other items depend on this
+    /// Run text completion or vision-language inference
+    Chat {
+        /// Text prompt
+        prompt: String,
+        /// Path to an image for vision-language inference
         #[arg(long)]
-        force: bool,
+        image: Option<String>,
+        /// Force cloud backend
+        #[arg(long)]
+        cloud: bool,
+        /// Use a specific model
+        #[arg(long)]
+        model: Option<String>,
     },
 
-    /// List installed models
-    Ls {
-        /// Filter by asset type (checkpoint, lora, vae, text_encoder, etc.)
-        #[arg(long, short = 't', value_enum)]
-        r#type: Option<AssetType>,
-    },
-
-    /// Show detailed info about a model
-    Info {
-        /// Model ID to inspect
-        id: String,
-    },
-
-    /// Search the registry
-    Search {
-        /// Search query
-        query: String,
-        /// Filter by asset type
-        #[arg(long, short = 't', value_enum)]
-        r#type: Option<AssetType>,
-        /// Filter by compatible base model
-        #[arg(long)]
-        r#for: Option<String>,
-        /// Filter by tag
-        #[arg(long)]
-        tag: Option<String>,
-        /// Minimum rating
-        #[arg(long)]
-        min_rating: Option<f32>,
-    },
-
-    /// Show popular/trending models
-    Popular {
-        /// Filter by asset type
-        #[arg(long, short = 't', value_enum)]
-        r#type: Option<AssetType>,
-        /// Filter by compatible base model
-        #[arg(long)]
-        r#for: Option<String>,
-    },
-
-    /// Link an existing tool's model folder into modl
-    Link {
-        /// Path to ComfyUI installation
-        #[arg(long)]
-        comfyui: Option<String>,
-        /// Path to A1111 installation
-        #[arg(long)]
-        a1111: Option<String>,
-    },
-
-    /// Fetch latest registry index
-    Update,
-
-    /// Show disk usage breakdown
-    Space,
-
-    /// Garbage collect — remove unreferenced files from the store
-    Gc,
-
-    /// Export installed state to a lock file
-    Export,
-
-    /// Import and install from a lock file
-    Import {
-        /// Path to modl.lock file
-        path: String,
-    },
+    /// List installed LLM models
+    Ls,
 }
 
 #[derive(Subcommand)]
@@ -278,6 +262,15 @@ pub enum TrainSubcommands {
         #[arg(long, short = 'w')]
         watch: bool,
     },
+
+    /// Delete a training run (output, logs, LoRA, and DB records)
+    Rm {
+        /// Training run name to delete
+        name: String,
+    },
+
+    /// List training runs
+    Ls,
 }
 
 #[derive(Subcommand)]
@@ -312,6 +305,9 @@ pub enum Commands {
         /// Filter by asset type (checkpoint, lora, vae, text_encoder, etc.)
         #[arg(long, short = 't', value_enum)]
         r#type: Option<AssetType>,
+        /// Show disk usage summary grouped by type
+        #[arg(long)]
+        summary: bool,
     },
 
     /// Show detailed info about a model
@@ -322,8 +318,8 @@ pub enum Commands {
 
     /// Search the registry
     Search {
-        /// Search query
-        query: String,
+        /// Search query (optional with --popular)
+        query: Option<String>,
         /// Filter by asset type
         #[arg(long, short = 't', value_enum)]
         r#type: Option<AssetType>,
@@ -336,6 +332,9 @@ pub enum Commands {
         /// Minimum rating
         #[arg(long)]
         min_rating: Option<f32>,
+        /// Show popular/trending models (ignores query)
+        #[arg(long)]
+        popular: bool,
     },
 
     /// Train a LoRA with managed runtime
@@ -418,6 +417,9 @@ pub enum Commands {
         /// LoRA name or path to apply
         #[arg(long)]
         lora: Option<String>,
+        /// LoRA strength/weight (0.0 = no effect, 1.0 = full strength)
+        #[arg(long, default_value = "1.0")]
+        lora_strength: f32,
         /// Random seed for reproducibility
         #[arg(long)]
         seed: Option<u64>,
@@ -439,6 +441,108 @@ pub enum Commands {
         /// Cloud provider to use (modal, replicate, runpod)
         #[arg(long, value_enum)]
         provider: Option<CloudProvider>,
+        /// Force one-shot mode (skip persistent worker, cold start every time)
+        #[arg(long)]
+        no_worker: bool,
+        /// Output result as JSON (suppresses progress output)
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Enhance a prompt using AI (adds quality tags, descriptors, structure)
+    #[command(after_help = ENHANCE_EXAMPLES)]
+    Enhance {
+        /// Text prompt to enhance
+        prompt: String,
+        /// Target model family hint (e.g., sdxl, flux, sd3) for model-specific tags
+        #[arg(long)]
+        model: Option<String>,
+        /// Enhancement intensity: subtle, moderate, aggressive
+        #[arg(long, default_value = "moderate")]
+        intensity: String,
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Score image aesthetic quality (1-10 scale)
+    Score {
+        /// Image file(s) or directory to score
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Detect faces in images
+    Detect {
+        /// Image file(s) or directory to analyze
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Detection type (currently: face)
+        #[arg(long, default_value = "face")]
+        r#type: String,
+        /// Include face embeddings for identity matching
+        #[arg(long)]
+        embeddings: bool,
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Compare images using CLIP similarity
+    Compare {
+        /// Image file(s) or directory to compare
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Reference image (compare all others against this)
+        #[arg(long)]
+        reference: Option<String>,
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Generate a segmentation mask for targeted inpainting
+    Segment {
+        /// Input image
+        image: String,
+        /// Output mask path (default: <image>_mask.png)
+        #[arg(long, short = 'o')]
+        output: Option<String>,
+        /// Segmentation method: bbox, background, sam
+        #[arg(long, default_value = "bbox")]
+        method: String,
+        /// Bounding box: x1,y1,x2,y2 (for bbox/sam methods)
+        #[arg(long)]
+        bbox: Option<String>,
+        /// Point prompt: x,y (for sam method)
+        #[arg(long)]
+        point: Option<String>,
+        /// Expand mask by N pixels (feathering)
+        #[arg(long, default_value = "10")]
+        expand: u32,
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Restore faces in images using CodeFormer
+    #[command(name = "face-restore")]
+    FaceRestore {
+        /// Image file(s) or directory
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Output directory (default: ~/.modl/outputs/<date>/)
+        #[arg(long, short = 'o')]
+        output: Option<String>,
+        /// Fidelity: 0.0 (max quality) to 1.0 (max faithfulness to input)
+        #[arg(long, default_value = "0.7")]
+        fidelity: f32,
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Manage datasets for training
@@ -491,9 +595,6 @@ pub enum Commands {
     /// Remove unreferenced files from the store
     Gc,
 
-    /// Show disk usage breakdown
-    Space,
-
     /// Update modl CLI to the latest release
     Upgrade,
 
@@ -501,17 +602,6 @@ pub enum Commands {
     /// Interactive first-run setup
     #[command(hide = true)]
     Init,
-
-    /// Show popular/trending models
-    #[command(hide = true)]
-    Popular {
-        /// Filter by asset type
-        #[arg(long, short = 't', value_enum)]
-        r#type: Option<AssetType>,
-        /// Filter by compatible base model
-        #[arg(long)]
-        r#for: Option<String>,
-    },
 
     /// Export installed state to a lock file
     #[command(hide = true)]
@@ -524,23 +614,14 @@ pub enum Commands {
         path: String,
     },
 
-    /// Manage models (use top-level commands instead)
-    #[command(hide = true)]
-    Model {
-        #[command(subcommand)]
-        command: ModelCommands,
-    },
-
     /// Browse and manage generated outputs
-    #[command(hide = true)]
     Outputs {
         #[command(subcommand)]
         command: outputs::OutputCommands,
     },
 
-    /// Launch web UI for preview
-    #[command(hide = true)]
-    Preview {
+    /// Launch the web UI
+    Serve {
         /// Port to bind the preview server on
         #[arg(long, default_value = "3333")]
         port: u16,
@@ -550,6 +631,18 @@ pub enum Commands {
         /// Run in foreground (blocks terminal; default is background/daemon)
         #[arg(long)]
         foreground: bool,
+    },
+
+    /// Manage the persistent GPU worker (keeps models in VRAM)
+    Worker {
+        #[command(subcommand)]
+        command: WorkerSubcommands,
+    },
+
+    /// Manage LLM models and run inference
+    Llm {
+        #[command(subcommand)]
+        command: LlmSubcommands,
     },
 
     /// Manage embedded Python runtime
@@ -573,7 +666,13 @@ pub async fn run(cli: Cli) -> Result<()> {
             force,
         } => install::run(&id, variant.as_deref(), dry_run, force).await,
         Commands::Rm { id, force } => uninstall::run(&id, force).await,
-        Commands::Ls { r#type } => list::run(r#type).await,
+        Commands::Ls { r#type, summary } => {
+            if summary {
+                space::run().await
+            } else {
+                list::run(r#type).await
+            }
+        }
         Commands::Info { id } => info::run(&id).await,
         Commands::Search {
             query,
@@ -581,7 +680,18 @@ pub async fn run(cli: Cli) -> Result<()> {
             r#for,
             tag,
             min_rating,
-        } => search::run(&query, r#type, r#for.as_deref(), tag.as_deref(), min_rating).await,
+            popular,
+        } => {
+            if popular {
+                popular::run(r#type, r#for.as_deref()).await
+            } else {
+                let q = query.as_deref().unwrap_or("");
+                if q.is_empty() {
+                    anyhow::bail!("Search query required (or use --popular)");
+                }
+                search::run(q, r#type, r#for.as_deref(), tag.as_deref(), min_rating).await
+            }
+        }
         Commands::Link {
             path,
             comfyui,
@@ -591,13 +701,10 @@ pub async fn run(cli: Cli) -> Result<()> {
             link::run(comfy.as_deref(), a1111.as_deref()).await
         }
         Commands::Update => update::run().await,
-        Commands::Popular { r#type, r#for } => popular::run(r#type, r#for.as_deref()).await,
-        Commands::Space => space::run().await,
         Commands::Gc => gc::run().await,
         Commands::Export => export::run().await,
         Commands::Import { path } => import::run(&path).await,
         Commands::Init => init::run().await,
-        Commands::Model { command } => run_model(command).await,
         Commands::Train {
             command,
             dataset,
@@ -624,6 +731,24 @@ pub async fn run(cli: Cli) -> Result<()> {
             Some(TrainSubcommands::Setup { reinstall }) => train_setup::run(reinstall).await,
             Some(TrainSubcommands::Status { name, watch }) => {
                 train_status::run(name.as_deref(), watch)?;
+                Ok(())
+            }
+            Some(TrainSubcommands::Rm { name }) => {
+                use console::style;
+                crate::core::training::delete_training_run(&name)?;
+                println!("{} Deleted training run '{}'", style("✓").green(), name);
+                Ok(())
+            }
+            Some(TrainSubcommands::Ls) => {
+                let runs = crate::core::training::list_training_runs()?;
+                if runs.is_empty() {
+                    println!("No training runs found.");
+                } else {
+                    for name in &runs {
+                        println!("  {name}");
+                    }
+                    println!("\n{} training run(s)", runs.len());
+                }
                 Ok(())
             }
             None if base.is_none() || lora_type.is_none() => {
@@ -664,6 +789,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             prompt,
             base,
             lora,
+            lora_strength,
             seed,
             size,
             steps,
@@ -671,11 +797,14 @@ pub async fn run(cli: Cli) -> Result<()> {
             count,
             cloud,
             provider,
+            no_worker,
+            json,
         } => {
             generate::run(
                 &prompt,
                 base.as_deref(),
                 lora.as_deref(),
+                lora_strength,
                 seed,
                 &size,
                 steps,
@@ -683,9 +812,55 @@ pub async fn run(cli: Cli) -> Result<()> {
                 count,
                 cloud,
                 provider,
+                no_worker,
+                json,
             )
             .await
         }
+        Commands::Enhance {
+            prompt,
+            model,
+            intensity,
+            json,
+        } => enhance::run(&prompt, model.as_deref(), &intensity, json).await,
+        Commands::Score { paths, json } => score::run(&paths, json).await,
+        Commands::Detect {
+            paths,
+            r#type,
+            embeddings,
+            json,
+        } => detect::run(&paths, &r#type, embeddings, json).await,
+        Commands::Compare {
+            paths,
+            reference,
+            json,
+        } => compare::run(&paths, reference.as_deref(), json).await,
+        Commands::Segment {
+            image,
+            output,
+            method,
+            bbox,
+            point,
+            expand,
+            json,
+        } => {
+            segment::run(
+                &image,
+                output.as_deref(),
+                &method,
+                bbox.as_deref(),
+                point.as_deref(),
+                expand,
+                json,
+            )
+            .await
+        }
+        Commands::FaceRestore {
+            paths,
+            output,
+            fidelity,
+            json,
+        } => face_restore::run(&paths, output.as_deref(), fidelity, json).await,
         Commands::Dataset { command } => datasets::run(command).await,
         Commands::Runtime { command } => runtime::run(command).await,
         Commands::Doctor {
@@ -695,46 +870,31 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Config { key, value } => config::run(key.as_deref(), value.as_deref()).await,
         Commands::Auth { provider } => auth::run(provider).await,
         Commands::Outputs { command } => outputs::run(command).await,
-        Commands::Preview {
+        Commands::Worker { command } => match command {
+            WorkerSubcommands::Start { timeout } => worker::start(timeout).await,
+            WorkerSubcommands::Stop => worker::stop().await,
+            WorkerSubcommands::Status => worker::status().await,
+        },
+        Commands::Llm { command } => match command {
+            LlmSubcommands::Pull { model } => llm::pull(&model).await,
+            LlmSubcommands::Chat {
+                prompt,
+                image,
+                cloud,
+                model,
+            } => llm::chat(&prompt, image.as_deref(), cloud, model.as_deref()).await,
+            LlmSubcommands::Ls => llm::list().await,
+        },
+        Commands::Serve {
             port,
             no_open,
             foreground,
-        } => preview::run(port, no_open, foreground).await,
+        } => serve::run(port, no_open, foreground).await,
         Commands::Upgrade => upgrade::run().await,
         Commands::CliSchema => {
             dump_cli_schema();
             Ok(())
         }
-    }
-}
-
-async fn run_model(command: ModelCommands) -> Result<()> {
-    match command {
-        ModelCommands::Pull {
-            id,
-            variant,
-            dry_run,
-            force,
-        } => install::run(&id, variant.as_deref(), dry_run, force).await,
-        ModelCommands::Rm { id, force } => uninstall::run(&id, force).await,
-        ModelCommands::Ls { r#type } => list::run(r#type).await,
-        ModelCommands::Info { id } => info::run(&id).await,
-        ModelCommands::Search {
-            query,
-            r#type,
-            r#for,
-            tag,
-            min_rating,
-        } => search::run(&query, r#type, r#for.as_deref(), tag.as_deref(), min_rating).await,
-        ModelCommands::Popular { r#type, r#for } => popular::run(r#type, r#for.as_deref()).await,
-        ModelCommands::Link { comfyui, a1111 } => {
-            link::run(comfyui.as_deref(), a1111.as_deref()).await
-        }
-        ModelCommands::Update => update::run().await,
-        ModelCommands::Space => space::run().await,
-        ModelCommands::Gc => gc::run().await,
-        ModelCommands::Export => export::run().await,
-        ModelCommands::Import { path } => import::run(&path).await,
     }
 }
 

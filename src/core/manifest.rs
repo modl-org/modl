@@ -118,6 +118,7 @@ pub enum AssetType {
     Segmentation,
     #[value(name = "vision_language")]
     VisionLanguage,
+    Analysis,
     Recipe,
 }
 
@@ -135,6 +136,7 @@ impl std::fmt::Display for AssetType {
             Self::Ipadapter => write!(f, "ipadapter"),
             Self::Segmentation => write!(f, "segmentation"),
             Self::VisionLanguage => write!(f, "vision_language"),
+            Self::Analysis => write!(f, "analysis"),
             Self::Recipe => write!(f, "recipe"),
         }
     }
@@ -156,6 +158,7 @@ impl std::str::FromStr for AssetType {
             "ipadapter" => Ok(Self::Ipadapter),
             "segmentation" => Ok(Self::Segmentation),
             "vision_language" => Ok(Self::VisionLanguage),
+            "analysis" => Ok(Self::Analysis),
             "recipe" => Ok(Self::Recipe),
             _ => anyhow::bail!("Unknown asset type: {}", s),
         }

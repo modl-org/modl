@@ -14,7 +14,6 @@ pub struct InstallPlan {
 #[derive(Debug)]
 pub struct ResolvedItem {
     pub manifest: Manifest,
-    #[allow(dead_code)]
     pub variant_id: Option<String>,
     /// Whether this item is already installed (skip download)
     pub already_installed: bool,

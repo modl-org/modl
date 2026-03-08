@@ -135,9 +135,9 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
         if src_path.is_dir() {
             copy_dir_all(&src_path, &dst_path)?;
         } else if src_path.is_symlink() {
-            let target = std::fs::read_link(&src_path)?;
+            let _target = std::fs::read_link(&src_path)?;
             #[cfg(unix)]
-            std::os::unix::fs::symlink(&target, &dst_path)?;
+            std::os::unix::fs::symlink(&_target, &dst_path)?;
         } else {
             std::fs::copy(&src_path, &dst_path)?;
         }
@@ -177,11 +177,11 @@ fn rewrite_symlinks_in_dir(dir: &Path, old_prefix: &str, new_prefix: &str) {
             let target_str = target.to_string_lossy().to_string();
             if target_str.contains(old_prefix) {
                 let new_target_str = target_str.replace(old_prefix, new_prefix);
-                let new_target = PathBuf::from(&new_target_str);
+                let _new_target = PathBuf::from(&new_target_str);
                 let _ = std::fs::remove_file(&path);
                 #[cfg(unix)]
                 {
-                    let _ = std::os::unix::fs::symlink(&new_target, &path);
+                    let _ = std::os::unix::fs::symlink(&_new_target, &path);
                 }
             }
         }

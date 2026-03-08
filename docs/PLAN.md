@@ -1,215 +1,233 @@
 # modl — Plan & Status
 
-> Last updated: 2026-03-03
+> Last updated: 2026-03-06
 > Single source of truth. Everything else in `docs/` is reference material.
 
 ## What modl is
 
-The sane, opinionated way to run diffusion locally.
+The antidote to ComfyUI config hell and 2-hour YouTube tutorials.
 
-1. **Opinionated model installer** — `modl pull flux-dev`, deps handled, no thinking
-2. **Opinionated LoRA trainer** — presets (quick/standard/advanced), sensible defaults
-3. **Opinionated generator** — simple flags, seeds, batch, size presets, LoRA stacking
+Two paths to the same product:
 
-CLI-first. Rust binary + managed Python runtime. Local-first.
+1. **Local (free)** — Linux + GPU. `modl pull flux-dev && modl train`. Everything runs on your hardware. CLI + web UI (`modl serve`). Power users, hobbyists, tinkerers.
+
+2. **Cloud (paid)** — Mac / Windows / any machine. Tauri desktop app, cloud subscription. Same UI, same workflows, zero GPU needed. Creative professionals who want results, not infrastructure.
+
+Both paths use the same Rust binary, same React UI, same agent. The only difference is which `Executor` and `LlmBackend` implementation runs behind the trait.
 
 ---
 
-## Current Status
+## Current State
 
-**~15K Rust LOC, ~2K Python LOC. 55 unit tests passing. On `main` branch.**
+**~17K Rust LOC, ~2K Python LOC. Active branch: `feat/serve-ui`.**
 
-| Area | Status | Notes |
-|------|--------|-------|
-| Model pull/ls/rm/search/info | ✅ Solid | Registry (68 models), HF direct pulls (`hf:` prefix), content-addressed store |
-| Model link (ComfyUI/A1111) | ✅ Solid | Auto-detect layouts, cross-device fallback |
-| HuggingFace integration | ✅ Done | `modl pull hf:owner/repo`, HF fallback in search |
-| Config / Auth / GPU detect | ✅ Done | YAML config, HF/CivitAI tokens, NVML + nvidia-smi |
-| Dataset create/validate/caption | ✅ Done | Florence-2/BLIP auto-captioning, tag, resize |
-| Training (presets + executor) | ✅ Working | SDXL LoRA trained successfully, previews generated |
-| Generation (CLI) | ✅ Built | Flux/SDXL/SD1.5 via diffusers, LoRA loading |
-| Output management | ✅ Done | `modl outputs` list/show/open/search |
-| Runtime bootstrap | ✅ Done | Python venv + ai-toolkit install |
-| Doctor/GC/Export/Import | ✅ Done | Orphan detection, repair, lockfile round-trip |
-| `modl upgrade` | ✅ Done | Self-update from GitHub releases |
+| Area | Status |
+|------|--------|
+| Model pull/ls/rm/search/info | Done — registry (68 models), HF direct pulls, content-addressed store |
+| Model link (ComfyUI/A1111) | Done — auto-detect layouts, cross-device fallback |
+| Config / Auth / GPU detect | Done — YAML config, HF/CivitAI tokens, NVML + nvidia-smi |
+| Dataset create/validate/caption | Done — Florence-2/BLIP auto-captioning, tag, resize |
+| Training (presets + executor) | Done — SDXL LoRA tested & working, z-image-turbo setup ready to test, Flux config ready |
+| Generation (CLI + UI) | Done — Flux/SDXL/SD1.5, LoRA stacking, `--json` output |
+| Output management | Done — list/show/open/search, gallery with metadata lightbox |
+| Runtime bootstrap | Done — Python venv + ai-toolkit install |
+| Doctor/GC/Export/Import | Done — orphan detection, repair, lockfile round-trip |
+| `modl upgrade` | Done — self-update from GitHub releases |
+| Web UI (`modl serve`) | Done — React/Vite, Generate + Outputs + Datasets + Training tabs |
+| Prompt enhance | Done — `PromptEnhancer` trait, builtin rules + LLM backends |
+| LLM runtime (`LlmBackend` trait) | Done — Cloud + Builtin backends working. Local backend stubbed (needs llama-cpp-2 wiring) |
+| Agent framework | Done — tool-use loop, 7 tools, session management |
+| Studio backend (Axum) | Done — session CRUD, image upload, SSE streaming |
+| Studio UI (React) | Done — upload zone, intent input, agent timeline, result gallery |
+| llama-cpp-2 actual inference | Not started |
+| GPU resource lock | Not started |
+| Persistent Python worker | Not started |
+| Cloud execution (Modal) | Not started |
+| Auth + sync (R2) | Not started |
+| Tauri desktop app | Not started |
+| Billing (Stripe) | Not started |
 
 ---
 
 ## Architecture
 
 ```
-modl CLI (Rust, single binary)
-    │
-    ├── presets::resolve_params()   ── pure logic, no I/O
-    ├── dataset::validate()         ── filesystem scan
-    ├── gpu::detect()               ── NVML + nvidia-smi
-    │
-    ▼
-TrainJobSpec / GenerateJobSpec      ◄── serialization boundary
-    │
-    ▼
-LocalExecutor                       ◄── spawn Python, parse JSONL events
-    │
-    ▼
-Python runtime (modl_worker/)
-    ├── train_adapter.py            ── spec → ai-toolkit YAML
-    ├── gen_adapter.py              ── diffusers pipeline loading
-    ├── caption_adapter.py          ── Florence-2/BLIP
-    └── protocol.py                 ── JSON-line events over stdout
+┌─────────────────────────────────────────────────────────────┐
+│                      React UI (Vite, TSX)                    │
+│  Generate │ Outputs │ Datasets │ Training │ Studio           │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+              Axum HTTP + SSE (same binary)
+                           │
+┌──────────────────────────┴──────────────────────────────────┐
+│                      modl (Rust binary)                      │
+│                                                              │
+│  ┌─────────────┐  ┌──────────────┐  ┌───────────────────┐   │
+│  │ LlmBackend  │  │   Executor   │  │  PromptEnhancer   │   │
+│  │   (trait)    │  │   (trait)    │  │     (trait)        │   │
+│  ├─────────────┤  ├──────────────┤  ├───────────────────┤   │
+│  │ Local (llama│  │ Local (spawn │  │ LLM-based         │   │
+│  │   -cpp-2)   │  │   Python)    │  │ Builtin rules     │   │
+│  │ Cloud (HTTP)│  │ Cloud (Modal │  │ Cloud API         │   │
+│  │ Builtin     │  │   via API)   │  │                   │   │
+│  └─────────────┘  └──────────────┘  └───────────────────┘   │
+│                                                              │
+│  ┌─────────────────────────────────────────────────────┐     │
+│  │              Agent (tool-use loop)                   │     │
+│  │  analyze → dataset → caption → train → generate     │     │
+│  │  Uses LlmBackend + Executor traits, backend-agnostic│     │
+│  └─────────────────────────────────────────────────────┘     │
+│                                                              │
+│  Core: presets, preflight, db, registry, store, gpu, outputs │
+│                                                              │
+│  Python runtime (ai-toolkit): train, generate, caption       │
+└──────────────────────────────────────────────────────────────┘
 ```
+
+**Trait pattern**: `LlmBackend`, `Executor`, and `PromptEnhancer` are all Rust traits with pluggable implementations. Local user gets local impls. Cloud user gets HTTP impls. The agent and UI don't know the difference.
 
 ---
 
 ## Phases
 
-### Phase 1 — Bulletproof install + setup ✅
+### Phase 1 — Core CLI (done)
 
-*Done.* One `curl | sh` install. `modl doctor` catches broken symlinks, missing
-deps, corrupt files. `modl pull` resolves dependencies. GPU auto-detection picks
-the right variant.
+Install, setup, model management, dataset prep, training, generation, output management. Web UI with Generate + Outputs + Datasets + Training tabs. Prompt enhance with builtin rules.
 
-Remaining polish:
-- [ ] CUDA compatibility edge cases (test on more machines)
-- [ ] `modl init` wizard for first-time setup
+### Phase 2 — Studio + LLM agent (done)
 
-### Phase 2 — Validate full train→generate flow 🔄
+`LlmBackend` trait with Local/Cloud/Builtin backends. Agent framework with 7 tools. Studio UI with upload → intent → timeline → results flow. SSE streaming for real-time progress.
 
-The pipeline exists end-to-end. SDXL LoRA training works with preview generation.
+Remaining:
+- [ ] Wire `llama-cpp-2` crate into `LocalLlmBackend` (text + VL inference)
+- [ ] Test VL inference with Qwen3-VL GGUF
+- [ ] Connect Studio agent to actual executor for real training/generation
 
-- [x] SDXL LoRA training (confirmed working)
-- [x] Training previews / samples
-- [x] Dataset annotation
-- [x] Style-mode captioning (`--style` strips medium/technique references)
-- [ ] Upgrade captioner to Qwen2.5-VL-7B-Instruct (instruction-following VLM,
-      no regex post-processing needed — tell it "describe content, not style"
-      and it obeys. Fits 4090 in float16. Add as `--model qwen` option,
-      keep Florence-2 as fast default for non-style captioning)
-- [ ] Flux training E2E validation
-- [ ] Generation E2E validation (`modl generate` → image on disk)
-- [ ] Fix integration issues that surface on GPU
+### Phase 3 — GPU resource management + persistent worker
 
-### Phase 3 — Multi-arch training support
+Cross-process GPU lock so training, generation, captioning, and LLM don't collide. See [specs/gpu-resource-management.md](specs/gpu-resource-management.md).
 
-Curated ai-toolkit configs for models people actually train on.
-See [multi-arch-training-plan.md](multi-arch-training-plan.md) for full gap analysis.
+- [ ] `GpuLock` file-based lock + `GpuGuard` RAII + `modl gpu` command
+- [ ] Gate GPU commands behind lock
+- [ ] Persistent Python worker (daemon on Unix socket, LRU model cache)
+- [ ] Replace server `AtomicBool` with `GpuLock`
+- [ ] `/api/gpu` endpoint with lock activity + VRAM info
 
-Priority order (by real-world demand):
+### Phase 4 — Cloud platform (auth + execution + sync)
 
-| # | Model | Status | Effort |
-|---|-------|--------|--------|
-| 1 | flux-dev / flux-schnell | ✅ Config ready | — |
-| 2 | sdxl / sd1.5 | ✅ Working | — |
-| 3 | z-image-turbo | 🟡 Config ready | E2E test |
-| 4 | chroma | 🟡 Config ready | E2E test |
-| 5 | Flux Kontext | ❌ Needs paired dataset support | ~1h |
-| 6 | FLUX.2 | ❌ Needs arch entry | ~30min |
-| 7 | Qwen-Image | ❌ Needs qtype + quant for 24GB | ~1h |
+Everything needed for `--cloud` flag to work end-to-end.
 
-### Phase 4 — Polish & batch
+**Auth + storage:**
+- [ ] `modl auth login` — device flow, JWT in `~/.modl/config.yaml`
+- [ ] modl API service (Rust/Axum): auth, R2 presigned URL broker
+- [ ] `modl sync` — reconcile local DB with cloud artifact registry
+- [ ] R2 storage: datasets (content-addressed upload), LoRAs (bidirectional), outputs (pull after generate)
 
-- [ ] Batch generation (`modl generate --batch prompts.txt`)
-- [ ] Reproducible export (`modl outputs export <id>` → full YAML spec)
-- [ ] Registry curation: core tier (flux-dev, flux-schnell, sdxl) vs experimental
-- [ ] VRAM-aware config tuning (auto quantize/offload based on GPU)
+**Cloud execution:**
+- [ ] `CloudExecutor` — submit train/generate jobs to Modal via modl API
+- [ ] Modal GPU functions (train + generate)
+- [ ] SSE job stream proxied through modl API
+- [ ] Auto-sync: datasets before cloud job, LoRAs + outputs after completion
 
-### Phase 5 — Persistent worker (performance)
+**Cloud LLM** (already works — `CloudLlmBackend` calls modl API):
+- [ ] Deploy LLM inference endpoint (OpenAI-compatible `/v1/chat/completions` + `/v1/vision`)
 
-Eliminate 20-45s cold start on repeated `modl generate` calls.
-Python daemon with LRU model cache, LoRA hot-swap.
-See [specs/persistent-worker.md](specs/persistent-worker.md) for full spec.
+### Phase 5 — Tauri desktop app
 
-- [ ] Python serve mode (`modl_worker serve` on Unix socket)
-- [ ] Rust worker management (auto-spawn, health check, idle timeout)
-- [ ] Model cache with LRU eviction
+Wrap the React UI in a Tauri v2 native app for Mac/Windows distribution. Same Rust core, native webview.
 
-### Phase 6 — Web UI (`modl serve`)
-
-Prompt-first generate page. Training dashboard. Gallery.
-Build only after the CLI flow is rock-solid.
-See [archive/ui-architecture.md](archive/ui-architecture.md) for product spec.
-
-This is the foundation of the paid product — same UI powers `modl serve`
-(browser, GPU users) and the Tauri native app (Phase 8, Mac/laptop users).
-Build with Svelte, compile to a single JS bundle, `include_str!()` into binary.
-
-- [ ] REST + WebSocket API
-- [ ] Svelte UI compiled into binary (migrate from vanilla JS)
-- [ ] Generate page (prompt → image, LoRA selector)
-- [ ] Training dashboard (launch + monitor from UI)
-- [ ] Output gallery
-
-### Phase 7 — Cloud training (`--cloud`)
-
-`modl train --cloud` submits to a managed API. **This is the monetization
-unlock** — Mac/laptop users with no GPU must use cloud, creating recurring
-revenue. Cloud inference deferred (cold start economics are unfavorable).
-See [archive/cloud-plan.md](archive/cloud-plan.md) for architecture and pricing model.
-
-- [ ] modl API service (auth, billing, job dispatch)
-- [ ] Modal GPU backend
-- [ ] CloudExecutor.submit() implementation
-
-### Phase 8 — Native app (Tauri)
-
-Wrap the Phase 6 Svelte UI in a Tauri native app for Mac/Windows distribution.
-Same UI, same Rust core, native webview instead of `localhost` in a browser.
-Targets the **paying user segment**: creative professionals on laptops with no
-GPU who use cloud training (Phase 7).
-
-- [ ] Tauri shell around existing Axum + Svelte stack
-- [ ] Native file pickers, drag-and-drop images, dock/taskbar icon
-- [ ] Code signing + DMG/MSI distribution
+- [ ] Tauri shell around existing Axum + React stack
+- [ ] Native file pickers, drag-and-drop, dock/taskbar icon
+- [ ] Code signing + DMG / MSI distribution
 - [ ] Auto-update via Tauri updater
+- [ ] Cloud-first defaults (no local GPU assumed)
+- [ ] Onboarding flow: sign up → subscribe → start creating
 
-### Backlog — Not planned
+### Phase 6 — Billing + launch
 
-| Feature | Why not now |
-|---------|------------|
-| Video model training (Wan, LTX) | Different pipeline, defer until image is solid |
-| CivitAI direct pulls | Need API key setup, lower priority than HF |
-| Cloud inference | Cold start + keep_warm economics are brutal |
-| DAM / tagging / collections | Filesystem + `modl outputs search` is enough |
-| Node/graph editor | ComfyUI owns this, don't compete |
-| Multi-provider cloud (RunPod, etc.) | Get one provider working first |
+- [ ] Stripe integration — subscription management
+- [ ] Usage tracking per job
+- [ ] Landing page + download links
+- [ ] Pricing enforced server-side (API gate checks subscription tier)
 
 ---
 
 ## Business model
 
-**CLI is free, open source. Cloud + native app is the paid product.**
+**CLI is free, open source. Cloud execution is the paid product.**
 
-Two user segments, different value:
+### Pricing (subscription, not per-job)
 
-| Segment | What they use | Revenue | Role |
-|---------|--------------|---------|------|
-| GPU box users (Linux, SSH) | CLI + `modl serve` in browser | Free / low (cloud for heavy models) | Community, testers, contributors |
-| Mac/laptop users (no GPU) | Tauri native app + cloud training | Paid (recurring cloud usage) | Paying customers |
+| Tier | Price | What's included |
+|------|-------|-----------------|
+| **Free** | $0 | CLI + local execution. Full feature set on your own GPU. |
+| **Pro** | $20/mo | 10 training runs/mo, 500 generations/mo, 10GB cloud storage |
+| **Max** | $100/mo | Unlimited training, unlimited generation, 100GB cloud storage, priority GPU |
 
-The CLI builds credibility and community. Open-source model manager that
-"just works" attracts contributors and earns trust. The native app + cloud
-backend is where revenue comes from — creative professionals who want
-polish and don't have (or want to manage) GPU hardware.
+Users never see GPU seconds or compute meters. They see "Train LoRA" and it works. Price by outcome, not by infrastructure.
 
-Pricing model TBD — likely per-minute GPU billing with a markup over
-raw Modal/RunPod costs, or a subscription with included training minutes.
+### Unit economics (from cloud-plan.md analysis)
+
+| Operation | Cloud cost (Modal) | Margin at Pro price |
+|-----------|--------------------|---------------------|
+| Train character LoRA (1000 steps, A100) | ~$2.50 | ~60% at 10 runs/mo |
+| Train style LoRA (500 steps, A100) | ~$1.25 | ~75% |
+| Generate 10 images (Flux, A100) | ~$0.15 | High margin |
+| Cloud storage (R2, 10GB) | ~$0.15/mo | Negligible |
+
+### User segments
+
+| Segment | Setup | Revenue |
+|---------|-------|---------|
+| GPU box users (Linux) | CLI + `modl serve`, free | Free tier, occasional cloud for heavy models |
+| Any-machine users | CLI + `--cloud` flag | Pro/Max subscribers |
+| Tauri app users (Mac/Windows) | Native app, no GPU | Highest LTV — all compute is cloud |
+
+### Where this is going
+
+Closer to what **Vercel did for deployment**: took something that required deep expertise and made it a single command. The open-source CLI is the credibility layer. The cloud product monetizes the much larger group who want the output without the process.
+
+Natural expansion: shared LoRA libraries within a team/studio. Don't build that now.
 
 ---
 
+## Key files
+
+| File | Role |
+|------|------|
+| `src/core/llm.rs` | `LlmBackend` trait, Cloud/Local/Builtin backends, resolution logic |
+| `src/core/agent.rs` | Agent loop, session state, tool definitions, system prompt |
+| `src/core/agent_tools.rs` | Tool implementations wrapping existing modl services |
+| `src/core/enhance.rs` | `PromptEnhancer` trait, builtin enhancer |
+| `src/core/presets.rs` | Training presets per model family |
+| `src/core/preflight.rs` | Pre-train checks (runtime, base model, deps, auth) |
+| `src/core/job.rs` | Job spec types, LoRA types |
+| `src/core/db.rs` | SQLite database (state.db) |
+| `src/ui/server.rs` | Axum server — all API endpoints, SSE streaming |
+| `src/ui/web/` | React frontend (Vite, TSX) |
+| `src/cli/` | CLI commands (one file per subcommand) |
+| `python/modl_worker/` | Python runtime (ai-toolkit adapters) |
+
 ## Reference docs
 
-| Doc | What it covers | Status |
-|-----|---------------|--------|
-| [multi-arch-training-plan.md](multi-arch-training-plan.md) | ai-toolkit arch configs, per-model gaps | Active — Phase 3 guide |
-| [specs/aitoolkit-mapping.md](specs/aitoolkit-mapping.md) | TrainJobSpec → ai-toolkit YAML field mapping | Implemented, canonical |
-| [specs/jobs-schema-v1.md](specs/jobs-schema-v1.md) | Job/event/artifact JSON schemas | Implemented, canonical |
-| [specs/worker-protocol.md](specs/worker-protocol.md) | JSONL protocol between Rust and Python | Implemented, canonical |
-| [specs/execution-target.md](specs/execution-target.md) | Executor trait contract | Implemented (local), stubbed (cloud) |
-| [specs/persistent-worker.md](specs/persistent-worker.md) | Daemon architecture for fast generation | Phase 5 spec |
-| [archive/ui-architecture.md](archive/ui-architecture.md) | Web UI product spec | Phase 6 reference |
-| [archive/cloud-plan.md](archive/cloud-plan.md) | Cloud platform architecture + pricing | Phase 7 reference |
-| [archive/runtime-architecture.md](archive/runtime-architecture.md) | ComfyUI sidecar / YAML workflow vision | Aspirational, not planned |
-| [archive/capability-model.md](archive/capability-model.md) | Cloud auth/quota gating | Phase 7 detail |
-| [archive/runtime-profiles.md](archive/runtime-profiles.md) | Reproducible runtime manifests | Over-engineered, current venv works |
+| Doc | Status |
+|-----|--------|
+| [specs/llm-runtime.md](specs/llm-runtime.md) | Current — Rust-native LlmBackend trait architecture |
+| [specs/gpu-resource-management.md](specs/gpu-resource-management.md) | Spec — Phase 3, not yet implemented |
+| [specs/persistent-worker.md](specs/persistent-worker.md) | Spec — Phase 3, not yet implemented |
+| [specs/jobs-schema-v1.md](specs/jobs-schema-v1.md) | Implemented, canonical |
+| [specs/worker-protocol.md](specs/worker-protocol.md) | Implemented, canonical |
+| [specs/execution-target.md](specs/execution-target.md) | Implemented (local), stubbed (cloud) |
+
+Private docs (modl-org/docs/plans/):
+| Doc | Status |
+|-----|--------|
+| cloud-plan.md | Valuable — business model, pricing, Modal architecture, unit economics |
+| multi-arch-training-plan.md | Active — per-model training gap analysis |
+| ui-architecture.md | Partially stale — product vision still relevant, tech stack section wrong (says vanilla JS, actually React/Vite/TSX from the start) |
+| capability-model.md | Future — cloud auth/quota gating, not yet implemented |
+| runtime-architecture.md | Historical — aspirational ComfyUI sidecar vision, path not taken |
+| runtime-profiles.md | Over-engineered — simpler approach implemented |
 
 ---
 
@@ -217,6 +235,6 @@ raw Modal/RunPod costs, or a subscription with included training minutes.
 
 - Not a node editor (use ComfyUI)
 - Not a marketplace (use CivitAI)
-- Not infinitely configurable (three presets, Advanced gives full YAML)
-- Not a DAM (filesystem + metadata JSON is enough)
+- Not infinitely configurable (three presets, Advanced gives full control)
 - Not an Electron app (Tauri = native webview, Rust backend, no Chromium bloat)
+- Not a general chatbot — the LLM is a tool for the diffusion workflow, not a chat interface

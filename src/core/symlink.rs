@@ -73,22 +73,6 @@ pub fn create(link: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Remove a symlink (only if it is a symlink, not a real file)
-#[allow(dead_code)]
-pub fn remove(link: &Path) -> Result<()> {
-    if link.is_symlink() {
-        std::fs::remove_file(link)
-            .with_context(|| format!("Failed to remove symlink: {}", link.display()))?;
-    }
-    Ok(())
-}
-
-/// Check if a symlink is valid (target exists)
-#[allow(dead_code)]
-pub fn is_valid(link: &Path) -> bool {
-    link.is_symlink() && link.exists()
-}
-
 /// Find all broken links in a directory.
 /// Note: On Windows with hard links, broken links are less common since
 /// hard links retain data even if the original store file is deleted.
@@ -119,7 +103,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_create_and_remove_symlink() {
+    fn test_create_symlink() {
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("target.txt");
         std::fs::write(&target, "hello").unwrap();
@@ -128,10 +112,7 @@ mod tests {
         create(&link, &target).unwrap();
 
         assert!(link.is_symlink());
-        assert!(is_valid(&link));
-
-        remove(&link).unwrap();
-        assert!(!link.exists());
+        assert!(link.exists());
     }
 
     #[test]

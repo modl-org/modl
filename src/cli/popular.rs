@@ -6,6 +6,8 @@ use indicatif::HumanBytes;
 use crate::core::manifest::AssetType;
 use crate::core::registry::RegistryIndex;
 
+use super::fmt::format_downloads;
+
 pub async fn run(type_filter: Option<AssetType>, for_model: Option<&str>) -> Result<()> {
     let index = RegistryIndex::load_or_fetch().await?;
 
@@ -77,14 +79,4 @@ pub async fn run(type_filter: Option<AssetType>, for_model: Option<&str>) -> Res
     println!("{table}");
 
     Ok(())
-}
-
-fn format_downloads(n: u64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.1}K", n as f64 / 1_000.0)
-    } else {
-        n.to_string()
-    }
 }

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use std::env;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -31,8 +31,6 @@ pub trait Executor {
     fn submit(&mut self, spec: &TrainJobSpec) -> Result<JobHandle>;
     fn submit_generate(&mut self, spec: &GenerateJobSpec) -> Result<JobHandle>;
     fn events(&mut self, job_id: &str) -> Result<mpsc::Receiver<JobEvent>>;
-    #[allow(dead_code)]
-    fn cancel(&self, job_id: &str) -> Result<()>;
 }
 
 // ---------------------------------------------------------------------------
@@ -42,6 +40,8 @@ pub trait Executor {
 pub struct LocalExecutor {
     python_path: PathBuf,
     runtime_root: PathBuf,
+    /// Whether to try the persistent worker socket before spawning a one-shot process.
+    pub use_worker: bool,
     /// Map from job_id to (child, receiver)
     jobs: std::collections::HashMap<String, JobState>,
 }
@@ -58,6 +58,7 @@ impl LocalExecutor {
         Self {
             python_path,
             runtime_root,
+            use_worker: true,
             jobs: std::collections::HashMap::new(),
         }
     }
@@ -180,6 +181,110 @@ impl Executor for LocalExecutor {
     fn submit_generate(&mut self, spec: &GenerateJobSpec) -> Result<JobHandle> {
         let job_id = format!("gen-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
 
+        // -------------------------------------------------------------------
+        // Try persistent worker socket first (warm model, fast path)
+        // -------------------------------------------------------------------
+        if self.use_worker
+            && let Some(handle) = self.try_submit_via_socket(&job_id, spec)?
+        {
+            return Ok(handle);
+        }
+        // Socket not available — fall through to one-shot
+
+        // -------------------------------------------------------------------
+        // One-shot fallback: spawn a fresh Python process
+        // -------------------------------------------------------------------
+        self.submit_generate_oneshot(&job_id, spec)
+    }
+
+    fn events(&mut self, job_id: &str) -> Result<mpsc::Receiver<JobEvent>> {
+        let state = self
+            .jobs
+            .get_mut(job_id)
+            .with_context(|| format!("No job found with id: {job_id}"))?;
+
+        state
+            .receiver
+            .take()
+            .with_context(|| format!("Event receiver already consumed for job: {job_id}"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Worker socket + one-shot helpers
+// ---------------------------------------------------------------------------
+
+impl LocalExecutor {
+    /// Try to submit a generation job via the persistent worker Unix socket.
+    ///
+    /// Returns `Ok(Some(handle))` if the worker accepted the job, `Ok(None)`
+    /// if the socket is not available (fall back to one-shot).
+    fn try_submit_via_socket(
+        &mut self,
+        job_id: &str,
+        spec: &GenerateJobSpec,
+    ) -> Result<Option<JobHandle>> {
+        use std::os::unix::net::UnixStream;
+
+        let sock_path = dirs::home_dir()
+            .expect("Could not determine home directory")
+            .join(".modl")
+            .join("worker.sock");
+
+        // Try to connect — if socket doesn't exist or daemon isn't running, return None
+        let mut stream = match UnixStream::connect(&sock_path) {
+            Ok(s) => s,
+            Err(_) => return Ok(None),
+        };
+
+        // Build the request envelope
+        let spec_json = serde_json::to_value(spec).context("Failed to serialize spec")?;
+        let request = serde_json::json!({
+            "action": "generate",
+            "job_id": job_id,
+            "spec": spec_json,
+        });
+
+        let request_line = format!("{}\n", serde_json::to_string(&request)?);
+
+        // Send request
+        stream
+            .write_all(request_line.as_bytes())
+            .context("Failed to write to worker socket")?;
+
+        // Shut down the write half so the worker knows the request is complete
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .context("Failed to shutdown socket write")?;
+
+        // Read JSONL events from the socket (same protocol as stdout)
+        let (tx, rx) = mpsc::channel::<JobEvent>();
+        let job_id_owned = job_id.to_string();
+
+        thread::spawn(move || {
+            read_worker_stdout(stream, &job_id_owned, tx);
+        });
+
+        self.jobs.insert(
+            job_id.to_string(),
+            JobState {
+                child: None, // No child process — worker is persistent
+                receiver: Some(rx),
+            },
+        );
+
+        Ok(Some(JobHandle {
+            job_id: job_id.to_string(),
+            child_pid: None,
+        }))
+    }
+
+    /// One-shot generation: spawn a fresh Python process (cold start).
+    fn submit_generate_oneshot(
+        &mut self,
+        job_id: &str,
+        spec: &GenerateJobSpec,
+    ) -> Result<JobHandle> {
         // Write spec YAML to jobs dir
         let jobs_dir = self.runtime_root.join("jobs");
         std::fs::create_dir_all(&jobs_dir)
@@ -210,7 +315,7 @@ impl Executor for LocalExecutor {
             .arg("--config")
             .arg(&spec_path)
             .arg("--job-id")
-            .arg(&job_id)
+            .arg(job_id)
             .env("PYTHONPATH", py_path)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -226,7 +331,7 @@ impl Executor for LocalExecutor {
 
         // Set up event channel
         let (tx, rx) = mpsc::channel::<JobEvent>();
-        let job_id_clone = job_id.clone();
+        let job_id_owned = job_id.to_string();
 
         let stdout = child
             .stdout
@@ -240,12 +345,12 @@ impl Executor for LocalExecutor {
 
         // Spawn reader threads for stdout and stderr
         thread::spawn(move || {
-            read_worker_stdout(stdout, &job_id_clone, tx.clone());
-            read_worker_stderr(stderr, &job_id_clone, tx);
+            read_worker_stdout(stdout, &job_id_owned, tx.clone());
+            read_worker_stderr(stderr, &job_id_owned, tx);
         });
 
         self.jobs.insert(
-            job_id.clone(),
+            job_id.to_string(),
             JobState {
                 child: Some(child),
                 receiver: Some(rx),
@@ -253,40 +358,9 @@ impl Executor for LocalExecutor {
         );
 
         Ok(JobHandle {
-            job_id,
+            job_id: job_id.to_string(),
             child_pid: Some(child_pid),
         })
-    }
-
-    fn events(&mut self, job_id: &str) -> Result<mpsc::Receiver<JobEvent>> {
-        let state = self
-            .jobs
-            .get_mut(job_id)
-            .with_context(|| format!("No job found with id: {job_id}"))?;
-
-        state
-            .receiver
-            .take()
-            .with_context(|| format!("Event receiver already consumed for job: {job_id}"))
-    }
-
-    fn cancel(&self, job_id: &str) -> Result<()> {
-        if let Some(state) = self.jobs.get(job_id)
-            && let Some(ref child) = state.child
-        {
-            let pid = child.id();
-            // Use kill command to send SIGTERM
-            let status = Command::new("kill")
-                .arg("-TERM")
-                .arg(pid.to_string())
-                .status()
-                .context("Failed to send SIGTERM to worker process")?;
-            if !status.success() {
-                bail!("Failed to kill process {pid}");
-            }
-            return Ok(());
-        }
-        bail!("No running process found for job: {job_id}");
     }
 }
 
@@ -505,6 +579,17 @@ pub(crate) fn parse_worker_event(raw: &serde_json::Value, job_id: &str) -> Optio
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
             details: event_val.get("details").cloned(),
+        },
+        "result" => EventPayload::Result {
+            result_type: event_val
+                .get("result_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            data: event_val
+                .get("data")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
         },
         "cancelled" => EventPayload::Cancelled,
         "heartbeat" => EventPayload::Heartbeat,

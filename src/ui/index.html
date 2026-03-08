@@ -76,9 +76,22 @@
 
   /* Lightbox */
   .lightbox { position: fixed; inset: 0; background: rgba(0,0,0,0.9); z-index: 100;
-    display: none; align-items: center; justify-content: center; cursor: zoom-out; }
+    display: none; align-items: center; justify-content: center; padding: 16px; }
   .lightbox.open { display: flex; }
-  .lightbox img { max-width: 95vw; max-height: 95vh; border-radius: 8px; }
+  .lightbox-panel { display: flex; align-items: flex-start; gap: 14px; max-width: 96vw; max-height: 95vh; }
+  .lightbox img { max-width: 72vw; max-height: 95vh; border-radius: 8px; display: block; }
+  .lightbox-meta { width: 320px; max-height: 95vh; overflow: auto; background: var(--bg2);
+    border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; display: none; }
+  .lightbox-meta.open { display: block; }
+  .lightbox-meta h4 { font-size: 13px; color: var(--fg); margin-bottom: 8px; }
+  .lightbox-meta-grid { display: grid; grid-template-columns: 110px 1fr; gap: 6px 10px; font-size: 11px; }
+  .lightbox-meta-grid .k { color: var(--fg2); }
+  .lightbox-meta-grid .v { color: var(--fg); font-family: "SF Mono", "Fira Code", monospace; overflow-wrap: anywhere; }
+  @media (max-width: 1100px) {
+    .lightbox-panel { flex-direction: column; align-items: center; }
+    .lightbox img { max-width: 94vw; max-height: 68vh; }
+    .lightbox-meta { width: min(94vw, 640px); max-height: 26vh; }
+  }
 
   /* Loading */
   .loading { color: var(--fg2); padding: 40px; text-align: center; }
@@ -165,6 +178,42 @@
   /* Empty state */
   .empty { text-align: center; padding: 60px 20px; color: var(--fg2); }
   .empty h2 { font-size: 20px; margin-bottom: 8px; color: var(--fg); }
+
+  /* Generated outputs */
+  .outputs-date-group { margin-bottom: 28px; }
+  .outputs-date-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px;
+    color: var(--fg2); font-weight: 600; margin-bottom: 10px; }
+  .outputs-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; }
+  .output-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 6px; }
+  .output-thumb-wrap { position: relative; }
+  .outputs-grid img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: var(--radius);
+    border: 1px solid var(--border); cursor: pointer; transition: opacity 0.15s, border-color 0.15s; display: block; }
+  .outputs-grid img:hover { opacity: 0.9; border-color: var(--accent); }
+  .output-delete-btn { position: absolute; top: 6px; right: 6px; border: 1px solid var(--border);
+    background: rgba(13, 17, 23, 0.88); color: var(--red); font-size: 11px; padding: 3px 8px;
+    border-radius: 999px; cursor: pointer; }
+  .output-delete-btn:hover { background: rgba(13, 17, 23, 1); }
+  .output-info-btn { position: absolute; top: 6px; left: 6px; border: 1px solid var(--border);
+    background: rgba(13, 17, 23, 0.88); color: var(--accent); font-size: 12px; font-weight: 700;
+    width: 24px; height: 24px; border-radius: 999px; cursor: pointer; line-height: 1; }
+  .output-info-btn:hover { background: rgba(13, 17, 23, 1); }
+  .outputs-fname { font-size: 10px; color: var(--fg2); opacity: 0.6; font-family: monospace;
+    margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* Output metadata modal */
+  .meta-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.75); z-index: 120;
+    display: none; align-items: center; justify-content: center; padding: 16px; }
+  .meta-modal.open { display: flex; }
+  .meta-card { width: min(720px, 96vw); max-height: 88vh; overflow: auto; background: var(--bg2);
+    border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+  .meta-hdr { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .meta-hdr h3 { font-size: 15px; font-weight: 600; color: var(--fg); }
+  .meta-close { border: 1px solid var(--border); background: var(--bg3); color: var(--fg);
+    border-radius: var(--radius); font-size: 12px; padding: 4px 10px; cursor: pointer; }
+  .meta-grid { display: grid; grid-template-columns: 140px 1fr; gap: 6px 12px; font-size: 12px; }
+  .meta-key { color: var(--fg2); }
+  .meta-val { color: var(--fg); font-family: "SF Mono", "Fira Code", monospace; overflow-wrap: anywhere; }
 </style>
 </head>
 <body>
@@ -174,6 +223,7 @@
   <nav>
     <button id="tab-runs" class="active" onclick="switchTab('runs')">Training Runs</button>
     <button id="tab-datasets" onclick="switchTab('datasets')">Datasets</button>
+    <button id="tab-outputs" onclick="switchTab('outputs')">Generated</button>
   </nav>
 </div>
 
@@ -210,10 +260,29 @@
       </div>
     </div>
   </div>
+
+  <div id="view-outputs" style="display:none">
+    <div id="outputs-content"><div class="loading">Loading...</div></div>
+  </div>
 </div>
 
-<div class="lightbox" id="lightbox" onclick="closeLightbox()">
-  <img id="lightbox-img" src="" alt="">
+<div class="lightbox" id="lightbox" onclick="closeLightboxOnBackdrop(event)">
+  <div class="lightbox-panel">
+    <img id="lightbox-img" src="" alt="">
+    <aside class="lightbox-meta" id="lightbox-meta">
+      <h4>Image Metadata</h4>
+      <div id="lightbox-meta-grid" class="lightbox-meta-grid"></div>
+    </aside>
+  </div>
+</div>
+<div class="meta-modal" id="output-meta-modal" onclick="closeOutputInfoOnBackdrop(event)">
+  <div class="meta-card">
+    <div class="meta-hdr">
+      <h3>Image Metadata</h3>
+      <button class="meta-close" onclick="closeOutputInfo()">Close</button>
+    </div>
+    <div id="output-meta-body"></div>
+  </div>
 </div>
 
 <script>
@@ -229,22 +298,79 @@ function switchTab(tab) {
   currentTab = tab;
   document.getElementById('tab-runs').classList.toggle('active', tab === 'runs');
   document.getElementById('tab-datasets').classList.toggle('active', tab === 'datasets');
+  document.getElementById('tab-outputs').classList.toggle('active', tab === 'outputs');
   document.getElementById('view-runs').style.display = tab === 'runs' ? '' : 'none';
   document.getElementById('view-datasets').style.display = tab === 'datasets' ? '' : 'none';
+  document.getElementById('view-outputs').style.display = tab === 'outputs' ? '' : 'none';
   if (tab === 'datasets' && !document.getElementById('datasets-list').dataset.loaded) {
     loadDatasets();
+  }
+  if (tab === 'outputs' && !document.getElementById('outputs-content').dataset.loaded) {
+    loadOutputs();
   }
 }
 
 // Lightbox
-function openLightbox(src) {
+function openLightbox(src, meta) {
   document.getElementById('lightbox-img').src = src;
+  const metaEl = document.getElementById('lightbox-meta');
+  const metaGrid = document.getElementById('lightbox-meta-grid');
+  const hasMeta = meta && Object.values(meta).some(v => v !== undefined && v !== null && v !== '');
+  if (hasMeta) {
+    const rows = [
+      ['Prompt', meta.prompt],
+      ['Model', meta.baseModelId],
+      ['LoRA', meta.loraName],
+      ['LoRA Strength', meta.loraStrength],
+      ['Seed', meta.seed],
+      ['Steps', meta.steps],
+      ['Guidance', meta.guidance],
+      ['Size', (meta.width && meta.height) ? `${meta.width}x${meta.height}` : null],
+      ['Generated With', meta.generatedWith],
+      ['Job ID', meta.jobId],
+      ['Artifact ID', meta.artifactId],
+      ['Path', meta.path],
+    ];
+    metaGrid.innerHTML = rows.map(([k, v]) =>
+      `<div class="k">${k}</div><div class="v">${formatMetaValue(v)}</div>`
+    ).join('');
+    metaEl.classList.add('open');
+  } else {
+    metaGrid.innerHTML = '';
+    metaEl.classList.remove('open');
+  }
   document.getElementById('lightbox').classList.add('open');
 }
 function closeLightbox() {
   document.getElementById('lightbox').classList.remove('open');
 }
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLightbox(); });
+function closeLightboxOnBackdrop(e) {
+  if (e.target.id === 'lightbox') closeLightbox();
+}
+function openLightboxFromOutputImage(imgEl) {
+  const d = imgEl.dataset;
+  openLightbox(imgEl.src, {
+    prompt: d.prompt,
+    baseModelId: d.baseModelId,
+    loraName: d.loraName,
+    loraStrength: d.loraStrength,
+    seed: d.seed,
+    steps: d.steps,
+    guidance: d.guidance,
+    width: d.width,
+    height: d.height,
+    generatedWith: d.generatedWith,
+    jobId: d.jobId,
+    artifactId: d.artifactId,
+    path: d.path,
+  });
+}
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    closeLightbox();
+    closeOutputInfo();
+  }
+});
 
 // ---- Live Training Status ----
 async function loadStatus() {
@@ -614,6 +740,44 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+function formatMetaValue(v) {
+  if (v === undefined || v === null || v === '') return '—';
+  return escapeHtml(String(v));
+}
+
+function openOutputInfo(btn) {
+  const rows = [
+    ['Filename', btn.dataset.filename],
+    ['Path', btn.dataset.path],
+    ['Prompt', btn.dataset.prompt],
+    ['Model', btn.dataset.baseModelId],
+    ['LoRA', btn.dataset.loraName],
+    ['LoRA Strength', btn.dataset.loraStrength],
+    ['Seed', btn.dataset.seed],
+    ['Steps', btn.dataset.steps],
+    ['Guidance', btn.dataset.guidance],
+    ['Width', btn.dataset.width],
+    ['Height', btn.dataset.height],
+    ['Job ID', btn.dataset.jobId],
+    ['Artifact ID', btn.dataset.artifactId],
+    ['Generated With', btn.dataset.generatedWith],
+    ['Size (bytes)', btn.dataset.sizeBytes],
+  ];
+  const html = `<div class="meta-grid">${
+    rows.map(([k, v]) => `<div class="meta-key">${k}</div><div class="meta-val">${formatMetaValue(v)}</div>`).join('')
+  }</div>`;
+  document.getElementById('output-meta-body').innerHTML = html;
+  document.getElementById('output-meta-modal').classList.add('open');
+}
+
+function closeOutputInfo() {
+  document.getElementById('output-meta-modal').classList.remove('open');
+}
+
+function closeOutputInfoOnBackdrop(e) {
+  if (e.target.id === 'output-meta-modal') closeOutputInfo();
+}
+
 // Auto-refresh: poll status every 1s, re-check run samples every 15s
 let statusInterval = null;
 let samplesInterval = null;
@@ -637,6 +801,118 @@ function startAutoRefresh() {
       } catch (e) { /* ignore */ }
     }
   }, 15000);
+}
+
+// ---- Generated Outputs ----
+async function loadOutputs() {
+  const el = document.getElementById('outputs-content');
+  try {
+    const res = await fetch('/api/outputs');
+    const groups = await res.json();
+    el.dataset.loaded = '1';
+    if (!groups.length) {
+      el.innerHTML = '<div class="empty"><h2>No generated images yet</h2><p>Run <code>modl generate</code> to create images.</p></div>';
+      return;
+    }
+    el.innerHTML = groups.map(g => `
+      <div class="outputs-date-group">
+        <div class="outputs-date-label">${escapeHtml(g.date)}</div>
+        <div class="outputs-grid">
+          ${g.images.map(img => `
+            <div class="output-card">
+              <div class="output-thumb-wrap">
+                <img src="/files/${escapeHtml(img.path)}" alt="${escapeHtml(img.filename)}"
+                  loading="lazy" onclick="openLightboxFromOutputImage(this)"
+                  data-artifact-id="${img.artifact_id ? escapeHtml(img.artifact_id) : ''}"
+                  data-job-id="${img.job_id ? escapeHtml(img.job_id) : ''}"
+                  data-path="${escapeHtml(img.path)}"
+                  data-prompt="${img.prompt ? escapeHtml(img.prompt) : ''}"
+                  data-base-model-id="${img.base_model_id ? escapeHtml(img.base_model_id) : ''}"
+                  data-lora-name="${img.lora_name ? escapeHtml(img.lora_name) : ''}"
+                  data-lora-strength="${img.lora_strength != null ? escapeHtml(String(img.lora_strength)) : ''}"
+                  data-seed="${img.seed != null ? escapeHtml(String(img.seed)) : ''}"
+                  data-steps="${img.steps != null ? escapeHtml(String(img.steps)) : ''}"
+                  data-guidance="${img.guidance != null ? escapeHtml(String(img.guidance)) : ''}"
+                  data-width="${img.width != null ? escapeHtml(String(img.width)) : ''}"
+                  data-height="${img.height != null ? escapeHtml(String(img.height)) : ''}"
+                  data-generated-with="${img.generated_with ? escapeHtml(img.generated_with) : ''}">
+                <button class="output-info-btn"
+                  data-artifact-id="${img.artifact_id ? escapeHtml(img.artifact_id) : ''}"
+                  data-job-id="${img.job_id ? escapeHtml(img.job_id) : ''}"
+                  data-path="${escapeHtml(img.path)}"
+                  data-filename="${escapeHtml(img.filename)}"
+                  data-prompt="${img.prompt ? escapeHtml(img.prompt) : ''}"
+                  data-base-model-id="${img.base_model_id ? escapeHtml(img.base_model_id) : ''}"
+                  data-lora-name="${img.lora_name ? escapeHtml(img.lora_name) : ''}"
+                  data-lora-strength="${img.lora_strength != null ? escapeHtml(String(img.lora_strength)) : ''}"
+                  data-seed="${img.seed != null ? escapeHtml(String(img.seed)) : ''}"
+                  data-steps="${img.steps != null ? escapeHtml(String(img.steps)) : ''}"
+                  data-guidance="${img.guidance != null ? escapeHtml(String(img.guidance)) : ''}"
+                  data-width="${img.width != null ? escapeHtml(String(img.width)) : ''}"
+                  data-height="${img.height != null ? escapeHtml(String(img.height)) : ''}"
+                  data-generated-with="${img.generated_with ? escapeHtml(img.generated_with) : ''}"
+                  data-size-bytes="${img.size_bytes != null ? escapeHtml(String(img.size_bytes)) : ''}"
+                  title="Show metadata">
+                  i
+                </button>
+                <button class="output-delete-btn"
+                  data-artifact-id="${img.artifact_id ? escapeHtml(img.artifact_id) : ''}"
+                  data-path="${escapeHtml(img.path)}"
+                  data-filename="${escapeHtml(img.filename)}"
+                  title="Delete image">
+                  Delete
+                </button>
+              </div>
+              <div class="outputs-fname">${escapeHtml(img.filename)}</div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `).join('');
+
+    el.querySelectorAll('.output-info-btn').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        openOutputInfo(e.currentTarget);
+      });
+    });
+    el.querySelectorAll('.output-delete-btn').forEach(btn => {
+      btn.addEventListener('click', deleteOutputFromUi);
+    });
+  } catch (e) {
+    el.innerHTML = `<div class="loading">Failed to load outputs: ${escapeHtml(String(e))}</div>`;
+  }
+}
+
+async function deleteOutputFromUi(e) {
+  e.stopPropagation();
+  const btn = e.currentTarget;
+  const artifactId = btn.dataset.artifactId || null;
+  const path = btn.dataset.path;
+  const filename = btn.dataset.filename || 'this image';
+
+  if (!path) return;
+  if (!confirm(`Delete ${filename}? This removes the file from ~/.modl/outputs.`)) return;
+
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/outputs', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        artifact_id: artifactId,
+        path: path
+      })
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || `HTTP ${res.status}`);
+    }
+    await loadOutputs();
+  } catch (err) {
+    alert(`Delete failed: ${err}`);
+    btn.disabled = false;
+  }
 }
 
 // Init

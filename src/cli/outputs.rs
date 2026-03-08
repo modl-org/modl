@@ -4,6 +4,7 @@ use comfy_table::{Cell, Color, Table, presets::UTF8_FULL_CONDENSED};
 use console::style;
 
 use crate::core::db::{ArtifactRecord, Database, JobRecord};
+use crate::core::outputs as output_service;
 
 #[derive(Subcommand)]
 pub enum OutputCommands {
@@ -15,6 +16,9 @@ pub enum OutputCommands {
         /// Filter by kind: image, lora, sample_image
         #[arg(long, short = 'k')]
         kind: Option<String>,
+        /// Show only favorited outputs
+        #[arg(long, short = 'f')]
+        favorites: bool,
     },
     /// Show full metadata for an output (prompt, seed, model, params)
     Show {
@@ -34,14 +38,39 @@ pub enum OutputCommands {
         #[arg(long, short = 'n', default_value = "20")]
         limit: usize,
     },
+    /// Mark an output as favorite
+    Fav {
+        /// Output ID (prefix match supported)
+        id: String,
+    },
+    /// Remove an output from favorites
+    Unfav {
+        /// Output ID (prefix match supported)
+        id: String,
+    },
+    /// Delete an output file and its database records
+    Rm {
+        /// Output ID (prefix match supported)
+        id: String,
+        /// Skip confirmation prompt
+        #[arg(long, short = 'f')]
+        force: bool,
+    },
 }
 
 pub async fn run(command: OutputCommands) -> Result<()> {
     match command {
-        OutputCommands::Ls { limit, kind } => run_list(limit, kind.as_deref()).await,
+        OutputCommands::Ls {
+            limit,
+            kind,
+            favorites,
+        } => run_list(limit, kind.as_deref(), favorites).await,
         OutputCommands::Show { id } => run_show(&id).await,
         OutputCommands::Open { id } => run_open(&id).await,
         OutputCommands::Search { query, limit } => run_search(&query, limit).await,
+        OutputCommands::Fav { id } => run_fav(&id, true).await,
+        OutputCommands::Unfav { id } => run_fav(&id, false).await,
+        OutputCommands::Rm { id, force } => run_rm(&id, force).await,
     }
 }
 
@@ -49,9 +78,14 @@ pub async fn run(command: OutputCommands) -> Result<()> {
 // List
 // ---------------------------------------------------------------------------
 
-async fn run_list(limit: usize, kind_filter: Option<&str>) -> Result<()> {
+async fn run_list(limit: usize, kind_filter: Option<&str>, favorites_only: bool) -> Result<()> {
     let db = Database::open()?;
     let artifacts = db.list_artifacts(None)?;
+    let favorite_paths = if favorites_only {
+        db.get_favorite_paths()?
+    } else {
+        std::collections::HashSet::new()
+    };
 
     if artifacts.is_empty() {
         println!("No outputs yet.");
@@ -62,15 +96,22 @@ async fn run_list(limit: usize, kind_filter: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
+    // Collect all favorite paths for the ⭐ column
+    let all_favorites = db.get_favorite_paths()?;
+
     // Filter by kind if requested
     let filtered: Vec<&ArtifactRecord> = artifacts
         .iter()
         .filter(|a| {
-            if let Some(k) = kind_filter {
-                a.kind == k
-            } else {
-                true
+            if let Some(k) = kind_filter
+                && a.kind != k
+            {
+                return false;
             }
+            if favorites_only && !favorite_paths.contains(&a.path) {
+                return false;
+            }
+            true
         })
         .take(limit)
         .collect();
@@ -87,6 +128,7 @@ async fn run_list(limit: usize, kind_filter: Option<&str>) -> Result<()> {
     table.load_preset(UTF8_FULL_CONDENSED);
     table.set_header(vec![
         Cell::new("ID").fg(Color::Cyan),
+        Cell::new("★").fg(Color::Cyan),
         Cell::new("Kind").fg(Color::Cyan),
         Cell::new("Prompt / Name").fg(Color::Cyan),
         Cell::new("Model").fg(Color::Cyan),
@@ -96,9 +138,15 @@ async fn run_list(limit: usize, kind_filter: Option<&str>) -> Result<()> {
     for artifact in &filtered {
         let short_id = short_id(&artifact.artifact_id);
         let summary = artifact_summary(artifact, &db);
+        let star = if all_favorites.contains(&artifact.path) {
+            "⭐"
+        } else {
+            ""
+        };
 
         table.add_row(vec![
             Cell::new(&short_id).fg(Color::Yellow),
+            Cell::new(star).fg(Color::Yellow),
             Cell::new(&artifact.kind),
             Cell::new(truncate(&summary.prompt_or_name, 50)),
             Cell::new(&summary.model),
@@ -122,7 +170,8 @@ async fn run_list(limit: usize, kind_filter: Option<&str>) -> Result<()> {
 
 async fn run_show(id: &str) -> Result<()> {
     let db = Database::open()?;
-    let artifact = find_artifact_by_prefix(id, &db)?;
+    let artifact = output_service::find_artifact_by_prefix(id, &db)?;
+    let is_fav = output_service::is_favorite(&artifact.path)?;
 
     println!("{}", style("Output Details").bold().underlined());
     println!();
@@ -131,6 +180,9 @@ async fn run_show(id: &str) -> Result<()> {
         style("Artifact ID:").dim(),
         artifact.artifact_id
     );
+    if is_fav {
+        println!("  {}  ⭐ Yes", style("Favorite:").dim());
+    }
     println!("  {}  {}", style("Kind:").dim(), artifact.kind);
     println!("  {}  {}", style("Path:").dim(), artifact.path);
     println!("  {}  {}", style("Created:").dim(), artifact.created_at);
@@ -274,7 +326,7 @@ fn print_spec_details(job: &JobRecord) -> Result<()> {
 
 async fn run_open(id: &str) -> Result<()> {
     let db = Database::open()?;
-    let artifact = find_artifact_by_prefix(id, &db)?;
+    let artifact = output_service::find_artifact_by_prefix(id, &db)?;
 
     let path = std::path::Path::new(&artifact.path);
     if !path.exists() {
@@ -387,6 +439,99 @@ async fn run_search(query: &str, limit: usize) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Fav / Unfav
+// ---------------------------------------------------------------------------
+
+async fn run_fav(id: &str, favorited: bool) -> Result<()> {
+    let db = Database::open()?;
+    let artifact = output_service::find_artifact_by_prefix(id, &db)?;
+    let changed = output_service::set_favorite(&artifact.path, favorited)?;
+
+    let short = short_id(&artifact.artifact_id);
+    if favorited {
+        if changed {
+            println!(
+                "{} {} marked as favorite",
+                style("⭐").yellow(),
+                style(&short).yellow()
+            );
+        } else {
+            println!(
+                "{} {} is already a favorite",
+                style("⭐").yellow(),
+                style(&short).yellow()
+            );
+        }
+    } else if changed {
+        println!(
+            "{} {} removed from favorites",
+            style("☆").dim(),
+            style(&short).yellow()
+        );
+    } else {
+        println!(
+            "{} {} is not a favorite",
+            style("☆").dim(),
+            style(&short).yellow()
+        );
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Rm (delete)
+// ---------------------------------------------------------------------------
+
+async fn run_rm(id: &str, force: bool) -> Result<()> {
+    let db = Database::open()?;
+    let artifact = output_service::find_artifact_by_prefix(id, &db)?;
+    let short = short_id(&artifact.artifact_id);
+
+    let path = std::path::Path::new(&artifact.path);
+    let filename = path
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| artifact.path.clone());
+
+    if !force {
+        println!(
+            "{} About to delete: {} ({})",
+            style("⚠").yellow(),
+            style(&filename).bold(),
+            style(&short).dim()
+        );
+        let confirm = dialoguer::Confirm::new()
+            .with_prompt("Permanently delete this output?")
+            .default(false)
+            .interact()?;
+        if !confirm {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    let artifact_id = artifact.artifact_id.clone();
+    let result = output_service::delete_output(Some(&artifact_id), None)?;
+
+    if result.deleted_file {
+        println!(
+            "{} Deleted {} (file + record removed)",
+            style("✓").green(),
+            style(&filename).bold()
+        );
+    } else {
+        println!(
+            "{} Removed record for {} (file was already gone)",
+            style("✓").green(),
+            style(&filename).bold()
+        );
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -464,26 +609,5 @@ fn job_summary(job: &JobRecord) -> JobSummary {
     JobSummary {
         prompt_or_name,
         model,
-    }
-}
-
-/// Find an artifact by prefix match on artifact_id.
-fn find_artifact_by_prefix(prefix: &str, db: &Database) -> Result<ArtifactRecord> {
-    let artifacts = db.list_artifacts(None)?;
-    let matches: Vec<_> = artifacts
-        .into_iter()
-        .filter(|a| a.artifact_id.starts_with(prefix))
-        .collect();
-
-    match matches.len() {
-        0 => bail!("No output found matching '{prefix}'."),
-        1 => Ok(matches.into_iter().next().unwrap()),
-        n => {
-            let ids: Vec<_> = matches.iter().map(|a| short_id(&a.artifact_id)).collect();
-            bail!(
-                "Ambiguous ID '{prefix}' matches {n} outputs: {}. Be more specific.",
-                ids.join(", ")
-            );
-        }
     }
 }

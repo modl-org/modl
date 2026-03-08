@@ -118,10 +118,42 @@ pub async fn run(
     let trigger_word = match trigger {
         Some(t) => t.to_string(),
         None => dialoguer::Input::<String>::new()
-            .with_prompt("Trigger word")
+            .with_prompt("Trigger word (single word, no spaces)")
             .default("OHWX".to_string())
             .interact_text()
             .context("Trigger word input cancelled")?,
+    };
+
+    // Validate and normalize trigger word
+    let trigger_word = {
+        let tw = trigger_word.trim().to_string();
+        if tw.contains(' ') {
+            let suggested = tw.replace(' ', "").to_uppercase();
+            println!(
+                "  {} Trigger word should be a single word with no spaces.",
+                console::style("!").yellow()
+            );
+            println!(
+                "    Multi-word triggers compete with existing vocabulary and cause poor fitting."
+            );
+            println!("    Suggested: {}", console::style(&suggested).bold());
+            let use_suggested = dialoguer::Confirm::new()
+                .with_prompt(format!("Use '{}' instead?", suggested))
+                .default(true)
+                .interact()
+                .unwrap_or(true);
+            if use_suggested {
+                println!(
+                    "    Using trigger word: {}",
+                    console::style(&suggested).bold()
+                );
+                suggested
+            } else {
+                tw
+            }
+        } else {
+            tw
+        }
     };
 
     // -------------------------------------------------------------------
@@ -531,7 +563,7 @@ async fn execute_training(
                 final_status = "cancelled";
                 break;
             }
-            EventPayload::Heartbeat => {}
+            EventPayload::Heartbeat | EventPayload::Result { .. } => {}
         }
 
         // Persist event to DB

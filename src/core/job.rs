@@ -88,23 +88,105 @@ fn default_resize_method() -> String {
     "contain".to_string()
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PrepareJobSpec {
-    pub source_dir: String,
-    pub dataset_name: String,
-    #[serde(default = "default_resize_resolution")]
-    pub resolution: u32,
-    #[serde(default = "default_tag_model")]
-    pub tag_model: String,
-    #[serde(default = "default_caption_model")]
-    pub caption_model: String,
+pub struct ScoreJobSpec {
+    pub image_paths: Vec<String>,
+    #[serde(default = "default_score_model")]
+    pub model: String,
     #[serde(default)]
-    pub skip_resize: bool,
+    pub clip_model_path: Option<String>,
     #[serde(default)]
-    pub skip_tag: bool,
+    pub predictor_path: Option<String>,
+}
+
+fn default_score_model() -> String {
+    "laion-aesthetic-v2".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetectJobSpec {
+    pub image_paths: Vec<String>,
+    #[serde(default = "default_detect_type")]
+    pub detect_type: String,
+    #[serde(default = "default_detect_model")]
+    pub model: String,
     #[serde(default)]
-    pub skip_caption: bool,
+    pub model_path: Option<String>,
+    #[serde(default)]
+    pub return_embeddings: bool,
+}
+
+fn default_detect_type() -> String {
+    "face".to_string()
+}
+
+fn default_detect_model() -> String {
+    "insightface-buffalo-l".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompareJobSpec {
+    pub image_paths: Vec<String>,
+    #[serde(default)]
+    pub reference_path: Option<String>,
+    #[serde(default = "default_compare_model")]
+    pub model: String,
+    #[serde(default)]
+    pub clip_model_path: Option<String>,
+}
+
+fn default_compare_model() -> String {
+    "clip-vit-large-patch14".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SegmentJobSpec {
+    pub image_path: String,
+    pub output_mask_path: String,
+    #[serde(default = "default_segment_method")]
+    pub method: String,
+    #[serde(default)]
+    pub bbox: Option<[f32; 4]>,
+    #[serde(default)]
+    pub point: Option<[f32; 2]>,
+    #[serde(default = "default_segment_model")]
+    pub model: String,
+    #[serde(default)]
+    pub model_path: Option<String>,
+    #[serde(default = "default_expand_px")]
+    pub expand_px: u32,
+}
+
+fn default_segment_method() -> String {
+    "bbox".to_string()
+}
+
+fn default_segment_model() -> String {
+    "sam-vit-base".to_string()
+}
+
+fn default_expand_px() -> u32 {
+    10
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FaceRestoreJobSpec {
+    pub image_paths: Vec<String>,
+    pub output_dir: String,
+    #[serde(default = "default_face_restore_model")]
+    pub model: String,
+    #[serde(default)]
+    pub model_path: Option<String>,
+    #[serde(default = "default_fidelity")]
+    pub fidelity: f32,
+}
+
+fn default_face_restore_model() -> String {
+    "codeformer".to_string()
+}
+
+fn default_fidelity() -> f32 {
+    0.7
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -320,46 +402,6 @@ impl std::str::FromStr for Preset {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[allow(dead_code)]
-pub enum JobStatus {
-    Queued,
-    Accepted,
-    Running,
-    Completed,
-    Error,
-    Cancelled,
-}
-
-impl std::fmt::Display for JobStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Queued => write!(f, "queued"),
-            Self::Accepted => write!(f, "accepted"),
-            Self::Running => write!(f, "running"),
-            Self::Completed => write!(f, "completed"),
-            Self::Error => write!(f, "error"),
-            Self::Cancelled => write!(f, "cancelled"),
-        }
-    }
-}
-
-impl std::str::FromStr for JobStatus {
-    type Err = anyhow::Error;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "queued" => Ok(Self::Queued),
-            "accepted" => Ok(Self::Accepted),
-            "running" => Ok(Self::Running),
-            "completed" => Ok(Self::Completed),
-            "error" => Ok(Self::Error),
-            "cancelled" => Ok(Self::Cancelled),
-            _ => anyhow::bail!("Unknown job status: {s}"),
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Job events — the protocol envelope
 // ---------------------------------------------------------------------------
@@ -425,6 +467,11 @@ pub enum EventPayload {
     },
     Cancelled,
     Heartbeat,
+    /// Structured result data from analysis commands (score, detect, compare).
+    Result {
+        result_type: String,
+        data: serde_json::Value,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -488,15 +535,6 @@ mod tests {
         assert_eq!("quick".parse::<Preset>().unwrap(), Preset::Quick);
         assert_eq!("Standard".parse::<Preset>().unwrap(), Preset::Standard);
         assert!("unknown".parse::<Preset>().is_err());
-    }
-
-    #[test]
-    fn test_job_status_display_roundtrip() {
-        for status in [JobStatus::Queued, JobStatus::Running, JobStatus::Completed] {
-            let s = status.to_string();
-            let back: JobStatus = s.parse().unwrap();
-            assert_eq!(back, status);
-        }
     }
 
     #[test]

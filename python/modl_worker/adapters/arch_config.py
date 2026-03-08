@@ -1,21 +1,25 @@
 """Architecture configuration tables and model resolution helpers.
 
 This is the single source of truth for per-model-family settings used by
-the config builder and train adapter.  Each entry in ARCH_CONFIGS drives
-the ai-toolkit YAML generation without ad-hoc if/elif chains.
+the config builder, train adapter, and gen adapter.  Each entry in
+ARCH_CONFIGS drives both training YAML generation and inference pipeline
+selection without ad-hoc if/elif chains.
 
 Fields in each ARCH_CONFIGS entry:
+    pipeline_class     – diffusers pipeline class name for generation
     model_flags        – merged into the ai-toolkit "model" block
     noise_scheduler    – scheduler type for the "train" block
     dtype              – training precision
     train_text_encoder – whether to train the text encoder
     resolutions        – resolution buckets for the dataset
     default_resolution – fallback when user doesn't specify
-    sample             – sampler, steps, guidance, neg for sample block
+    sample             – sampler, steps, guidance, neg for sample/generate defaults
     extra_train        – extra keys merged into "train" block
 """
 
 import os
+import sqlite3
+from pathlib import Path
 
 # -----------------------------------------------------------------------
 # Qwen-Image quantization defaults
@@ -36,6 +40,7 @@ QWEN_24GB_STYLE_QTYPE = "uint3|ostris/accuracy_recovery_adapters/qwen_image_torc
 
 ARCH_CONFIGS: dict[str, dict] = {
     "flux": {
+        "pipeline_class": "FluxPipeline",
         "model_flags": {"is_flux": True, "quantize": True},
         "noise_scheduler": "flowmatch",
         "dtype": "bf16",
@@ -45,6 +50,7 @@ ARCH_CONFIGS: dict[str, dict] = {
         "sample": {"sampler": "flowmatch", "steps": 20, "guidance": 4.0, "neg": ""},
     },
     "flux_schnell": {
+        "pipeline_class": "FluxPipeline",
         "model_flags": {
             "is_flux": True,
             "quantize": True,
@@ -58,22 +64,36 @@ ARCH_CONFIGS: dict[str, dict] = {
         "sample": {"sampler": "flowmatch", "steps": 4, "guidance": 1.0, "neg": ""},
     },
     "zimage_turbo": {
+        "pipeline_class": "ZImagePipeline",
+        "gen_components": {
+            "text_encoder": "z-image-text-encoder",
+            "vae": "z-image-vae",
+        },
         "model_flags": {
             "arch": "zimage",
-            "quantize": True,
-            "quantize_te": True,
-            "low_vram": True,
-            "assistant_lora_path": "ostris/zimage_turbo_training_adapter/zimage_turbo_training_adapter_v2.safetensors",
+            # quantize/low_vram set dynamically by config_builder based on VRAM
+            # Ostris: "if you have 24 gigs or more, set this to none" — no quantize
+            # Without quantize: ~17GB VRAM, much faster iteration
+            "assistant_lora_path": "ostris/zimage_turbo_training_adapter/zimage_turbo_training_adapter_v1.safetensors",
         },
         "noise_scheduler": "flowmatch",
         "dtype": "bf16",
         "train_text_encoder": False,
         "resolutions": [512, 768, 1024],
         "default_resolution": 1024,
-        "extra_train": {"timestep_type": "weighted"},
+        "extra_train": {
+            "timestep_type": "weighted",
+            # linear_timesteps2 (high-noise bias) set per lora_type in config_builder
+            "cache_text_embeddings": True,
+        },
         "sample": {"sampler": "flowmatch", "steps": 8, "guidance": 1.0, "neg": ""},
     },
     "zimage": {
+        "pipeline_class": "ZImagePipeline",
+        "gen_components": {
+            "text_encoder": "z-image-text-encoder",
+            "vae": "z-image-vae",
+        },
         "model_flags": {
             "arch": "zimage",
             "quantize": True,
@@ -89,6 +109,10 @@ ARCH_CONFIGS: dict[str, dict] = {
         "sample": {"sampler": "flowmatch", "steps": 30, "guidance": 4.0, "neg": ""},
     },
     "chroma": {
+        "pipeline_class": "FluxPipeline",
+        "gen_components": {
+            "text_encoder": "z-image-text-encoder",
+        },
         "model_flags": {"arch": "chroma", "quantize": True},
         "noise_scheduler": "flowmatch",
         "dtype": "bf16",
@@ -98,6 +122,7 @@ ARCH_CONFIGS: dict[str, dict] = {
         "sample": {"sampler": "flowmatch", "steps": 25, "guidance": 4.0, "neg": ""},
     },
     "qwen_image": {
+        "pipeline_class": "FluxPipeline",
         "model_flags": {
             "arch": "qwen_image",
             "quantize": True,
@@ -117,6 +142,7 @@ ARCH_CONFIGS: dict[str, dict] = {
         "sample": {"sampler": "flowmatch", "steps": 25, "guidance": 3.0, "neg": ""},
     },
     "sdxl": {
+        "pipeline_class": "StableDiffusionXLPipeline",
         "model_flags": {"arch": "sdxl"},
         "noise_scheduler": "ddpm",
         "dtype": "bf16",
@@ -127,6 +153,7 @@ ARCH_CONFIGS: dict[str, dict] = {
         "sample": {"sampler": "euler", "steps": 30, "guidance": 7.5, "neg": "blurry, low quality, deformed"},
     },
     "sd15": {
+        "pipeline_class": "StableDiffusionPipeline",
         "model_flags": {},
         "noise_scheduler": "ddpm",
         "dtype": "fp16",
@@ -196,6 +223,67 @@ def resolve_model_path(base_model_id: str) -> str:
     if entry:
         return entry[1]
     return base_model_id
+
+
+def resolve_pipeline_class(base_model_id: str) -> str:
+    """Return the diffusers pipeline class name for a model ID."""
+    arch = detect_arch(base_model_id)
+    config = ARCH_CONFIGS.get(arch, ARCH_CONFIGS["sdxl"])
+    return config["pipeline_class"]
+
+
+def resolve_gen_defaults(base_model_id: str) -> dict:
+    """Return default generation params (steps, guidance) for a model ID.
+
+    Values come from the ``sample`` block in ARCH_CONFIGS, which is also
+    used for training preview generation — one source of truth.
+    """
+    arch = detect_arch(base_model_id)
+    config = ARCH_CONFIGS.get(arch, ARCH_CONFIGS["sdxl"])
+    sample = config.get("sample", {})
+    return {
+        "steps": sample.get("steps", 28),
+        "guidance": sample.get("guidance", 3.5),
+    }
+
+
+def _get_installed_path(model_id: str) -> str | None:
+    """Look up a model's store path from the modl state DB."""
+    db_path = Path.home() / ".modl" / "state.db"
+    if not db_path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT store_path FROM installed WHERE id = ?", (model_id,)
+        ).fetchone()
+        conn.close()
+        if row and Path(row[0]).exists():
+            return row[0]
+    except Exception:
+        pass
+    return None
+
+
+def resolve_gen_components(base_model_id: str) -> dict[str, str]:
+    """Resolve component paths (text_encoder, vae) for generation.
+
+    Returns a dict like {"text_encoder": "/path/to/qwen3.safetensors", "vae": ...}
+    for models that require separate component loading (z-image, chroma, etc.).
+    Returns empty dict if no components needed or not found.
+    """
+    arch = detect_arch(base_model_id)
+    config = ARCH_CONFIGS.get(arch, {})
+    gen_components = config.get("gen_components", {})
+    if not gen_components:
+        return {}
+
+    resolved = {}
+    for component_type, model_id in gen_components.items():
+        path = _get_installed_path(model_id)
+        if path:
+            resolved[component_type] = path
+    return resolved
 
 
 def resolve_qwen_qtype(lora_type: str) -> str:

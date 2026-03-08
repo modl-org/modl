@@ -76,6 +76,56 @@ All three must pass. CI runs these on every PR across Linux, macOS, and Windows.
 
 Model manifests live in a separate repo: [modl-registry](https://github.com/modl-org/modl-registry). See that repo's CONTRIBUTING.md for how to add models.
 
+## Developing the UI (`modl serve`)
+
+The web UI lives in `src/ui/web/` (React + Vite + Tailwind). Assets are embedded into the Rust binary via `include_str!` at compile time, so the production build is fully self-contained.
+
+### Quick start (recommended)
+
+```bash
+./scripts/dev.sh
+```
+
+This single script builds the CLI, starts the persistent GPU worker (model caching), the backend API on `:3333`, and the Vite dev server on `:5173`. Open **http://localhost:5173**. Ctrl+C stops everything.
+
+Use `./scripts/dev.sh --no-worker` if you don't have a GPU or don't need generation.
+
+### Manual setup (if you prefer separate terminals)
+
+```bash
+# Terminal 1: run the Rust backend (API + file server on :3333)
+modl serve
+
+# Terminal 2: run Vite dev server with hot-reload on :5173
+cd src/ui/web && npm run dev
+
+# Terminal 3 (optional): start the persistent GPU worker for fast generation
+modl worker start
+```
+
+### Persistent worker
+
+The persistent worker keeps diffusers models loaded in GPU VRAM between generation requests, reducing inference from ~40s (cold start) to ~10s (warm).
+
+```bash
+modl worker start              # start daemon (auto-shuts down after 10 min idle)
+modl worker status             # show loaded models, VRAM usage, uptime
+modl worker stop               # graceful shutdown, frees VRAM
+```
+
+When the worker is running, `modl gen` and the web UI automatically use it. Use `modl gen --no-worker` to force a cold start.
+
+Open **http://localhost:5173** (not :3333). Vite proxies `/api` and `/files` requests to the backend automatically.
+
+When you're ready to commit, build the production bundle and recompile:
+
+```bash
+cd src/ui/web && npx vite build   # outputs to src/ui/dist/
+cd ../../../ && cargo build --release
+```
+
+`src/ui/dist/` is checked into git so that `cargo build` works without requiring Node.js.
+
 ## General Guidelines
 
 - Run `cargo fmt` and `cargo clippy -- -D warnings` before submitting

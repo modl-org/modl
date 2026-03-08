@@ -87,12 +87,41 @@ pub fn resolve_params(
     let family = BaseModelFamily::from_model_id(base_model)?;
     let resolution = family.default_resolution();
     let vram_mb = gpu.map(|g| g.vram_mb).unwrap_or(0);
-    let quantize = vram_mb > 0 && vram_mb < 40_000;
     let img_count = dataset.image_count;
 
-    // Z-Image trains significantly faster than Flux/SDXL (~1.3s/iter on 5090).
-    // For distilled models (ZImage turbo), keep LR at 1e-4 max to avoid
-    // breaking distillation. Style LoRAs need 3000-5000 steps per Ostris.
+    // Z-Image only needs ~17GB without quantization (per Ostris).
+    // On 24GB+ cards, skip quantization for much faster iteration (~1.3s vs ~4s).
+    // Other models (Flux at 12B+) still need quantization under 40GB.
+    let is_zimage = matches!(family, BaseModelFamily::ZImage);
+    let quantize = if is_zimage {
+        vram_mb > 0 && vram_mb < 20_000
+    } else {
+        vram_mb > 0 && vram_mb < 40_000
+    };
+
+    // ---------------------------------------------------------------
+    // Training parameter rationale (sources: Ostris, ai-toolkit docs)
+    // ---------------------------------------------------------------
+    //
+    // Z-Image Turbo (6B params, distilled 8-step model):
+    //   - Uses a DD (de-distillation) training adapter that merges in
+    //     during training and merges out at inference, preserving turbo.
+    //   - LR MUST be ≤ 1e-4. Ostris: "2e-4 exploded the model."
+    //   - Quantize only if VRAM < 20GB. Without quantize on 24GB:
+    //     ~17GB VRAM used, ~2 it/s on 4090. With quantize: ~4s/iter.
+    //   - cache_text_embeddings=true saves VRAM (unloads text encoder).
+    //   - Adapter works for ~5k-10k steps; beyond ~20k distillation degrades.
+    //   Style LoRAs (config_builder applies automatically):
+    //     - 3000-3500 steps typical (Ostris stops at 3000).
+    //     - differential_guidance (scale=3): overshoots target to converge.
+    //     - Literal captions (describe content, not style). No trigger word
+    //       needed — the LoRA IS the style.
+    //     - High-noise bias (linear_timesteps2) is a TWO-PHASE technique:
+    //       balanced first (~2000 steps), then resume with high-noise to
+    //       rebuild composition. Do NOT enable from step 0 — prevents learning.
+    //   Character LoRAs:
+    //     - Trains faster, balanced timesteps.
+    //     - Trigger word required.
     //
     // Style LoRA step budget (SDXL/Flux):
     //   ~100-150 steps/img for tight/consistent datasets
@@ -102,7 +131,7 @@ pub fn resolve_params(
     // Character/subject LoRA: ~200-300 steps/img.
     //
     // Rank multiplier: r16 ×0.7, r32 ×0.85, r64 ×1.0, r128 ×1.3
-    let is_zimage = matches!(family, BaseModelFamily::ZImage);
+    // ---------------------------------------------------------------
 
     let (steps, rank, learning_rate) = match (preset, lora_type) {
         // --- Style presets: high rank, many more steps ---
@@ -144,6 +173,11 @@ pub fn resolve_params(
         }
         (Preset::Standard, _) if is_zimage => {
             let steps = compute_steps(img_count, 150, 1500, 3000);
+            let rank = if img_count < 20 { 16 } else { 32 };
+            (steps, rank, 1e-4)
+        }
+        (Preset::Advanced, _) if is_zimage => {
+            let steps = compute_steps(img_count, 200, 2000, 4000);
             let rank = if img_count < 20 { 16 } else { 32 };
             (steps, rank, 1e-4)
         }

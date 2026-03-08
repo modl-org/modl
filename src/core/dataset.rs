@@ -19,7 +19,6 @@ pub struct DatasetInfo {
     pub image_count: u32,
     pub captioned_count: u32,
     pub caption_coverage: f32,
-    #[allow(dead_code)]
     pub images: Vec<ImageEntry>,
 }
 
