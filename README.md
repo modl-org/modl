@@ -1,46 +1,53 @@
 # modl
 
-**The opinionated toolkit for AI image generation.** Models, training, inference — one CLI.
+**Local-first AI image generation toolkit.** Pull models, train LoRAs, generate images. One CLI, no glue code.
 
-`modl model pull flux-dev` downloads the model, its required VAE, its text encoders — everything — to the right folders, with verified hashes and compatibility checking. Then `modl train` fine-tunes a LoRA on your photos. Then `modl generate` creates images.
+```bash
+modl pull flux-schnell          # download model + all dependencies
+modl generate "a cat on mars"   # generate an image
+modl train --dataset ./photos --base flux-schnell --name my-v1   # train a LoRA
+```
 
 **[Website](https://modl.run)** · **[Docs](https://modl.run/docs)** · **[Model Registry](https://github.com/modl-org/modl-registry)** · **[Issues](https://github.com/modl-org/modl/issues)**
+
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/modl-org/modl/main/install.sh | sh
+```
+
+Or build from source:
+
+```bash
+git clone https://github.com/modl-org/modl && cd modl && cargo install --path .
+```
 
 ## Quick Start
 
 ```bash
-# Install modl
-curl -fsSL https://raw.githubusercontent.com/modl-org/modl/main/install.sh | sh
-
-# Or build from source
-# git clone https://github.com/modl-org/modl && cd modl && cargo install --path .
-
 # First-time setup (auto-detects ComfyUI, A1111, etc.)
 modl init
 
 # Pull a model (auto-selects variant for your GPU)
-modl model pull flux-dev
+modl pull flux-dev
 
-# See what's installed
-modl model ls
-
-# Search for LoRAs
-modl model search "realistic" --type lora
+# Generate
+modl generate "a photo of a mountain lake at sunset" --base flux-dev
 ```
 
 ## The Full Journey
 
 ```bash
 # 1. Pull a base model
-modl model pull flux-schnell
+modl pull flux-schnell
 
 # 2. Prepare a training dataset
 modl dataset create products --from ~/photos/my-products/
 
 # 3. Train a LoRA
-modl train --dataset products --base flux-schnell --name product-v1
+modl train --dataset products --base flux-schnell --name product-v1 --lora-type object
 
-# 4. Generate images (coming soon)
+# 4. Generate with your LoRA
 modl generate "a photo of OHWX on marble countertop" --lora product-v1
 ```
 
@@ -59,158 +66,82 @@ Install once, use everywhere. No duplicate 24GB files across tools.
 
 ## Already Have Models?
 
-If you already have models downloaded in ComfyUI or A1111, `modl model link` adopts the ones it recognizes — moves them into the store and replaces them with symlinks. Your tools keep working, nothing breaks.
-
 ```bash
-# Adopt existing ComfyUI models
-modl model link --comfyui ~/ComfyUI
-
-# Or A1111
-modl model link --a1111 ~/stable-diffusion-webui
+modl link --comfyui ~/ComfyUI
+modl link --a1111 ~/stable-diffusion-webui
 ```
 
-What happens:
-- Modl scans your model folders and hashes each file
-- Files that match the registry are **moved** to `~/modl/store/` and replaced with symlinks
-- Files modl doesn't recognize are **left untouched** (custom merges, community models, etc.)
-- Your tools don't notice the difference — symlinks are transparent
-
-After linking, `modl model pull` will automatically symlink new models into all your configured tools.
-
-## Features
-
-- **Dependency resolution** — `modl model pull flux-dev` installs required VAE, text encoders automatically
-- **GPU-aware variant selection** — picks fp16/fp8/GGUF based on your VRAM
-- **Content-addressed storage** — deduplicated, hash-verified downloads
-- **Multi-tool support** — symlinks into ComfyUI, A1111, and more (InvokeAI planned)
-- **Adopt existing models** — `modl model link` migrates your current library without re-downloading
-- **Resumable downloads** — partial downloads resume automatically
-- **Lock files** — `modl model export` / `modl model import` for reproducible environments
-- **LoRA training** — opinionated presets (Quick/Standard/Advanced) powered by ai-toolkit
-- **Managed runtime** — auto-installs Python, PyTorch, ai-toolkit — no conda/venv juggling
-- **Dataset management** — organize, validate, and caption training images
+Modl scans your model folders, hashes each file, and moves recognized models into the store — replacing them with symlinks. Your tools keep working, nothing breaks. Unrecognized files are left untouched.
 
 ## Commands
 
-### System
+<!-- BEGIN AUTO-GENERATED (scripts/generate-cli-reference.sh) -->
+
+Run `modl <command> --help` for full usage details.
 
 | Command | Description |
 |---------|-------------|
-| `modl init` | First-time setup — detect tools, configure storage |
-| `modl doctor` | Check for broken symlinks, missing deps, corrupt files |
-| `modl config [key] [value]` | View or update configuration |
-| `modl auth <provider>` | Configure authentication (HuggingFace, Civitai) |
-| `modl upgrade` | Update modl CLI to the latest release |
-| `modl serve [--port]` | Launch web UI (opens browser) |
-
-### Models (`modl model`)
-
-| Command | Description |
-|---------|-------------|
-| `modl model pull <id>` | Download a model with all dependencies |
-| `modl model rm <id>` | Remove an installed model |
-| `modl model ls` | List installed models |
-| `modl model info <id>` | Show detailed info about a model |
-| `modl model search <query>` | Search the registry + HuggingFace |
-| `modl model popular` | Show trending models |
-| `modl model link` | Adopt existing tool model folders |
-| `modl model update` | Fetch latest registry index |
-| `modl model space` | Show disk usage breakdown |
-| `modl model gc` | Remove unreferenced files from the store |
-| `modl model export` / `import` | Shareable lock files for reproducible setups |
-
-### Generation
-
-| Command | Description |
-|---------|-------------|
-| `modl generate "prompt"` | Generate images (`--base`, `--lora`, `--count`, `--size`, `--steps`, `--guidance`, `--seed`) |
-| `modl enhance "prompt"` | AI-enhanced prompt expansion |
-
-### Training (`modl train`)
-
-| Command | Description |
-|---------|-------------|
-| `modl train` | Train a LoRA (interactive or with flags) |
-| `modl train setup` | Install training dependencies (ai-toolkit + PyTorch) |
-| `modl train status [--watch]` | Monitor live training progress |
-
-### Datasets (`modl dataset`)
-
-| Command | Description |
-|---------|-------------|
-| `modl dataset create <name> --from <dir>` | Create a managed dataset from images |
+| `modl pull <id>` | Download a model, LoRA, VAE, or other asset |
+| `modl rm <id>` | Remove an installed model |
+| `modl ls` | List installed models |
+| `modl info <id>` | Show detailed info about a model |
+| `modl search [query]` | Search the registry |
+| `modl update` | Fetch latest registry index |
+| `modl link [path]` | Link a tool's model folder (ComfyUI, A1111) |
+| `modl gc` | Remove unreferenced files from the store |
+| `modl generate <prompt>` | Generate images using diffusers |
+| `modl train` | Train a LoRA with managed runtime |
+| `modl train status [name]` | Show live training progress |
+| `modl train ls` | List training runs |
+| `modl dataset create <name>` | Create a managed dataset from images |
+| `modl dataset caption <name>` | Auto-caption images using a VL model |
+| `modl dataset prepare <name>` | Full pipeline: create, resize, caption |
 | `modl dataset ls` | List all managed datasets |
-| `modl dataset rm <name>` | Delete a dataset |
-| `modl dataset validate <name>` | Validate a dataset for training |
-| `modl dataset resize <name> --resolution <px>` | Resize images |
-| `modl dataset tag <name>` | Auto-tag images (VL model) |
-| `modl dataset caption <name>` | Auto-caption images (VL model) |
-| `modl dataset prepare <name> --from <dir>` | Full pipeline (create + resize + caption) |
+| `modl outputs ls` | List recent generation outputs |
+| `modl outputs search <query>` | Search outputs by prompt, model, or LoRA |
+| `modl score <paths>` | Score image aesthetic quality |
+| `modl detect <paths>` | Detect faces in images |
+| `modl segment <image>` | Generate segmentation mask for inpainting |
+| `modl face-restore <paths>` | Restore faces using CodeFormer |
+| `modl upscale <paths>` | Upscale images using Real-ESRGAN |
+| `modl remove-bg <paths>` | Remove image background (transparent PNG) |
+| `modl enhance <prompt>` | AI-enhanced prompt expansion |
+| `modl doctor` | Check for broken symlinks, missing deps, corrupt files |
+| `modl serve` | Launch the web UI |
+| `modl worker start/stop/status` | Manage persistent GPU worker |
+| `modl upgrade` | Update modl CLI to the latest release |
 
-### Outputs (`modl outputs`)
+Full reference: `modl --help` or run `scripts/generate-cli-reference.sh` to regenerate this table.
 
-| Command | Description |
-|---------|-------------|
-| `modl outputs ls [--limit] [--favorites]` | List generated images |
-| `modl outputs show <id>` | Show image metadata |
-| `modl outputs open <id>` | Open image in viewer |
-| `modl outputs search <query>` | Search by prompt text |
-| `modl outputs fav <id>` / `unfav <id>` | Toggle favorites |
-| `modl outputs rm <id>` | Delete output |
-
-### Worker & Runtime
-
-| Command | Description |
-|---------|-------------|
-| `modl worker start` / `stop` / `status` | Manage persistent GPU worker |
-| `modl runtime install` | Install managed Python runtime |
-| `modl runtime status` | Show runtime installation status |
-| `modl runtime doctor` | Run runtime health checks |
-| `modl runtime bootstrap` | Bootstrap environment and install deps |
-| `modl runtime upgrade` | Upgrade runtime to latest version |
-| `modl runtime reset` | Reset runtime state |
-
-## Pre-Release Smoke Test
-
-Run this end-to-end before tagging a release. Covers the critical user path.
-
-```bash
-# 1. Fresh setup
-modl init
-
-# 2. Pull a model (tests: registry fetch, resolver, download, SHA256, symlinks, DB)
-modl pull flux-schnell
-
-# 3. Launch web UI (tests: axum boots, frontend loads, GPU detected)
-modl serve
-#    -> open browser, generate an image, check gallery shows it
-#    -> favorite it, then delete it
-
-# 4. Dataset + training round-trip
-modl dataset create smoke-test --from ~/some-images/
-modl train --dataset smoke-test --base flux-schnell --name smoke-lora --preset quick --steps 50
-
-# 5. Generate with the trained LoRA
-modl generate "a photo of OHWX in a garden" --lora smoke-lora
-
-# 6. Health check
-modl doctor
-```
-
-If all six steps complete without errors, ship it.
+<!-- END AUTO-GENERATED -->
 
 ## Variant Selection
 
-Models come in multiple variants. Modl picks the best one for your GPU automatically:
+Models come in multiple variants. Modl picks the best one for your GPU:
 
 | VRAM | Variant | Notes |
 |------|---------|-------|
 | 24GB+ | fp16 | Full quality |
 | 12-23GB | fp8 | Slight quality reduction |
-| 8-11GB | gguf-q4 | Quantized, needs GGUF loader |
+| 8-11GB | gguf-q4 | Quantized |
 | <8GB | gguf-q2 | Lower quality, functional |
 
-Override with `modl model pull flux-dev --variant fp8`.
+Override: `modl pull flux-dev --variant fp8`
+
+## Architecture
+
+Rust CLI for speed and single-binary distribution. Managed Python runtime for GPU compute. SQLite tracks everything.
+
+```
+modl (Rust binary)          Python Worker
+├── CLI commands            ├── Inference (diffusers)
+├── Web UI (axum)           ├── Training (ai-toolkit)
+├── Model registry          ├── Analysis (CLIP, SAM, etc.)
+├── Content store           └── VRAM management
+└── SQLite DB
+```
+
+See [CLAUDE.md](CLAUDE.md) for full architecture docs.
 
 ## License
 
