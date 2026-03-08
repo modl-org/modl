@@ -8,6 +8,8 @@ use crate::core::huggingface;
 use crate::core::manifest::AssetType;
 use crate::core::registry::RegistryIndex;
 
+use super::fmt::format_downloads;
+
 pub async fn run(
     query: &str,
     type_filter: Option<AssetType>,
@@ -161,14 +163,4 @@ pub async fn run(
     }
 
     Ok(())
-}
-
-fn format_downloads(d: u64) -> String {
-    if d >= 1_000_000 {
-        format!("{:.1}M", d as f64 / 1_000_000.0)
-    } else if d >= 1_000 {
-        format!("{:.1}K", d as f64 / 1_000.0)
-    } else {
-        d.to_string()
-    }
 }

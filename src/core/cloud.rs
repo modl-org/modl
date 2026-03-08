@@ -100,13 +100,6 @@ impl Executor for CloudExecutor {
     fn events(&mut self, _job_id: &str) -> Result<mpsc::Receiver<JobEvent>> {
         bail!("Cloud executor: no active job to receive events from");
     }
-
-    fn cancel(&self, _job_id: &str) -> Result<()> {
-        bail!(
-            "Cloud executor: cancel not yet implemented for {}",
-            self.provider
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------

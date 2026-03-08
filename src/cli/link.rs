@@ -223,16 +223,16 @@ async fn link_tool(
             }
 
             // Record in DB
-            db.insert_installed(
-                &mf.manifest.id,
-                &mf.manifest.name,
-                &mf.manifest.asset_type.to_string(),
-                mf.variant_id.as_deref(),
-                &mf.hash,
-                mf.size,
+            db.insert_installed(&crate::core::db::InstalledModelRecord {
+                id: &mf.manifest.id,
+                name: &mf.manifest.name,
+                asset_type: &mf.manifest.asset_type.to_string(),
+                variant: mf.variant_id.as_deref(),
+                sha256: &mf.hash,
+                size: mf.size,
                 file_name,
-                &store_path.to_string_lossy(),
-            )?;
+                store_path: &store_path.to_string_lossy(),
+            })?;
         }
     }
 

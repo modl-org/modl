@@ -30,7 +30,7 @@ serde_yaml = "0.9"
 serde_json = "1"
 
 # HTTP + async
-reqwest = { version = "0.12", features = ["stream", "rustls-tls", "json"], default-features = false }
+reqwest = { version = "0.12", features = ["stream", "rustls-tls", "json", "blocking"], default-features = false }
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 
@@ -56,7 +56,7 @@ anyhow = "1"
 thiserror = "2"
 
 # Web UI (training preview)
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 tower-http = { version = "0.6", features = ["fs", "cors"] }
 open = "5"
 
@@ -64,6 +64,19 @@ open = "5"
 chrono = { version = "0.4", features = ["serde"] }
 shellexpand = "3"
 urlencoding = "2"
+
+# UUID generation (studio sessions)
+uuid = { version = "1", features = ["v4"] }
+
+# Unix process management (worker daemon)
+libc = "0.2"
+
+# LLM runtime (behind feature flag — heavy compile)
+llama-cpp-2 = { version = "0.1", optional = true }
+
+[features]
+default = []
+llm = ["llama-cpp-2"]
 
 [dev-dependencies]
 tempfile = "3"

@@ -9,6 +9,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
+  # Avoid a full npm build during CI check/test — build.rs will write stubs
+  MODL_SKIP_UI_BUILD: "1"
 
 jobs:
   check:

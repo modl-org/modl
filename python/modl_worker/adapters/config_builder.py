@@ -82,12 +82,14 @@ def build_sample_prompts(trigger_word: str, lora_type: str, arch_key: str) -> li
     the style is learned as the default output mode via literal captioning.
     For all other cases, the trigger word is embedded in the prompts.
     """
-    is_qwen_style = arch_key == "qwen_image" and lora_type == "style"
+    # For style LoRAs on models that learn style implicitly (Qwen, Z-Image Turbo),
+    # use literal prompts without trigger word — the LoRA IS the style.
+    # Per Ostris: "I'm not mentioning it's child drawing... I'm just acting like
+    # this is the new normal."
+    no_trigger_style = arch_key in ("qwen_image", "zimage_turbo") and lora_type == "style"
 
     if lora_type == "style":
-        if is_qwen_style:
-            # Qwen style: literal descriptive prompts, no trigger word.
-            # The model learns style through literal captions, not trigger words.
+        if no_trigger_style:
             return [
                 "a portrait of a woman",
                 "a cat sitting on a windowsill",
@@ -179,6 +181,14 @@ def build_train_block(arch_key: str, params: dict, lora_type: str, resume_step: 
     extra = arch.get("extra_train", {})
     train.update(extra)
 
+    # Z-Image Turbo style-specific settings (per Ostris):
+    # - Differential guidance (scale=3): overshoots training target to converge faster.
+    # - linear_timesteps2 (high-noise bias) is a two-phase technique — NOT from step 0.
+    #   TODO: support mid-training phase switching for advanced users.
+    if is_zimage and is_style:
+        train["do_differential_guidance"] = True
+        train["differential_guidance_scale"] = 3.0
+
     # Resume: tell ai-toolkit to start counting from the checkpoint step
     if resume_step is not None:
         train["start_step"] = resume_step
@@ -202,9 +212,15 @@ def build_sample_block(
     sample_cfg = arch["sample"]
     steps = params.get("steps", 2000)
 
+    # Z-Image Turbo style: sample 5 times during training
+    if arch_key == "zimage_turbo" and lora_type == "style":
+        default_every = max(steps // 5, 50)
+    else:
+        default_every = max(steps // 10, 50)
+
     return {
         "sampler": sample_cfg["sampler"],
-        "sample_every": sample_every_override or max(steps // 5, 50),
+        "sample_every": sample_every_override or default_every,
         "width": resolution,
         "height": resolution,
         "prompts": build_sample_prompts(
@@ -222,11 +238,15 @@ def build_sample_block(
 # Main spec → ai-toolkit config translator
 # ---------------------------------------------------------------------------
 
-def spec_to_aitoolkit_config(spec: dict) -> dict:
+def spec_to_aitoolkit_config(spec: dict, train_overrides: dict | None = None) -> dict:
     """Translate a TrainJobSpec (parsed from YAML) into ai-toolkit's config format.
 
     This is the single place to maintain the mapping between modl spec fields
     and ai-toolkit's expected YAML configuration.
+
+    ``train_overrides`` are merged into the ``train`` block after all other
+    settings — used by the multi-phase orchestrator to inject phase-specific
+    config (e.g. ``linear_timesteps2: true`` for high-noise phase).
     """
     params = spec.get("params", {})
     dataset = spec.get("dataset", {})
@@ -249,6 +269,23 @@ def spec_to_aitoolkit_config(spec: dict) -> dict:
     model_config = {"name_or_path": model_path}
     model_config.update(arch["model_flags"])
 
+    # Z-Image quantization: only quantize on <24GB VRAM (per Ostris)
+    # "if you have 24 gigs or more, set this to none. It'll be way faster."
+    # Without quantize: ~17GB VRAM, ~1.3s/iter vs ~4s/iter quantized
+    is_zimage = arch_key.startswith("zimage")
+    if is_zimage:
+        quantize = params.get("quantize", True)
+        if not quantize:
+            model_config.pop("quantize", None)
+            model_config.pop("quantize_te", None)
+            model_config.pop("low_vram", None)
+        else:
+            # quantize flag from Rust: True means "auto" (VRAM < 40GB in presets.rs)
+            # On 24GB+, skip quantization for speed
+            model_config["quantize"] = True
+            model_config["quantize_te"] = True
+            model_config["low_vram"] = True
+
     if arch_key == "qwen_image":
         _apply_qwen_model_config(model_config, lora_type)
 
@@ -259,10 +296,13 @@ def spec_to_aitoolkit_config(spec: dict) -> dict:
     # Network config
     rank = params.get("rank", 16)
     is_style = lora_type == "style"
+    # alpha = rank for z-image-turbo style (single-phase high denoise needs
+    # stronger signal); alpha = 1 (ai-toolkit default) for everything else.
+    alpha = rank if (arch_key == "zimage_turbo" and is_style) else 1
     network_config = {
         "type": "lora",
         "linear": rank,
-        "linear_alpha": rank,
+        "linear_alpha": alpha,
     }
 
     # Resume from checkpoint
@@ -307,16 +347,16 @@ def spec_to_aitoolkit_config(spec: dict) -> dict:
                     "type": "sd_trainer",
                     "training_folder": output.get("destination_dir", "output"),
                     "device": "cuda:0",
-                    "trigger_word": params.get("trigger_word", "OHWX"),
+                    "trigger_word": _resolve_trigger_word(params, arch_key, lora_type),
                     "network": network_config,
                     "save": {
                         "dtype": "float16",
                         "save_every": original_save_every or (
-                            max(params.get("steps", 2000) // 5, 500)
+                            max(params.get("steps", 2000) // 10, 500)
                             if is_style
                             else params.get("steps", 2000)
                         ),
-                        "max_step_saves_to_keep": 5 if is_style else 1,
+                        "max_step_saves_to_keep": 10 if is_style else 1,
                     },
                     "datasets": [
                         {
@@ -324,13 +364,10 @@ def spec_to_aitoolkit_config(spec: dict) -> dict:
                             "caption_ext": "txt",
                             "caption_dropout_rate": caption_dropout,
                             "shuffle_tokens": False,
-                            "cache_text_embeddings": arch_key == "qwen_image",
+                            "cache_text_embeddings": arch_key in ("qwen_image", "zimage_turbo"),
                             "resolution": dataset_resolution,
                             "cache_latents_to_disk": True,
-                            "default_caption": (
-                                "" if arch_key == "qwen_image"
-                                else params.get("trigger_word", "OHWX")
-                            ),
+                            "default_caption": _resolve_trigger_word(params, arch_key, lora_type),
                             "num_repeats": num_repeats,
                         }
                     ],
@@ -347,12 +384,30 @@ def spec_to_aitoolkit_config(spec: dict) -> dict:
     if params.get("seed") is not None:
         config["config"]["process"][0]["train"]["seed"] = params["seed"]
 
+    # Phase-specific overrides (from training strategy)
+    if train_overrides:
+        config["config"]["process"][0]["train"].update(train_overrides)
+
     return config
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _resolve_trigger_word(params: dict, arch_key: str, lora_type: str) -> str:
+    """Resolve trigger word, returning empty string for no-trigger style training.
+
+    For Z-Image Turbo and Qwen-Image style LoRAs, Ostris recommends no trigger
+    word — the style is learned implicitly from literal captions. ai-toolkit
+    treats empty/None trigger_word as "no trigger" and won't prepend anything.
+    """
+    tw = params.get("trigger_word", "OHWX")
+    no_trigger_style = arch_key in ("qwen_image", "zimage_turbo") and lora_type == "style"
+    if no_trigger_style and tw.upper() in ("NONE", ""):
+        return ""
+    return tw
+
 
 def _apply_qwen_model_config(model_config: dict, lora_type: str) -> None:
     """Apply Qwen-Image specific model config (quantization, logging)."""

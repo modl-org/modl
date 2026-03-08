@@ -172,16 +172,16 @@ pub async fn run(verify_hashes: bool, repair: bool) -> Result<()> {
                 (id, display_name, None)
             };
 
-            if let Err(e) = db.insert_installed(
-                &id,
-                &display_name,
+            if let Err(e) = db.insert_installed(&crate::core::db::InstalledModelRecord {
+                id: &id,
+                name: &display_name,
                 asset_type,
-                variant.as_deref(),
-                &sha256,
-                *size,
+                variant: variant.as_deref(),
+                sha256: &sha256,
+                size: *size,
                 file_name,
                 store_path,
-            ) {
+            }) {
                 println!(
                     "  {} Failed to register {}: {}",
                     style("✗").red(),

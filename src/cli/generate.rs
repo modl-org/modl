@@ -40,7 +40,7 @@ fn resolve_size(size: &str) -> Result<(u32, u32)> {
 }
 
 /// Resolve a LoRA name to its store path by looking in the DB.
-fn resolve_lora(name: &str, db: &Database) -> Result<Option<LoraRef>> {
+fn resolve_lora(name: &str, weight: f32, db: &Database) -> Result<Option<LoraRef>> {
     // Check if the name is a direct path to a .safetensors file
     let path = PathBuf::from(name);
     if path.exists() && path.extension().is_some_and(|e| e == "safetensors") {
@@ -51,18 +51,18 @@ fn resolve_lora(name: &str, db: &Database) -> Result<Option<LoraRef>> {
                 .to_string_lossy()
                 .to_string(),
             path: path.to_string_lossy().to_string(),
-            weight: 1.0,
+            weight,
         }));
     }
 
-    // Look up in installed models
+    // Look up in installed models (match by ID or display name)
     let installed = db.list_installed(None)?;
     for model in &installed {
-        if model.name == name && model.asset_type == "lora" {
+        if (model.name == name || model.id == name) && model.asset_type == "lora" {
             return Ok(Some(LoraRef {
                 name: model.name.clone(),
                 path: model.store_path.clone(),
-                weight: 1.0,
+                weight,
             }));
         }
     }
@@ -75,8 +75,14 @@ fn resolve_lora(name: &str, db: &Database) -> Result<Option<LoraRef>> {
 /// Default inference steps based on model type.
 fn default_steps(base_model: &str) -> u32 {
     let lower = base_model.to_lowercase();
-    if lower.contains("schnell") || lower.contains("turbo") || lower.contains("lightning") {
+    if lower.contains("z-image-turbo") || lower.contains("z_image_turbo") {
+        8
+    } else if lower.contains("schnell") || lower.contains("turbo") || lower.contains("lightning") {
         4
+    } else if lower.contains("chroma") {
+        25
+    } else if lower.contains("sdxl") {
+        30
     } else {
         28
     }
@@ -85,18 +91,24 @@ fn default_steps(base_model: &str) -> u32 {
 /// Default guidance scale based on model type.
 fn default_guidance(base_model: &str) -> f32 {
     let lower = base_model.to_lowercase();
-    if lower.contains("schnell") || lower.contains("turbo") || lower.contains("lightning") {
+    if lower.contains("z-image-turbo") || lower.contains("z_image_turbo") {
+        1.0
+    } else if lower.contains("schnell") || lower.contains("turbo") || lower.contains("lightning") {
         0.0
+    } else if lower.contains("chroma") {
+        4.0
+    } else if lower.contains("sdxl") {
+        7.5
     } else {
         3.5
     }
 }
 
-/// Resolve base model path from installed models.
+/// Resolve base model path from installed models (match by ID or display name).
 fn resolve_base_model_path(base_model: &str, db: &Database) -> Option<String> {
     let installed = db.list_installed(None).ok()?;
     for model in &installed {
-        if model.name == base_model
+        if (model.name == base_model || model.id == base_model)
             && (model.asset_type == "checkpoint" || model.asset_type == "diffusion_model")
         {
             return Some(model.store_path.clone());
@@ -105,20 +117,48 @@ fn resolve_base_model_path(base_model: &str, db: &Database) -> Option<String> {
     None
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn run(
-    prompt: &str,
-    base: Option<&str>,
-    lora: Option<&str>,
-    seed: Option<u64>,
-    size: &str,
-    steps: Option<u32>,
-    guidance: Option<f32>,
-    count: u32,
-    cloud: bool,
-    provider: Option<CloudProvider>,
-) -> Result<()> {
+/// All arguments for `modl generate`, used by both CLI and web UI.
+pub struct GenerateArgs<'a> {
+    pub prompt: &'a str,
+    pub base: Option<&'a str>,
+    pub lora: Option<&'a str>,
+    pub lora_strength: f32,
+    pub seed: Option<u64>,
+    pub size: &'a str,
+    pub steps: Option<u32>,
+    pub guidance: Option<f32>,
+    pub count: u32,
+    pub init_image: Option<&'a str>,
+    pub mask: Option<&'a str>,
+    pub strength: Option<f32>,
+    pub cloud: bool,
+    pub provider: Option<CloudProvider>,
+    pub no_worker: bool,
+    pub json: bool,
+}
+
+pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
     let db = Database::open()?;
+
+    // Destructure for convenience
+    let GenerateArgs {
+        prompt,
+        base,
+        lora,
+        lora_strength,
+        seed,
+        size,
+        steps,
+        guidance,
+        count,
+        init_image,
+        mask,
+        strength,
+        cloud,
+        provider,
+        no_worker,
+        json,
+    } = args;
 
     // -------------------------------------------------------------------
     // Resolve base model
@@ -143,9 +183,28 @@ pub async fn run(
     // Resolve LoRA
     // -------------------------------------------------------------------
     let lora_ref = match lora {
-        Some(name) => Some(resolve_lora(name, &db)?.context("LoRA resolution returned None")?),
+        Some(name) => {
+            Some(resolve_lora(name, lora_strength, &db)?.context("LoRA resolution returned None")?)
+        }
         None => None,
     };
+
+    // -------------------------------------------------------------------
+    // Validate img2img / inpainting paths
+    // -------------------------------------------------------------------
+    if let Some(path) = init_image
+        && !PathBuf::from(path).exists()
+    {
+        anyhow::bail!("Init image not found: {path}");
+    }
+    if let Some(path) = mask {
+        if init_image.is_none() {
+            anyhow::bail!("--mask requires --init-image");
+        }
+        if !PathBuf::from(path).exists() {
+            anyhow::bail!("Mask image not found: {path}");
+        }
+    }
 
     // -------------------------------------------------------------------
     // Build output directory: ~/.modl/outputs/<date>/
@@ -181,6 +240,9 @@ pub async fn run(
             guidance,
             seed,
             count,
+            init_image: init_image.map(|s| s.to_string()),
+            mask: mask.map(|s| s.to_string()),
+            strength,
         },
         runtime: RuntimeRef {
             profile: "trainer-cu124".to_string(),
@@ -197,31 +259,53 @@ pub async fn run(
     // -------------------------------------------------------------------
     // Print summary
     // -------------------------------------------------------------------
-    println!("{} Generating image(s)...", style("→").cyan());
-    println!("  Prompt: {}", style(prompt).italic());
-    println!("  Model:  {}", base_model);
-    if let Some(ref lr) = lora_ref {
-        println!("  LoRA:   {}", lr.name);
-    }
-    println!("  Size:   {}×{}", width, height);
-    println!("  Steps:  {}", steps);
-    if let Some(s) = seed {
-        println!("  Seed:   {}", s);
-    }
-    if count > 1 {
-        println!("  Count:  {}", count);
+    if !json {
+        let mode_label = if mask.is_some() {
+            "inpainting"
+        } else if init_image.is_some() {
+            "img2img"
+        } else {
+            "txt2img"
+        };
+        println!(
+            "{} Generating image(s) [{}]...",
+            style("→").cyan(),
+            mode_label
+        );
+        println!("  Prompt: {}", style(prompt).italic());
+        println!("  Model:  {}", base_model);
+        if let Some(ref lr) = lora_ref {
+            println!("  LoRA:   {} (strength: {:.2})", lr.name, lr.weight);
+        }
+        if let Some(path) = init_image {
+            println!("  Init:   {}", path);
+            println!("  Strength: {:.2}", strength.unwrap_or(0.75));
+        }
+        if let Some(path) = mask {
+            println!("  Mask:   {}", path);
+        }
+        println!("  Size:   {}×{}", width, height);
+        println!("  Steps:  {}", steps);
+        if let Some(s) = seed {
+            println!("  Seed:   {}", s);
+        }
+        if count > 1 {
+            println!("  Count:  {}", count);
+        }
     }
 
     // -------------------------------------------------------------------
     // Execute
     // -------------------------------------------------------------------
-    execute_generate(spec, cloud, provider).await
+    execute_generate(spec, cloud, provider, no_worker, json).await
 }
 
 async fn execute_generate(
     spec: GenerateJobSpec,
     cloud: bool,
     provider: Option<CloudProvider>,
+    no_worker: bool,
+    json: bool,
 ) -> Result<()> {
     let db = Database::open()?;
     let spec_json = serde_json::to_string(&spec)?;
@@ -232,15 +316,23 @@ async fn execute_generate(
     // -------------------------------------------------------------------
     let mut executor: Box<dyn Executor> = if cloud {
         let cloud_provider = resolve_cloud_provider(provider);
-        println!(
-            "{} Preparing cloud generation via {}...",
-            style("→").cyan(),
-            style(cloud_provider.to_string()).bold()
-        );
+        if !json {
+            println!(
+                "{} Preparing cloud generation via {}...",
+                style("→").cyan(),
+                style(cloud_provider.to_string()).bold()
+            );
+        }
         Box::new(CloudExecutor::new(cloud_provider)?)
     } else {
-        println!("{} Preparing runtime...", style("→").cyan());
-        Box::new(LocalExecutor::from_runtime_setup().await?)
+        if !json {
+            println!("{} Preparing runtime...", style("→").cyan());
+        }
+        let mut executor = LocalExecutor::from_runtime_setup().await?;
+        if no_worker {
+            executor.use_worker = false;
+        }
+        Box::new(executor)
     };
 
     // -------------------------------------------------------------------
@@ -264,15 +356,26 @@ async fn execute_generate(
     let rx = executor.events(job_id)?;
     db.update_job_status(job_id, "running")?;
 
-    let pb = ProgressBar::new(spec.params.count as u64);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} images {msg}",
-        )?
-        .progress_chars("█▓░"),
-    );
+    let pb = if json {
+        ProgressBar::hidden()
+    } else {
+        let pb = ProgressBar::new(spec.params.count as u64);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} images {msg}",
+            )?
+            .progress_chars("█▓░"),
+        );
+        pb
+    };
 
-    let mut artifact_paths: Vec<String> = Vec::new();
+    struct GeneratedArtifact {
+        path: String,
+        sha256: Option<String>,
+        size_bytes: Option<u64>,
+    }
+
+    let mut artifacts: Vec<GeneratedArtifact> = Vec::new();
     let mut final_status = "completed";
 
     for event in rx {
@@ -283,8 +386,16 @@ async fn execute_generate(
                 pb.set_length(*total_steps as u64);
                 pb.set_position(*step as u64);
             }
-            EventPayload::Artifact { path, .. } => {
-                artifact_paths.push(path.clone());
+            EventPayload::Artifact {
+                path,
+                sha256,
+                size_bytes,
+            } => {
+                artifacts.push(GeneratedArtifact {
+                    path: path.clone(),
+                    sha256: sha256.clone(),
+                    size_bytes: *size_bytes,
+                });
             }
             EventPayload::Completed { message } => {
                 pb.finish_with_message(message.as_deref().unwrap_or("done").to_string());
@@ -310,7 +421,7 @@ async fn execute_generate(
                 final_status = "cancelled";
                 break;
             }
-            EventPayload::Heartbeat => {}
+            EventPayload::Heartbeat | EventPayload::Result { .. } => {}
         }
 
         // Persist event
@@ -326,35 +437,78 @@ async fn execute_generate(
     // -------------------------------------------------------------------
     // 5. Print results
     // -------------------------------------------------------------------
-    if final_status == "completed" && !artifact_paths.is_empty() {
-        println!();
-        println!(
-            "{} Generated {} image(s):",
-            style("✓").green().bold(),
-            artifact_paths.len()
-        );
-        for path in &artifact_paths {
-            println!("  {}", path);
-        }
-
+    if final_status == "completed" && !artifacts.is_empty() {
         // Register artifacts in DB
-        for (i, path) in artifact_paths.iter().enumerate() {
+        for (i, artifact) in artifacts.iter().enumerate() {
             let artifact_id = format!("{}-img-{}", job_id, i);
+            let image_seed = spec.params.seed.map(|s| s + i as u64);
+            let metadata = serde_json::json!({
+                "generated_with": "modl.run",
+                "prompt": spec.prompt,
+                "base_model_id": spec.model.base_model_id,
+                "lora_name": spec.lora.as_ref().map(|l| l.name.clone()),
+                "lora_strength": spec.lora.as_ref().map(|l| l.weight),
+                "width": spec.params.width,
+                "height": spec.params.height,
+                "steps": spec.params.steps,
+                "guidance": spec.params.guidance,
+                "seed": image_seed,
+                "image_index": i,
+                "count": spec.params.count,
+            });
+            let metadata_str = metadata.to_string();
             let _ = db.insert_artifact(
                 &artifact_id,
                 Some(job_id),
                 "image",
-                path,
-                "", // sha256 – not computed yet
-                0,  // size_bytes – not computed yet
-                None,
+                &artifact.path,
+                artifact.sha256.as_deref().unwrap_or(""),
+                artifact.size_bytes.unwrap_or(0),
+                Some(&metadata_str),
             );
         }
-    } else if artifact_paths.is_empty() && final_status == "completed" {
+
+        let artifact_paths: Vec<String> = artifacts.iter().map(|a| a.path.clone()).collect();
+        if json {
+            let output = serde_json::json!({
+                "status": "completed",
+                "job_id": job_id,
+                "images": artifact_paths,
+            });
+            println!("{}", serde_json::to_string(&output)?);
+        } else {
+            println!();
+            println!(
+                "{} Generated {} image(s):",
+                style("✓").green().bold(),
+                artifact_paths.len()
+            );
+            for path in &artifact_paths {
+                println!("  {}", path);
+            }
+        }
+    } else if artifacts.is_empty() && final_status == "completed" {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({"status": "completed", "images": []})
+            );
+        } else {
+            println!(
+                "\n{} Generation completed but no images were produced.",
+                style("⚠").yellow()
+            );
+        }
+    } else if json {
+        let artifact_paths: Vec<String> = artifacts.iter().map(|a| a.path.clone()).collect();
         println!(
-            "\n{} Generation completed but no images were produced.",
-            style("⚠").yellow()
+            "{}",
+            serde_json::json!({"status": final_status, "images": artifact_paths})
         );
+    }
+
+    if final_status == "error" {
+        anyhow::bail!("Generation failed");
     }
 
     Ok(())

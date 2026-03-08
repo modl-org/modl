@@ -40,7 +40,7 @@ fn invalid_subcommand_fails() {
 #[test]
 fn model_ls_rejects_invalid_type() {
     modl_cmd()
-        .args(["model", "ls", "--type", "banana"])
+        .args(["ls", "--type", "banana"])
         .assert()
         .failure()
         .stderr(contains("possible values"));
@@ -48,7 +48,7 @@ fn model_ls_rejects_invalid_type() {
 
 #[test]
 fn model_ls_accepts_valid_type() {
-    let result = modl_cmd().args(["model", "ls", "--type", "lora"]).assert();
+    let result = modl_cmd().args(["ls", "--type", "lora"]).assert();
 
     // We just verify it doesn't fail with a clap error
     let output = result.get_output();
@@ -62,7 +62,7 @@ fn model_ls_accepts_valid_type() {
 #[test]
 fn model_search_rejects_invalid_type() {
     modl_cmd()
-        .args(["model", "search", "flux", "--type", "nope"])
+        .args(["search", "flux", "--type", "nope"])
         .assert()
         .failure()
         .stderr(contains("possible values"));

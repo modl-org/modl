@@ -74,6 +74,9 @@ class EventEmitter:
             event["size_bytes"] = size_bytes
         self.emit(event)
 
+    def result(self, result_type: str, data: Dict[str, Any]) -> None:
+        self.emit({"type": "result", "result_type": result_type, "data": data})
+
     def completed(self, message: str = "Training completed") -> None:
         self.emit({"type": "completed", "message": message})
 

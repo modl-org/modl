@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -36,18 +35,6 @@ impl RegistryIndex {
         Ok(index)
     }
 
-    /// Save index to local cache
-    #[allow(dead_code)]
-    pub fn save(&self) -> Result<()> {
-        let path = Self::local_path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, json)?;
-        Ok(())
-    }
-
     pub fn local_path() -> PathBuf {
         dirs::home_dir()
             .expect("Could not determine home directory")
@@ -74,12 +61,6 @@ impl RegistryIndex {
                         .is_some_and(|d| d.to_lowercase().contains(&q))
             })
             .collect()
-    }
-
-    /// Build a lookup map by ID for faster access
-    #[allow(dead_code)]
-    pub fn as_map(&self) -> HashMap<&str, &Manifest> {
-        self.items.iter().map(|m| (m.id.as_str(), m)).collect()
     }
 
     /// The URL to fetch the latest index from.

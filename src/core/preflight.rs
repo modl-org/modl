@@ -76,10 +76,59 @@ pub fn check_auth_if_gated(base_model_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Check that all required dependencies (text encoders, VAEs, etc.) are installed.
+///
+/// Looks up the model in the registry index and verifies each `requires`
+/// entry is present in the installed models DB.
+pub fn check_dependencies(base_model_id: &str) -> Result<()> {
+    // Skip for filesystem paths
+    if base_model_id.contains('/') || base_model_id.contains('.') {
+        return Ok(());
+    }
+
+    let index = match crate::core::registry::RegistryIndex::load() {
+        Ok(idx) => idx,
+        Err(_) => return Ok(()), // No registry index — skip check
+    };
+
+    let manifest = match index.find(base_model_id) {
+        Some(m) => m,
+        None => return Ok(()), // Not in registry — skip check
+    };
+
+    if manifest.requires.is_empty() {
+        return Ok(());
+    }
+
+    let db = Database::open()?;
+    let mut missing = Vec::new();
+
+    for dep in &manifest.requires {
+        if !db.is_installed(&dep.id)? {
+            let reason = dep.reason.as_deref().unwrap_or("");
+            missing.push(format!("  - {} ({}): {}", dep.id, dep.dep_type, reason));
+        }
+    }
+
+    if !missing.is_empty() {
+        bail!(
+            "Model '{}' requires components that are not installed:\n\n{}\n\n\
+             Pull the base model to install all dependencies:\n\n  \
+             modl pull {}",
+            base_model_id,
+            missing.join("\n"),
+            base_model_id
+        );
+    }
+
+    Ok(())
+}
+
 /// Run all pre-flight checks for training.
 pub fn for_training(base_model_id: &str) -> Result<()> {
     check_runtime()?;
     check_base_model(base_model_id)?;
+    check_dependencies(base_model_id)?;
     check_auth_if_gated(base_model_id)?;
     Ok(())
 }
@@ -91,6 +140,7 @@ pub fn for_training(base_model_id: &str) -> Result<()> {
 pub fn for_generation(base_model_id: &str) -> Result<()> {
     check_runtime()?;
     check_base_model(base_model_id)?;
+    check_dependencies(base_model_id)?;
     check_auth_if_gated(base_model_id)?;
     Ok(())
 }

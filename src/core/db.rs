@@ -95,6 +95,32 @@ impl Database {
                 metadata    TEXT,
                 created_at  TEXT NOT NULL DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS favorites (
+                path       TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS studio_sessions (
+                id           TEXT PRIMARY KEY,
+                intent       TEXT NOT NULL,
+                status       TEXT NOT NULL DEFAULT 'pending',
+                created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+                completed_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS session_events (
+                session_id TEXT NOT NULL REFERENCES studio_sessions(id),
+                sequence   INTEGER NOT NULL,
+                event_json TEXT NOT NULL,
+                timestamp  TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS session_images (
+                session_id TEXT NOT NULL REFERENCES studio_sessions(id),
+                image_path TEXT NOT NULL,
+                role       TEXT NOT NULL
+            );
             ",
             )
             .context("Failed to run database migrations")?;
@@ -102,23 +128,21 @@ impl Database {
     }
 
     /// Record a model as installed
-    #[allow(clippy::too_many_arguments)]
-    pub fn insert_installed(
-        &self,
-        id: &str,
-        name: &str,
-        asset_type: &str,
-        variant: Option<&str>,
-        sha256: &str,
-        size: u64,
-        file_name: &str,
-        store_path: &str,
-    ) -> Result<()> {
+    pub fn insert_installed(&self, record: &InstalledModelRecord) -> Result<()> {
         self.conn
             .execute(
                 "INSERT OR REPLACE INTO installed (id, name, asset_type, variant, sha256, size, file_name, store_path)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![id, name, asset_type, variant, sha256, size as i64, file_name, store_path],
+                params![
+                    record.id,
+                    record.name,
+                    record.asset_type,
+                    record.variant,
+                    record.sha256,
+                    record.size as i64,
+                    record.file_name,
+                    record.store_path
+                ],
             )
             .context("Failed to insert installed model")?;
         Ok(())
@@ -343,6 +367,25 @@ impl Database {
             .context("Failed to collect job results")
     }
 
+    /// Update status for all jobs matching a lora name where current status matches.
+    pub fn update_job_status_by_lora_name(
+        &self,
+        lora_name: &str,
+        from_status: &str,
+        to_status: &str,
+    ) -> Result<usize> {
+        let pattern = format!("job-{lora_name}-%");
+        let now = chrono::Utc::now().to_rfc3339();
+        let updated = self
+            .conn
+            .execute(
+                "UPDATE jobs SET status = ?1, completed_at = ?2 WHERE job_id LIKE ?3 AND status = ?4",
+                params![to_status, now, pattern, from_status],
+            )
+            .context("Failed to update job status by lora name")?;
+        Ok(updated)
+    }
+
     /// Delete all jobs and their events for a given LoRA name
     pub fn delete_jobs_by_lora_name(&self, lora_name: &str) -> Result<()> {
         let pattern = format!("job-{lora_name}-%");
@@ -445,8 +488,28 @@ impl Database {
         }
     }
 
+    /// Get an artifact by exact artifact_id (no fuzzy matching).
+    pub fn get_artifact_exact(&self, artifact_id: &str) -> Result<Option<ArtifactRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT artifact_id, job_id, kind, path, sha256, size_bytes, metadata, created_at
+                 FROM artifacts WHERE artifact_id = ?1",
+            )
+            .context("Failed to prepare query")?;
+
+        let mut rows = stmt
+            .query_map(params![artifact_id], ArtifactRecord::from_row)
+            .context("Failed to query artifact")?;
+
+        match rows.next() {
+            Some(Ok(record)) => Ok(Some(record)),
+            Some(Err(e)) => Err(e.into()),
+            None => Ok(None),
+        }
+    }
+
     /// List artifacts, optionally filtered by job_id
-    #[allow(dead_code)]
     pub fn list_artifacts(&self, job_id: Option<&str>) -> Result<Vec<ArtifactRecord>> {
         let sql = if job_id.is_some() {
             "SELECT artifact_id, job_id, kind, path, sha256, size_bytes, metadata, created_at FROM artifacts WHERE job_id = ?1 ORDER BY created_at DESC"
@@ -477,6 +540,257 @@ impl Database {
             )
             .context("Failed to delete artifact")?;
         Ok(())
+    }
+
+    /// Delete artifact records by file path. Returns number of deleted rows.
+    pub fn delete_artifacts_by_path(&self, path: &str) -> Result<usize> {
+        let deleted = self
+            .conn
+            .execute("DELETE FROM artifacts WHERE path = ?1", params![path])
+            .context("Failed to delete artifacts by path")?;
+        Ok(deleted)
+    }
+
+    /// Toggle the favorite state for an output path.
+    /// Returns `true` if the image is now favorited, `false` if it was unfavorited.
+    pub fn toggle_favorite(&self, path: &str) -> Result<bool> {
+        let exists: bool = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM favorites WHERE path = ?1",
+                params![path],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if exists {
+            self.conn
+                .execute("DELETE FROM favorites WHERE path = ?1", params![path])
+                .context("Failed to remove favorite")?;
+            Ok(false)
+        } else {
+            self.conn
+                .execute("INSERT INTO favorites (path) VALUES (?1)", params![path])
+                .context("Failed to insert favorite")?;
+            Ok(true)
+        }
+    }
+
+    /// Explicitly set the favorite state for an output path.
+    /// Returns `true` if the state changed.
+    pub fn set_favorite(&self, path: &str, favorited: bool) -> Result<bool> {
+        let exists: bool = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM favorites WHERE path = ?1",
+                params![path],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if favorited && !exists {
+            self.conn
+                .execute("INSERT INTO favorites (path) VALUES (?1)", params![path])
+                .context("Failed to insert favorite")?;
+            Ok(true)
+        } else if !favorited && exists {
+            self.conn
+                .execute("DELETE FROM favorites WHERE path = ?1", params![path])
+                .context("Failed to remove favorite")?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Check whether a specific path is favorited.
+    pub fn is_favorite(&self, path: &str) -> Result<bool> {
+        let exists: bool = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM favorites WHERE path = ?1",
+                params![path],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        Ok(exists)
+    }
+
+    // -----------------------------------------------------------------------
+    // Studio Sessions
+    // -----------------------------------------------------------------------
+
+    /// Create a new studio session.
+    pub fn create_studio_session(&self, id: &str, intent: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO studio_sessions (id, intent, status) VALUES (?1, ?2, 'pending')",
+                params![id, intent],
+            )
+            .context("Failed to create studio session")?;
+        Ok(())
+    }
+
+    /// Update studio session status.
+    pub fn update_studio_session_status(&self, id: &str, status: &str) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        if status == "completed" || status == "failed" {
+            self.conn
+                .execute(
+                    "UPDATE studio_sessions SET status = ?1, completed_at = ?2 WHERE id = ?3",
+                    params![status, now, id],
+                )
+                .context("Failed to update studio session")?;
+        } else {
+            self.conn
+                .execute(
+                    "UPDATE studio_sessions SET status = ?1 WHERE id = ?2",
+                    params![status, id],
+                )
+                .context("Failed to update studio session")?;
+        }
+        Ok(())
+    }
+
+    /// Get a studio session by ID.
+    pub fn get_studio_session(&self, id: &str) -> Result<Option<StudioSessionRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, intent, status, created_at, completed_at FROM studio_sessions WHERE id = ?1",
+        ).context("Failed to prepare query")?;
+
+        let mut rows = stmt
+            .query_map(params![id], StudioSessionRecord::from_row)
+            .context("Failed to query studio session")?;
+
+        match rows.next() {
+            Some(Ok(record)) => Ok(Some(record)),
+            Some(Err(e)) => Err(e.into()),
+            None => Ok(None),
+        }
+    }
+
+    /// List all studio sessions, newest first.
+    pub fn list_studio_sessions(&self) -> Result<Vec<StudioSessionRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, intent, status, created_at, completed_at FROM studio_sessions ORDER BY created_at DESC",
+        ).context("Failed to prepare query")?;
+
+        let rows = stmt
+            .query_map([], StudioSessionRecord::from_row)
+            .context("Failed to query studio sessions")?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("Failed to collect studio sessions")
+    }
+
+    /// Delete a studio session and its events/images.
+    pub fn delete_studio_session(&self, id: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM session_events WHERE session_id = ?1",
+                params![id],
+            )
+            .context("Failed to delete session events")?;
+        self.conn
+            .execute(
+                "DELETE FROM session_images WHERE session_id = ?1",
+                params![id],
+            )
+            .context("Failed to delete session images")?;
+        self.conn
+            .execute("DELETE FROM studio_sessions WHERE id = ?1", params![id])
+            .context("Failed to delete studio session")?;
+        Ok(())
+    }
+
+    /// Insert a session event.
+    pub fn insert_session_event(
+        &self,
+        session_id: &str,
+        sequence: u32,
+        event_json: &str,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO session_events (session_id, sequence, event_json) VALUES (?1, ?2, ?3)",
+                params![session_id, sequence, event_json],
+            )
+            .context("Failed to insert session event")?;
+        Ok(())
+    }
+
+    /// Get all events for a session, ordered by sequence.
+    pub fn get_session_events(&self, session_id: &str) -> Result<Vec<SessionEventRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, sequence, event_json, timestamp FROM session_events WHERE session_id = ?1 ORDER BY sequence",
+        ).context("Failed to prepare query")?;
+
+        let rows = stmt
+            .query_map(params![session_id], |row| {
+                Ok(SessionEventRecord {
+                    session_id: row.get(0)?,
+                    sequence: row.get(1)?,
+                    event_json: row.get(2)?,
+                    timestamp: row.get(3)?,
+                })
+            })
+            .context("Failed to query session events")?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("Failed to collect session events")
+    }
+
+    /// Insert a session image reference.
+    pub fn insert_session_image(
+        &self,
+        session_id: &str,
+        image_path: &str,
+        role: &str,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO session_images (session_id, image_path, role) VALUES (?1, ?2, ?3)",
+                params![session_id, image_path, role],
+            )
+            .context("Failed to insert session image")?;
+        Ok(())
+    }
+
+    /// Get all images for a session, optionally filtered by role.
+    pub fn get_session_images(&self, session_id: &str, role: Option<&str>) -> Result<Vec<String>> {
+        let (sql, p): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(r) = role {
+            (
+                "SELECT image_path FROM session_images WHERE session_id = ?1 AND role = ?2",
+                vec![Box::new(session_id.to_string()), Box::new(r.to_string())],
+            )
+        } else {
+            (
+                "SELECT image_path FROM session_images WHERE session_id = ?1",
+                vec![Box::new(session_id.to_string())],
+            )
+        };
+
+        let mut stmt = self.conn.prepare(sql).context("Failed to prepare query")?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(p.iter()), |row| {
+                row.get::<_, String>(0)
+            })
+            .context("Failed to query session images")?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("Failed to collect session images")
+    }
+
+    /// Return all favorited output paths as a set.
+    pub fn get_favorite_paths(&self) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM favorites")
+            .context("Failed to prepare favorites query")?;
+        let paths = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .context("Failed to query favorites")?
+            .collect::<std::result::Result<std::collections::HashSet<_>, _>>()
+            .context("Failed to collect favorites")?;
+        Ok(paths)
     }
 }
 
@@ -515,7 +829,6 @@ impl JobRecord {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct ArtifactRecord {
     pub artifact_id: String,
     pub job_id: Option<String>,
@@ -543,6 +856,48 @@ impl ArtifactRecord {
 }
 
 #[derive(Debug)]
+pub struct StudioSessionRecord {
+    pub id: String,
+    pub intent: String,
+    pub status: String,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+}
+
+impl StudioSessionRecord {
+    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get(0)?,
+            intent: row.get(1)?,
+            status: row.get(2)?,
+            created_at: row.get(3)?,
+            completed_at: row.get(4)?,
+        })
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct SessionEventRecord {
+    pub session_id: String,
+    pub sequence: u32,
+    pub event_json: String,
+    pub timestamp: String,
+}
+
+/// Input record for inserting an installed model
+pub struct InstalledModelRecord<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub asset_type: &'a str,
+    pub variant: Option<&'a str>,
+    pub sha256: &'a str,
+    pub size: u64,
+    pub file_name: &'a str,
+    pub store_path: &'a str,
+}
+
+#[derive(Debug)]
 pub struct InstalledModel {
     pub id: String,
     pub name: String,
@@ -563,16 +918,16 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let db = Database::open_at(tmp.path()).unwrap();
 
-        db.insert_installed(
-            "test-model",
-            "Test Model",
-            "checkpoint",
-            Some("fp16"),
-            "abcdef1234567890",
-            1024,
-            "test.safetensors",
-            "/store/checkpoints/abcdef/test.safetensors",
-        )
+        db.insert_installed(&InstalledModelRecord {
+            id: "test-model",
+            name: "Test Model",
+            asset_type: "checkpoint",
+            variant: Some("fp16"),
+            sha256: "abcdef1234567890",
+            size: 1024,
+            file_name: "test.safetensors",
+            store_path: "/store/checkpoints/abcdef/test.safetensors",
+        })
         .unwrap();
 
         assert!(db.is_installed("test-model").unwrap());

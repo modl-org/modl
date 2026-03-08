@@ -8,8 +8,8 @@ use crate::core::symlink;
 
 /// Collected LoRA artifact info
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct CollectedLora {
+    #[allow(dead_code)]
     pub artifact_id: String,
     pub store_path: PathBuf,
     pub sha256: String,
@@ -67,16 +67,17 @@ pub fn collect_lora(
 
     // 3. Register in installed table
     let artifact_id = format!("train:{lora_name}:{}", &sha256[..16]);
-    db.insert_installed(
-        &artifact_id,
-        lora_name,
-        "lora",
-        None,
-        &sha256,
-        size_bytes,
+    let store_path_str = store_path.to_string_lossy();
+    db.insert_installed(&crate::core::db::InstalledModelRecord {
+        id: &artifact_id,
+        name: lora_name,
+        asset_type: "lora",
+        variant: None,
+        sha256: &sha256,
+        size: size_bytes,
         file_name,
-        &store_path.to_string_lossy(),
-    )
+        store_path: &store_path_str,
+    })
     .context("Failed to register LoRA in installed table")?;
 
     // 4. Register in artifacts table

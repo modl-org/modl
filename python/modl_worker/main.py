@@ -3,7 +3,11 @@ import os
 import sys
 from pathlib import Path
 
-from modl_worker.adapters import run_train, run_generate, run_caption, run_resize, run_tag
+from modl_worker.adapters import (
+    run_train, run_generate, run_caption, run_resize, run_tag,
+    run_score, run_detect, run_compare,
+    run_segment, run_face_restore, run_upscale, run_remove_bg,
+)
 from modl_worker.protocol import EventEmitter, fatal
 
 
@@ -30,6 +34,38 @@ def _build_parser() -> argparse.ArgumentParser:
     tg = sub.add_parser("tag", help="Run auto-tagging adapter")
     tg.add_argument("--config", required=True, help="Path to tag spec yaml")
     tg.add_argument("--job-id", default="", help="Job ID for event envelope")
+
+    sc = sub.add_parser("score", help="Run aesthetic scoring adapter")
+    sc.add_argument("--config", required=True, help="Path to score spec yaml")
+    sc.add_argument("--job-id", default="", help="Job ID for event envelope")
+
+    det = sub.add_parser("detect", help="Run face detection adapter")
+    det.add_argument("--config", required=True, help="Path to detect spec yaml")
+    det.add_argument("--job-id", default="", help="Job ID for event envelope")
+
+    cmp = sub.add_parser("compare", help="Run image comparison adapter")
+    cmp.add_argument("--config", required=True, help="Path to compare spec yaml")
+    cmp.add_argument("--job-id", default="", help="Job ID for event envelope")
+
+    seg = sub.add_parser("segment", help="Run image segmentation adapter")
+    seg.add_argument("--config", required=True, help="Path to segment spec yaml")
+    seg.add_argument("--job-id", default="", help="Job ID for event envelope")
+
+    fr = sub.add_parser("face-restore", help="Run face restoration adapter")
+    fr.add_argument("--config", required=True, help="Path to face restore spec yaml")
+    fr.add_argument("--job-id", default="", help="Job ID for event envelope")
+
+    ups = sub.add_parser("upscale", help="Run image upscaling adapter")
+    ups.add_argument("--config", required=True, help="Path to upscale spec yaml")
+    ups.add_argument("--job-id", default="", help="Job ID for event envelope")
+
+    rbg = sub.add_parser("remove-bg", help="Run background removal adapter")
+    rbg.add_argument("--config", required=True, help="Path to remove-bg spec yaml")
+    rbg.add_argument("--job-id", default="", help="Job ID for event envelope")
+
+    srv = sub.add_parser("serve", help="Start persistent worker daemon")
+    srv.add_argument("--timeout", type=int, default=600, help="Idle timeout in seconds (default: 600)")
+    srv.add_argument("--max-models", type=int, default=2, help="Max models to cache in VRAM (default: 2)")
 
     return parser
 
@@ -65,6 +101,45 @@ def main() -> int:
         config_path = Path(args.config)
         emitter.job_accepted(worker_pid=os.getpid())
         return run_tag(config_path, emitter)
+
+    if args.command == "score":
+        config_path = Path(args.config)
+        emitter.job_accepted(worker_pid=os.getpid())
+        return run_score(config_path, emitter)
+
+    if args.command == "detect":
+        config_path = Path(args.config)
+        emitter.job_accepted(worker_pid=os.getpid())
+        return run_detect(config_path, emitter)
+
+    if args.command == "compare":
+        config_path = Path(args.config)
+        emitter.job_accepted(worker_pid=os.getpid())
+        return run_compare(config_path, emitter)
+
+    if args.command == "segment":
+        config_path = Path(args.config)
+        emitter.job_accepted(worker_pid=os.getpid())
+        return run_segment(config_path, emitter)
+
+    if args.command == "face-restore":
+        config_path = Path(args.config)
+        emitter.job_accepted(worker_pid=os.getpid())
+        return run_face_restore(config_path, emitter)
+
+    if args.command == "upscale":
+        config_path = Path(args.config)
+        emitter.job_accepted(worker_pid=os.getpid())
+        return run_upscale(config_path, emitter)
+
+    if args.command == "remove-bg":
+        config_path = Path(args.config)
+        emitter.job_accepted(worker_pid=os.getpid())
+        return run_remove_bg(config_path, emitter)
+
+    if args.command == "serve":
+        from modl_worker.serve import run_serve
+        return run_serve(timeout=args.timeout, max_models=args.max_models)
 
     fatal(f"Unsupported command: {args.command}")
     return 1
