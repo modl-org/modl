@@ -121,14 +121,12 @@ class ModelCache:
         but LoRA changed). Supports mode switching (txt2img -> img2img ->
         inpaint) via from_pipe(), caching each mode variant.
         """
-        import torch
         from modl_worker.adapters.gen_adapter import (
             _resolve_pipeline_class,
             _get_pipeline,
-            _hf_id_for_model,
+            load_pipeline,
         )
         from modl_worker.adapters.arch_config import (
-            resolve_gen_components,
             resolve_pipeline_class_for_mode,
         )
 
@@ -179,34 +177,7 @@ class ModelCache:
             # Load fresh pipeline (always load txt2img base first)
             emitter.info(f"Model cache MISS: loading {base_model_id}...")
             cls_name = _resolve_pipeline_class(base_model_id)
-            PipelineClass = _get_pipeline(cls_name)
-
-            model_source = base_model_path or _hf_id_for_model(base_model_id)
-
-            # Models with separate components (e.g. z-image-turbo with Qwen3
-            # text encoder) need from_pretrained with the full HF repo —
-            # from_single_file can't discover configs for non-standard text encoders.
-            components = resolve_gen_components(base_model_id)
-
-            if components and model_source.endswith(".safetensors"):
-                hf_repo = _hf_id_for_model(base_model_id)
-                emitter.info(f"Loading from HF repo {hf_repo} (model has separate components)")
-                pipe = PipelineClass.from_pretrained(
-                    hf_repo,
-                    torch_dtype=torch.bfloat16,
-                )
-            elif model_source.endswith(".safetensors"):
-                pipe = PipelineClass.from_single_file(
-                    model_source,
-                    torch_dtype=torch.bfloat16,
-                )
-            else:
-                pipe = PipelineClass.from_pretrained(
-                    model_source,
-                    torch_dtype=torch.bfloat16,
-                )
-
-            pipe = pipe.to("cuda")
+            pipe = load_pipeline(base_model_id, base_model_path, cls_name, emitter)
             now = time.time()
 
             cached = CachedPipeline(

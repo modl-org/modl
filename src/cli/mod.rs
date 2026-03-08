@@ -812,24 +812,24 @@ pub async fn run(cli: Cli) -> Result<()> {
             no_worker,
             json,
         } => {
-            generate::run(
-                &prompt,
-                base.as_deref(),
-                lora.as_deref(),
+            generate::run(generate::GenerateArgs {
+                prompt: &prompt,
+                base: base.as_deref(),
+                lora: lora.as_deref(),
                 lora_strength,
                 seed,
-                &size,
+                size: &size,
                 steps,
                 guidance,
                 count,
-                init_image.as_deref(),
-                mask.as_deref(),
+                init_image: init_image.as_deref(),
+                mask: mask.as_deref(),
                 strength,
                 cloud,
                 provider,
                 no_worker,
                 json,
-            )
+            })
             .await
         }
         Commands::Enhance {

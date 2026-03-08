@@ -40,6 +40,56 @@ def _get_pipeline(cls_name: str):
     return getattr(diffusers, cls_name)
 
 
+def load_pipeline(
+    base_model_id: str,
+    base_model_path: str | None,
+    cls_name: str,
+    emitter: EventEmitter,
+):
+    """Load a diffusers pipeline from disk or HuggingFace.
+
+    This is the single loading path used by both one-shot mode
+    (``run_generate()``) and the persistent worker (``ModelCache``).
+
+    Args:
+        base_model_id: modl model ID (e.g. "flux-dev")
+        base_model_path: Local store path to .safetensors, or None
+        cls_name: Pipeline class name (e.g. "FluxPipeline")
+        emitter: EventEmitter for progress/log messages
+
+    Returns:
+        A loaded diffusers pipeline on CUDA.
+    """
+    import torch
+
+    PipelineClass = _get_pipeline(cls_name)
+    model_source = base_model_path or resolve_model_path(base_model_id)
+
+    # Models with separate components (e.g. z-image-turbo with Qwen3 text
+    # encoder) need from_pretrained with the full HF repo — from_single_file
+    # can't discover configs for non-standard text encoders.
+    components = resolve_gen_components(base_model_id)
+
+    if components and model_source.endswith(".safetensors"):
+        hf_repo = resolve_model_path(base_model_id)
+        emitter.info(f"Loading from HF repo {hf_repo} (model has separate components)")
+        pipe = PipelineClass.from_pretrained(
+            hf_repo,
+            torch_dtype=torch.bfloat16,
+        )
+    elif model_source.endswith(".safetensors"):
+        pipe = PipelineClass.from_single_file(
+            model_source,
+            torch_dtype=torch.bfloat16,
+        )
+    else:
+        pipe = PipelineClass.from_pretrained(
+            model_source,
+            torch_dtype=torch.bfloat16,
+        )
+
+    return pipe.to("cuda")
+
 
 # ---------------------------------------------------------------------------
 # Size presets
@@ -106,40 +156,9 @@ def run_generate(config_path: Path, emitter: EventEmitter) -> int:
     emitter.progress(stage="load", step=0, total_steps=count)
 
     try:
-        import torch
-
         # For cold start, load the mode-specific pipeline directly
         cls_name = resolve_pipeline_class_for_mode(base_model_id, cold_mode)
-        PipelineClass = _get_pipeline(cls_name)
-
-        # Determine model source: store path or HuggingFace ID
-        model_source = base_model_path or resolve_model_path(base_model_id)
-
-        # Models with separate components (e.g. z-image-turbo with Qwen3 text
-        # encoder) need from_pretrained with the full HF repo — from_single_file
-        # can't discover configs for non-standard text encoders.
-        components = resolve_gen_components(base_model_id)
-
-        if components and model_source.endswith(".safetensors"):
-            # Fall back to HF repo which has model_index.json + configs
-            hf_repo = resolve_model_path(base_model_id)
-            emitter.info(f"Loading from HF repo {hf_repo} (model has separate components)")
-            pipe = PipelineClass.from_pretrained(
-                hf_repo,
-                torch_dtype=torch.bfloat16,
-            )
-        elif model_source.endswith(".safetensors"):
-            pipe = PipelineClass.from_single_file(
-                model_source,
-                torch_dtype=torch.bfloat16,
-            )
-        else:
-            pipe = PipelineClass.from_pretrained(
-                model_source,
-                torch_dtype=torch.bfloat16,
-            )
-
-        pipe = pipe.to("cuda")
+        pipe = load_pipeline(base_model_id, base_model_path, cls_name, emitter)
 
         # Load LoRA if specified
         if lora_info:
@@ -351,6 +370,9 @@ def run_generate_with_pipeline(
         artifact_paths.append(filepath)
         emitter.info(f"Image {i + 1}/{count}: {filepath} ({elapsed:.1f}s)")
 
+    # Clean up tmp files (uploaded init images / masks) after generation
+    _cleanup_tmp_files(init_image_path, mask_path)
+
     if artifact_paths:
         emitter.completed(f"Generated {len(artifact_paths)} image(s)")
     else:
@@ -364,10 +386,13 @@ def run_generate_with_pipeline(
     return 0
 
 
-# ---------------------------------------------------------------------------
-# Backwards-compat alias (used by serve.py imports)
-# ---------------------------------------------------------------------------
+def _cleanup_tmp_files(*paths: str | None) -> None:
+    """Delete tmp files under ~/.modl/tmp/ after they've been consumed."""
+    tmp_dir = str(Path.home() / ".modl" / "tmp")
+    for p in paths:
+        if p and p.startswith(tmp_dir):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
 
-def _hf_id_for_model(base_model_id: str) -> str:
-    """Map a modl model ID to a HuggingFace repo ID."""
-    return resolve_model_path(base_model_id)

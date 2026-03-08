@@ -117,26 +117,48 @@ fn resolve_base_model_path(base_model: &str, db: &Database) -> Option<String> {
     None
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn run(
-    prompt: &str,
-    base: Option<&str>,
-    lora: Option<&str>,
-    lora_strength: f32,
-    seed: Option<u64>,
-    size: &str,
-    steps: Option<u32>,
-    guidance: Option<f32>,
-    count: u32,
-    init_image: Option<&str>,
-    mask: Option<&str>,
-    strength: Option<f32>,
-    cloud: bool,
-    provider: Option<CloudProvider>,
-    no_worker: bool,
-    json: bool,
-) -> Result<()> {
+/// All arguments for `modl generate`, used by both CLI and web UI.
+pub struct GenerateArgs<'a> {
+    pub prompt: &'a str,
+    pub base: Option<&'a str>,
+    pub lora: Option<&'a str>,
+    pub lora_strength: f32,
+    pub seed: Option<u64>,
+    pub size: &'a str,
+    pub steps: Option<u32>,
+    pub guidance: Option<f32>,
+    pub count: u32,
+    pub init_image: Option<&'a str>,
+    pub mask: Option<&'a str>,
+    pub strength: Option<f32>,
+    pub cloud: bool,
+    pub provider: Option<CloudProvider>,
+    pub no_worker: bool,
+    pub json: bool,
+}
+
+pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
     let db = Database::open()?;
+
+    // Destructure for convenience
+    let GenerateArgs {
+        prompt,
+        base,
+        lora,
+        lora_strength,
+        seed,
+        size,
+        steps,
+        guidance,
+        count,
+        init_image,
+        mask,
+        strength,
+        cloud,
+        provider,
+        no_worker,
+        json,
+    } = args;
 
     // -------------------------------------------------------------------
     // Resolve base model

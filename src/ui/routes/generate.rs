@@ -107,24 +107,24 @@ async fn run_single_generate(sender: &broadcast::Sender<String>, req: GenerateRe
 
     let _ = sender.send("starting generation".to_string());
 
-    let run_result = crate::cli::generate::run(
-        &req.prompt,
-        Some(&req.model_id),
-        lora_id.as_deref(),
+    let run_result = crate::cli::generate::run(crate::cli::generate::GenerateArgs {
+        prompt: &req.prompt,
+        base: Some(&req.model_id),
+        lora: lora_id.as_deref(),
         lora_strength,
-        req.seed,
-        &size,
-        Some(req.steps),
-        Some(req.guidance),
-        req.num_images,
-        req.init_image.as_deref(),
-        req.mask.as_deref(),
-        req.strength,
-        false,
-        None,
-        false, // no_worker: use persistent worker if available
-        true,
-    )
+        seed: req.seed,
+        size: &size,
+        steps: Some(req.steps),
+        guidance: Some(req.guidance),
+        count: req.num_images,
+        init_image: req.init_image.as_deref(),
+        mask: req.mask.as_deref(),
+        strength: req.strength,
+        cloud: false,
+        provider: None,
+        no_worker: false,
+        json: true,
+    })
     .await;
 
     match run_result {
