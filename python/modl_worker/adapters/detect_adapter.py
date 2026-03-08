@@ -48,7 +48,7 @@ def _load_insightface(emitter: EventEmitter, model_path: str | None = None):
     return app
 
 
-def run_detect(config_path: Path, emitter: EventEmitter) -> int:
+def run_detect(config_path: Path, emitter: EventEmitter, model_cache: dict | None = None) -> int:
     """Run face detection on images from a DetectJobSpec YAML file."""
     import yaml
     import numpy as np
@@ -83,7 +83,13 @@ def run_detect(config_path: Path, emitter: EventEmitter) -> int:
     emitter.job_started(config=str(config_path))
 
     try:
-        app = _load_insightface(emitter, model_path)
+        if model_cache is not None and "insightface_app" in model_cache:
+            app = model_cache["insightface_app"]
+            emitter.info("Using cached InsightFace model")
+        else:
+            app = _load_insightface(emitter, model_path)
+            if model_cache is not None:
+                model_cache["insightface_app"] = app
     except Exception as exc:
         emitter.error("MODEL_LOAD_FAILED", f"Failed to load InsightFace: {exc}", recoverable=False)
         return 1

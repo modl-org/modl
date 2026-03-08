@@ -61,7 +61,7 @@ def _embed_image(model, processor, image_path: Path) -> torch.Tensor:
     return features.squeeze(0)
 
 
-def run_compare(config_path: Path, emitter: EventEmitter) -> int:
+def run_compare(config_path: Path, emitter: EventEmitter, model_cache: dict | None = None) -> int:
     """Run image comparison from a CompareJobSpec YAML file."""
     import yaml
 
@@ -96,7 +96,15 @@ def run_compare(config_path: Path, emitter: EventEmitter) -> int:
     emitter.job_started(config=str(config_path))
 
     try:
-        clip_model, clip_processor = _load_clip(emitter, clip_model_path)
+        if model_cache is not None and "clip_model" in model_cache:
+            clip_model = model_cache["clip_model"]
+            clip_processor = model_cache["clip_preprocess"]
+            emitter.info("Using cached CLIP model")
+        else:
+            clip_model, clip_processor = _load_clip(emitter, clip_model_path)
+            if model_cache is not None:
+                model_cache["clip_model"] = clip_model
+                model_cache["clip_preprocess"] = clip_processor
     except Exception as exc:
         emitter.error("MODEL_LOAD_FAILED", f"Failed to load CLIP: {exc}", recoverable=False)
         return 1

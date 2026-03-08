@@ -89,7 +89,7 @@ def _load_aesthetic_predictor(
     return predictor
 
 
-def run_score(config_path: Path, emitter: EventEmitter) -> int:
+def run_score(config_path: Path, emitter: EventEmitter, model_cache: dict | None = None) -> int:
     """Run aesthetic scoring on images from a ScoreJobSpec YAML file."""
     import yaml
 
@@ -117,10 +117,25 @@ def run_score(config_path: Path, emitter: EventEmitter) -> int:
     emitter.info(f"Found {total} image(s) to score")
     emitter.job_started(config=str(config_path))
 
-    # Load models
+    # Load models (use cache if available)
     try:
-        clip_model, clip_processor = _load_clip(emitter, clip_model_path)
-        predictor = _load_aesthetic_predictor(emitter, predictor_path)
+        if model_cache is not None and "clip_model" in model_cache:
+            clip_model = model_cache["clip_model"]
+            clip_processor = model_cache["clip_preprocess"]
+            emitter.info("Using cached CLIP model")
+        else:
+            clip_model, clip_processor = _load_clip(emitter, clip_model_path)
+            if model_cache is not None:
+                model_cache["clip_model"] = clip_model
+                model_cache["clip_preprocess"] = clip_processor
+
+        if model_cache is not None and "aesthetic_predictor" in model_cache:
+            predictor = model_cache["aesthetic_predictor"]
+            emitter.info("Using cached aesthetic predictor")
+        else:
+            predictor = _load_aesthetic_predictor(emitter, predictor_path)
+            if model_cache is not None:
+                model_cache["aesthetic_predictor"] = predictor
     except Exception as exc:
         emitter.error("MODEL_LOAD_FAILED", f"Failed to load scoring models: {exc}", recoverable=False)
         return 1

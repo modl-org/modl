@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter
 
 from modl_worker.protocol import EventEmitter
 
@@ -39,10 +39,8 @@ def _mask_from_bbox(image_path: Path, bbox: list[float], expand_px: int) -> Imag
     y2 = min(h, y2 + expand_px)
 
     # Draw white rectangle
-    pixels = mask.load()
-    for y in range(int(y1), int(y2)):
-        for x in range(int(x1), int(x2)):
-            pixels[x, y] = 255
+    draw = ImageDraw.Draw(mask)
+    draw.rectangle([int(x1), int(y1), int(x2), int(y2)], fill=255)
 
     # Feather edges with Gaussian blur
     if expand_px > 0:
@@ -51,17 +49,26 @@ def _mask_from_bbox(image_path: Path, bbox: list[float], expand_px: int) -> Imag
     return mask
 
 
-def _mask_from_birefnet(image_path: Path, emitter: EventEmitter, model_path: str | None = None) -> Image.Image:
+def _mask_from_birefnet(
+    image_path: Path, emitter: EventEmitter, model_path: str | None = None, model_cache: dict | None = None
+) -> Image.Image:
     """Generate foreground mask using BiRefNet."""
     import torch
     from torchvision import transforms
 
-    emitter.info("Loading BiRefNet model...")
-
     # Try loading from transformers pipeline (simpler)
     try:
         from transformers import pipeline
-        pipe = pipeline("image-segmentation", model="ZhengPeng7/BiRefNet", trust_remote_code=True, device="cuda")
+
+        if model_cache is not None and "birefnet_pipe" in model_cache:
+            pipe = model_cache["birefnet_pipe"]
+            emitter.info("Using cached BiRefNet pipeline")
+        else:
+            emitter.info("Loading BiRefNet model...")
+            pipe = pipeline("image-segmentation", model="ZhengPeng7/BiRefNet", trust_remote_code=True, device="cuda")
+            if model_cache is not None:
+                model_cache["birefnet_pipe"] = pipe
+
         img = Image.open(image_path).convert("RGB")
         result = pipe(img)
         # Pipeline returns list of dicts with 'mask' key
@@ -85,33 +92,41 @@ def _mask_from_sam(
     bbox: list[float] | None = None,
     point: list[float] | None = None,
     model_path: str | None = None,
+    model_cache: dict | None = None,
 ) -> Image.Image:
     """Generate mask using Segment Anything Model."""
     import torch
 
-    emitter.info("Loading SAM model...")
+    if model_cache is not None and "sam_predictor" in model_cache:
+        predictor = model_cache["sam_predictor"]
+        emitter.info("Using cached SAM predictor")
+    else:
+        emitter.info("Loading SAM model...")
 
-    sam_checkpoint = model_path
-    if not sam_checkpoint:
-        # Try common locations
-        home = Path.home()
-        candidates = [
-            home / ".modl" / "store" / "segmentation" / "sam_vit_b_01ec64.pth",
-        ]
-        for c in candidates:
-            if c.exists():
-                sam_checkpoint = str(c)
-                break
+        sam_checkpoint = model_path
+        if not sam_checkpoint:
+            # Try common locations
+            home = Path.home()
+            candidates = [
+                home / ".modl" / "store" / "segmentation" / "sam_vit_b_01ec64.pth",
+            ]
+            for c in candidates:
+                if c.exists():
+                    sam_checkpoint = str(c)
+                    break
 
-    if not sam_checkpoint:
-        raise ValueError("SAM checkpoint not found. Run: modl pull sam-vit-base")
+        if not sam_checkpoint:
+            raise ValueError("SAM checkpoint not found. Run: modl pull sam-vit-base")
 
-    from segment_anything import SamPredictor, sam_model_registry
+        from segment_anything import SamPredictor, sam_model_registry
+
+        sam = sam_model_registry["vit_b"](checkpoint=sam_checkpoint)
+        sam.to("cuda")
+        predictor = SamPredictor(sam)
+        if model_cache is not None:
+            model_cache["sam_predictor"] = predictor
+
     import cv2
-
-    sam = sam_model_registry["vit_b"](checkpoint=sam_checkpoint)
-    sam.to("cuda")
-    predictor = SamPredictor(sam)
 
     img = cv2.imread(str(image_path))
     if img is None:
@@ -137,7 +152,7 @@ def _mask_from_sam(
     return Image.fromarray(mask_np)
 
 
-def run_segment(config_path: Path, emitter: EventEmitter) -> int:
+def run_segment(config_path: Path, emitter: EventEmitter, model_cache: dict | None = None) -> int:
     """Run segmentation from a SegmentJobSpec YAML file."""
     import yaml
 
@@ -177,10 +192,10 @@ def run_segment(config_path: Path, emitter: EventEmitter) -> int:
             mask = _mask_from_bbox(image_path, bbox, expand_px)
 
         elif method == "background":
-            mask = _mask_from_birefnet(image_path, emitter, model_path)
+            mask = _mask_from_birefnet(image_path, emitter, model_path, model_cache=model_cache)
 
         elif method == "sam":
-            mask = _mask_from_sam(image_path, emitter, bbox=bbox, point=point, model_path=model_path)
+            mask = _mask_from_sam(image_path, emitter, bbox=bbox, point=point, model_path=model_path, model_cache=model_cache)
 
         else:
             emitter.error("UNKNOWN_METHOD", f"Unknown segmentation method: {method}", recoverable=False)

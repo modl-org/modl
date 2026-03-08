@@ -100,6 +100,7 @@ class ModelCache:
 
     def __init__(self, max_models: int = 2) -> None:
         self._cache: dict[CacheKey, CachedPipeline] = {}
+        self._utility_cache: dict[str, Any] = {}
         self._max_models = max_models
         self._lock = threading.Lock()
 
@@ -182,6 +183,14 @@ class ModelCache:
 
             return pipe, cls_name
 
+    def get_utility(self, key: str) -> Any | None:
+        """Get a cached utility model, or None."""
+        return self._utility_cache.get(key)
+
+    def set_utility(self, key: str, model: Any) -> None:
+        """Cache a utility model."""
+        self._utility_cache[key] = model
+
     def status(self) -> dict:
         """Return status info about loaded models."""
         with self._lock:
@@ -201,16 +210,21 @@ class ModelCache:
                 "models_loaded": len(self._cache),
                 "max_models": self._max_models,
                 "models": models,
+                "utility_models": list(self._utility_cache.keys()),
             }
 
     def evict_all(self, emitter: EventEmitter | None = None) -> None:
-        """Evict all cached models and free VRAM."""
+        """Evict all cached models (diffusion + utility) and free VRAM."""
         import torch
         with self._lock:
             for key in list(self._cache.keys()):
                 if emitter:
                     emitter.info(f"Evicting model: {key.model_id}")
                 del self._cache[key]
+            if self._utility_cache:
+                if emitter:
+                    emitter.info(f"Evicting {len(self._utility_cache)} utility model(s)")
+                self._utility_cache.clear()
             torch.cuda.empty_cache()
 
     def _reconcile_lora(self, cached: CachedPipeline, spec: dict, emitter: EventEmitter) -> None:
@@ -387,6 +401,8 @@ class WorkerDaemon:
                 emitter = SocketEventEmitter(conn, job_id="control")
                 self.cache.evict_all(emitter)  # TODO: evict specific model
             self._send_ok(conn, "evicted")
+        elif action in ("score", "detect", "compare", "segment", "face-restore"):
+            self._handle_analysis(conn, request, action)
         elif action == "ping":
             self._send_ok(conn, "pong")
         else:
@@ -416,6 +432,50 @@ class WorkerDaemon:
             emitter.error(
                 "WORKER_GENERATE_ERROR",
                 f"Generation failed: {exc}",
+                recoverable=False,
+            )
+
+    def _handle_analysis(self, conn: socket.socket, request: dict, action: str) -> None:
+        """Run an analysis command with cached utility models."""
+        job_id = request.get("job_id", f"{action}-worker")
+        spec = request.get("spec", {})
+
+        emitter = SocketEventEmitter(conn, job_id=job_id)
+        emitter.job_accepted(worker_pid=os.getpid())
+
+        try:
+            # Write spec to temp file (adapters expect a config path)
+            import tempfile
+            import yaml
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+                yaml.dump(spec, f)
+                config_path = Path(f.name)
+
+            # Dispatch to the right adapter
+            from modl_worker.adapters import (
+                run_score, run_detect, run_compare, run_segment, run_face_restore
+            )
+
+            adapter_map = {
+                "score": run_score,
+                "detect": run_detect,
+                "compare": run_compare,
+                "segment": run_segment,
+                "face-restore": run_face_restore,
+            }
+
+            adapter_fn = adapter_map[action]
+            exit_code = adapter_fn(config_path, emitter, model_cache=self.cache._utility_cache)
+
+            self._jobs_served += 1
+
+            # Clean up temp file
+            config_path.unlink(missing_ok=True)
+
+        except Exception as exc:
+            emitter.error(
+                "WORKER_ANALYSIS_ERROR",
+                f"{action} failed: {exc}",
                 recoverable=False,
             )
 

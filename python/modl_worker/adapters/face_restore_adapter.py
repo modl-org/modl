@@ -36,7 +36,7 @@ def _resolve_images(image_paths: list[str]) -> list[Path]:
     return result
 
 
-def run_face_restore(config_path: Path, emitter: EventEmitter) -> int:
+def run_face_restore(config_path: Path, emitter: EventEmitter, model_cache: dict | None = None) -> int:
     """Run face restoration from a FaceRestoreJobSpec YAML file."""
     import yaml
 
@@ -72,44 +72,53 @@ def run_face_restore(config_path: Path, emitter: EventEmitter) -> int:
         import numpy as np
         from facexlib.utils.face_restoration_helper import FaceRestoreHelper
 
-        emitter.info("Loading CodeFormer model...")
+        if model_cache is not None and "codeformer_helper" in model_cache:
+            cached = model_cache["codeformer_helper"]
+            net = cached["net"]
+            face_helper = cached["face_helper"]
+            emitter.info("Using cached CodeFormer model")
+        else:
+            emitter.info("Loading CodeFormer model...")
 
-        # Resolve CodeFormer checkpoint
-        codeformer_path = model_path
-        if not codeformer_path:
-            home = Path.home()
-            candidates = [
-                home / ".modl" / "store" / "analysis" / "codeformer.pth",
-                home / ".cache" / "codeformer" / "codeformer.pth",
-            ]
-            for c in candidates:
-                if c.exists():
-                    codeformer_path = str(c)
-                    break
+            # Resolve CodeFormer checkpoint
+            codeformer_path = model_path
+            if not codeformer_path:
+                home = Path.home()
+                candidates = [
+                    home / ".modl" / "store" / "analysis" / "codeformer.pth",
+                    home / ".cache" / "codeformer" / "codeformer.pth",
+                ]
+                for c in candidates:
+                    if c.exists():
+                        codeformer_path = str(c)
+                        break
 
-        if not codeformer_path:
-            # Download via torch hub
-            emitter.info("Downloading CodeFormer weights...")
-            url = "https://github.com/sczhou/CodeFormer/releases/download/v0.1.0/codeformer.pth"
-            codeformer_path = str(torch.hub.load_state_dict_from_url(url, map_location="cpu", file_name="codeformer.pth"))
+            if not codeformer_path:
+                # Download via torch hub
+                emitter.info("Downloading CodeFormer weights...")
+                url = "https://github.com/sczhou/CodeFormer/releases/download/v0.1.0/codeformer.pth"
+                codeformer_path = str(torch.hub.load_state_dict_from_url(url, map_location="cpu", file_name="codeformer.pth"))
 
-        # Load the model
-        from basicsr.utils.registry import ARCH_REGISTRY
-        net = ARCH_REGISTRY.get("CodeFormer")(
-            dim_embd=512, codebook_size=1024, n_head=8, n_layers=9, connect_list=["32", "64", "128", "256"]
-        ).to("cuda")
-        checkpoint = torch.load(codeformer_path, map_location="cpu", weights_only=False)
-        net.load_state_dict(checkpoint.get("params_ema", checkpoint.get("params", checkpoint)))
-        net.eval()
+            # Load the model
+            from basicsr.utils.registry import ARCH_REGISTRY
+            net = ARCH_REGISTRY.get("CodeFormer")(
+                dim_embd=512, codebook_size=1024, n_head=8, n_layers=9, connect_list=["32", "64", "128", "256"]
+            ).to("cuda")
+            checkpoint = torch.load(codeformer_path, map_location="cpu", weights_only=False)
+            net.load_state_dict(checkpoint.get("params_ema", checkpoint.get("params", checkpoint)))
+            net.eval()
 
-        face_helper = FaceRestoreHelper(
-            upscale_factor=1,
-            face_size=512,
-            crop_ratio=(1, 1),
-            det_model="retinaface_resnet50",
-            save_ext="png",
-            device="cuda",
-        )
+            face_helper = FaceRestoreHelper(
+                upscale_factor=1,
+                face_size=512,
+                crop_ratio=(1, 1),
+                det_model="retinaface_resnet50",
+                save_ext="png",
+                device="cuda",
+            )
+
+            if model_cache is not None:
+                model_cache["codeformer_helper"] = {"net": net, "face_helper": face_helper}
 
         use_codeformer = True
 
