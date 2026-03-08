@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use std::env;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -225,6 +225,7 @@ impl LocalExecutor {
         job_id: &str,
         spec: &GenerateJobSpec,
     ) -> Result<Option<JobHandle>> {
+        use std::io::Write;
         use std::os::unix::net::UnixStream;
 
         let sock_path = dirs::home_dir()

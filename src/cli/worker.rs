@@ -26,11 +26,13 @@ use crate::core::training::resolve_worker_python_root;
 // ---------------------------------------------------------------------------
 
 #[cfg(not(unix))]
+#[allow(dead_code)]
 pub fn try_connect() -> Option<()> {
     None
 }
 
 #[cfg(not(unix))]
+#[allow(dead_code)]
 pub fn is_worker_running() -> bool {
     false
 }
