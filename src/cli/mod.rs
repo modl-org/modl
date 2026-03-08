@@ -32,6 +32,7 @@ mod train_status;
 mod uninstall;
 mod update;
 mod upgrade;
+mod upscale;
 pub(crate) mod worker;
 
 use anyhow::Result;
@@ -554,6 +555,25 @@ pub enum Commands {
         json: bool,
     },
 
+    /// Upscale images using Real-ESRGAN
+    Upscale {
+        /// Image file(s) or directory to upscale
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Scale factor (2 or 4)
+        #[arg(long, default_value = "4")]
+        scale: u32,
+        /// Upscaler model ID (default: realesrgan-x4plus)
+        #[arg(long, default_value = "realesrgan-x4plus")]
+        model: String,
+        /// Output directory (default: ~/.modl/outputs/<date>/)
+        #[arg(long, short = 'o')]
+        output: Option<String>,
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Manage datasets for training
     #[command(after_help = DATASET_EXAMPLES)]
     Dataset {
@@ -876,6 +896,13 @@ pub async fn run(cli: Cli) -> Result<()> {
             fidelity,
             json,
         } => face_restore::run(&paths, output.as_deref(), fidelity, json).await,
+        Commands::Upscale {
+            paths,
+            scale,
+            model,
+            output,
+            json,
+        } => upscale::run(&paths, output.as_deref(), scale, &model, json).await,
         Commands::Dataset { command } => datasets::run(command).await,
         Commands::Runtime { command } => runtime::run(command).await,
         Commands::Doctor {

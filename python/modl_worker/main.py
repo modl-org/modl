@@ -6,7 +6,7 @@ from pathlib import Path
 from modl_worker.adapters import (
     run_train, run_generate, run_caption, run_resize, run_tag,
     run_score, run_detect, run_compare,
-    run_segment, run_face_restore,
+    run_segment, run_face_restore, run_upscale,
 )
 from modl_worker.protocol import EventEmitter, fatal
 
@@ -54,6 +54,10 @@ def _build_parser() -> argparse.ArgumentParser:
     fr = sub.add_parser("face-restore", help="Run face restoration adapter")
     fr.add_argument("--config", required=True, help="Path to face restore spec yaml")
     fr.add_argument("--job-id", default="", help="Job ID for event envelope")
+
+    ups = sub.add_parser("upscale", help="Run image upscaling adapter")
+    ups.add_argument("--config", required=True, help="Path to upscale spec yaml")
+    ups.add_argument("--job-id", default="", help="Job ID for event envelope")
 
     srv = sub.add_parser("serve", help="Start persistent worker daemon")
     srv.add_argument("--timeout", type=int, default=600, help="Idle timeout in seconds (default: 600)")
@@ -118,6 +122,11 @@ def main() -> int:
         config_path = Path(args.config)
         emitter.job_accepted(worker_pid=os.getpid())
         return run_face_restore(config_path, emitter)
+
+    if args.command == "upscale":
+        config_path = Path(args.config)
+        emitter.job_accepted(worker_pid=os.getpid())
+        return run_upscale(config_path, emitter)
 
     if args.command == "serve":
         from modl_worker.serve import run_serve

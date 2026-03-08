@@ -3,13 +3,13 @@ use console::style;
 use std::path::PathBuf;
 
 use crate::core::db::Database;
-use crate::core::job::FaceRestoreJobSpec;
+use crate::core::job::UpscaleJobSpec;
 
-/// Resolve the store path for an installed analysis model.
-fn resolve_analysis_model_path(model_id: &str, db: &Database) -> Option<String> {
+/// Resolve the store path for an installed upscaler model.
+fn resolve_upscaler_path(model_id: &str, db: &Database) -> Option<String> {
     let installed = db.list_installed(None).ok()?;
     for model in &installed {
-        if (model.id == model_id || model.name == model_id) && model.asset_type == "analysis" {
+        if (model.id == model_id || model.name == model_id) && model.asset_type == "upscaler" {
             return Some(model.store_path.clone());
         }
     }
@@ -19,11 +19,12 @@ fn resolve_analysis_model_path(model_id: &str, db: &Database) -> Option<String> 
 pub async fn run(
     paths: &[String],
     output_dir: Option<&str>,
-    fidelity: f32,
+    scale: u32,
+    model: &str,
     json: bool,
 ) -> Result<()> {
     if paths.is_empty() {
-        anyhow::bail!("No image paths provided. Usage: modl face-restore <image_or_dir> [...]");
+        anyhow::bail!("No image paths provided. Usage: modl upscale <image_or_dir> [...]");
     }
 
     for p in paths {
@@ -35,9 +36,12 @@ pub async fn run(
 
     // Resolve model path from modl store
     let db = Database::open()?;
-    let model_path = resolve_analysis_model_path("codeformer", &db);
+    let model_path = resolve_upscaler_path(model, &db);
     if model_path.is_none() {
-        anyhow::bail!("CodeFormer model not installed. Run `modl pull codeformer` first.");
+        anyhow::bail!(
+            "Upscaler model not installed: {model}. Run `modl pull {model}` first.\n\
+             Available upscalers: modl ls --type upscaler"
+        );
     }
 
     let out_dir = output_dir.map(String::from).unwrap_or_else(|| {
@@ -53,33 +57,34 @@ pub async fn run(
 
     std::fs::create_dir_all(&out_dir)?;
 
-    let spec = FaceRestoreJobSpec {
+    let spec = UpscaleJobSpec {
         image_paths: paths.to_vec(),
         output_dir: out_dir.clone(),
-        model: "codeformer".to_string(),
+        scale,
         model_path,
-        fidelity,
     };
-    let yaml = serde_yaml::to_string(&spec).context("Failed to serialize face-restore spec")?;
+    let yaml = serde_yaml::to_string(&spec).context("Failed to serialize upscale spec")?;
 
     if !json {
         println!(
-            "{} Restoring faces (fidelity: {:.1})...",
+            "{} Upscaling {} image(s) ({}x, model: {})...",
             style("→").cyan(),
-            fidelity
+            paths.len(),
+            scale,
+            model
         );
     }
 
-    let result = super::analysis::spawn_analysis_worker("face-restore", &yaml, json).await?;
+    let result = super::analysis::spawn_analysis_worker("upscale", &yaml, json).await?;
 
     if json {
         if let Some(data) = result.result_data {
             println!("{}", serde_json::to_string(&data)?);
         }
     } else if let Some(data) = result.result_data {
-        let restored = data.get("restored").and_then(|v| v.as_u64()).unwrap_or(0);
+        let upscaled = data.get("upscaled").and_then(|v| v.as_u64()).unwrap_or(0);
         let errors = data.get("errors").and_then(|v| v.as_u64()).unwrap_or(0);
-        if restored > 0 {
+        if upscaled > 0 {
             println!("  Output: {}", style(&out_dir).bold());
         }
         if errors > 0 {
@@ -88,7 +93,7 @@ pub async fn run(
     }
 
     if !result.success {
-        anyhow::bail!("Face restoration failed");
+        anyhow::bail!("Upscaling failed");
     }
 
     Ok(())

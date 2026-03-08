@@ -80,24 +80,15 @@ def run_face_restore(config_path: Path, emitter: EventEmitter, model_cache: dict
         else:
             emitter.info("Loading CodeFormer model...")
 
-            # Resolve CodeFormer checkpoint
+            # Resolve CodeFormer checkpoint from modl store
             codeformer_path = model_path
-            if not codeformer_path:
-                home = Path.home()
-                candidates = [
-                    home / ".modl" / "store" / "analysis" / "codeformer.pth",
-                    home / ".cache" / "codeformer" / "codeformer.pth",
-                ]
-                for c in candidates:
-                    if c.exists():
-                        codeformer_path = str(c)
-                        break
-
-            if not codeformer_path:
-                # Download via torch hub
-                emitter.info("Downloading CodeFormer weights...")
-                url = "https://github.com/sczhou/CodeFormer/releases/download/v0.1.0/codeformer.pth"
-                codeformer_path = str(torch.hub.load_state_dict_from_url(url, map_location="cpu", file_name="codeformer.pth"))
+            if not codeformer_path or not Path(codeformer_path).exists():
+                emitter.error(
+                    "MODEL_NOT_FOUND",
+                    "CodeFormer weights not found. Run `modl pull codeformer` first.",
+                    recoverable=False,
+                )
+                return 2
 
             # Load the model
             from basicsr.utils.registry import ARCH_REGISTRY

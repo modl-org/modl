@@ -190,6 +190,20 @@ fn default_fidelity() -> f32 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpscaleJobSpec {
+    pub image_paths: Vec<String>,
+    pub output_dir: String,
+    #[serde(default = "default_upscale_scale")]
+    pub scale: u32,
+    #[serde(default)]
+    pub model_path: Option<String>,
+}
+
+fn default_upscale_scale() -> u32 {
+    4
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoraRef {
     pub name: String,
     pub path: String,
