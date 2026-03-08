@@ -128,6 +128,9 @@ pub async fn run(
     steps: Option<u32>,
     guidance: Option<f32>,
     count: u32,
+    init_image: Option<&str>,
+    mask: Option<&str>,
+    strength: Option<f32>,
     cloud: bool,
     provider: Option<CloudProvider>,
     no_worker: bool,
@@ -165,6 +168,23 @@ pub async fn run(
     };
 
     // -------------------------------------------------------------------
+    // Validate img2img / inpainting paths
+    // -------------------------------------------------------------------
+    if let Some(path) = init_image
+        && !PathBuf::from(path).exists()
+    {
+        anyhow::bail!("Init image not found: {path}");
+    }
+    if let Some(path) = mask {
+        if init_image.is_none() {
+            anyhow::bail!("--mask requires --init-image");
+        }
+        if !PathBuf::from(path).exists() {
+            anyhow::bail!("Mask image not found: {path}");
+        }
+    }
+
+    // -------------------------------------------------------------------
     // Build output directory: ~/.modl/outputs/<date>/
     // -------------------------------------------------------------------
     let date = chrono::Local::now().format("%Y-%m-%d");
@@ -198,6 +218,9 @@ pub async fn run(
             guidance,
             seed,
             count,
+            init_image: init_image.map(|s| s.to_string()),
+            mask: mask.map(|s| s.to_string()),
+            strength,
         },
         runtime: RuntimeRef {
             profile: "trainer-cu124".to_string(),
@@ -215,11 +238,29 @@ pub async fn run(
     // Print summary
     // -------------------------------------------------------------------
     if !json {
-        println!("{} Generating image(s)...", style("→").cyan());
+        let mode_label = if mask.is_some() {
+            "inpainting"
+        } else if init_image.is_some() {
+            "img2img"
+        } else {
+            "txt2img"
+        };
+        println!(
+            "{} Generating image(s) [{}]...",
+            style("→").cyan(),
+            mode_label
+        );
         println!("  Prompt: {}", style(prompt).italic());
         println!("  Model:  {}", base_model);
         if let Some(ref lr) = lora_ref {
             println!("  LoRA:   {} (strength: {:.2})", lr.name, lr.weight);
+        }
+        if let Some(path) = init_image {
+            println!("  Init:   {}", path);
+            println!("  Strength: {:.2}", strength.unwrap_or(0.75));
+        }
+        if let Some(path) = mask {
+            println!("  Mask:   {}", path);
         }
         println!("  Size:   {}×{}", width, height);
         println!("  Steps:  {}", steps);

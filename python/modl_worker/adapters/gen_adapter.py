@@ -17,6 +17,7 @@ from modl_worker.protocol import EventEmitter
 from modl_worker.adapters.arch_config import (
     resolve_model_path,
     resolve_pipeline_class,
+    resolve_pipeline_class_for_mode,
     resolve_gen_defaults,
     resolve_gen_components,
 )
@@ -86,17 +87,29 @@ def run_generate(config_path: Path, emitter: EventEmitter) -> int:
     base_model_path = model_info.get("base_model_path")
     lora_info = spec.get("lora")
 
+    # Detect generation mode for cold-start pipeline selection
+    params = spec.get("params", {})
+    init_image_path = params.get("init_image")
+    mask_path = params.get("mask")
+    if mask_path and init_image_path:
+        cold_mode = "inpaint"
+    elif init_image_path:
+        cold_mode = "img2img"
+    else:
+        cold_mode = "txt2img"
+
     # -------------------------------------------------------------------
     # 1. Load pipeline (cold start)
     # -------------------------------------------------------------------
-    emitter.info(f"Loading pipeline for {base_model_id}...")
-    count = spec.get("params", {}).get("count", 1)
+    emitter.info(f"Loading pipeline for {base_model_id} (mode={cold_mode})...")
+    count = params.get("count", 1)
     emitter.progress(stage="load", step=0, total_steps=count)
 
     try:
         import torch
 
-        cls_name = _resolve_pipeline_class(base_model_id)
+        # For cold start, load the mode-specific pipeline directly
+        cls_name = resolve_pipeline_class_for_mode(base_model_id, cold_mode)
         PipelineClass = _get_pipeline(cls_name)
 
         # Determine model source: store path or HuggingFace ID
@@ -176,6 +189,7 @@ def run_generate_with_pipeline(
         Exit code (0 = success, 1 = all images failed)
     """
     import torch
+    from PIL import Image
 
     prompt = spec.get("prompt", "")
     model_info = spec.get("model", {})
@@ -194,6 +208,37 @@ def run_generate_with_pipeline(
     seed = params.get("seed")
     count = params.get("count", 1)
 
+    # Img2img / inpainting params
+    init_image_path = params.get("init_image")
+    mask_path = params.get("mask")
+    strength = params.get("strength", 0.75)
+
+    # Determine generation mode
+    if mask_path and init_image_path:
+        mode = "inpaint"
+    elif init_image_path:
+        mode = "img2img"
+    else:
+        mode = "txt2img"
+
+    # Load init image and mask if needed
+    init_img = None
+    mask_img = None
+    if init_image_path:
+        init_img = Image.open(init_image_path).convert("RGB")
+    if mask_path:
+        mask_img = Image.open(mask_path).convert("RGB")
+
+    # Switch pipeline if needed for img2img/inpaint via from_pipe()
+    pipe = pipeline
+    if mode != "txt2img":
+        target_cls_name = resolve_pipeline_class_for_mode(base_model_id, mode)
+        if target_cls_name != cls_name:
+            emitter.info(f"Switching pipeline: {cls_name} -> {target_cls_name} (mode={mode})")
+            TargetClass = _get_pipeline(target_cls_name)
+            pipe = TargetClass.from_pipe(pipeline)
+            cls_name = target_cls_name
+
     output_dir = output_info.get("output_dir", ".")
     os.makedirs(output_dir, exist_ok=True)
 
@@ -204,19 +249,23 @@ def run_generate_with_pipeline(
     # Build inference kwargs — different pipelines accept different params
     gen_kwargs = {
         "prompt": prompt,
-        "width": width,
-        "height": height,
         "num_inference_steps": steps,
         "generator": generator,
+        "guidance_scale": guidance,
     }
 
-    # Guidance scale
-    if cls_name == "FluxPipeline":
-        gen_kwargs["guidance_scale"] = guidance
-    else:
-        gen_kwargs["guidance_scale"] = guidance
-
-    pipe = pipeline
+    if mode == "txt2img":
+        gen_kwargs["width"] = width
+        gen_kwargs["height"] = height
+    elif mode == "img2img":
+        gen_kwargs["image"] = init_img
+        gen_kwargs["strength"] = strength
+    elif mode == "inpaint":
+        gen_kwargs["image"] = init_img
+        gen_kwargs["mask_image"] = mask_img
+        gen_kwargs["strength"] = strength
+        gen_kwargs["width"] = width
+        gen_kwargs["height"] = height
     artifact_paths = []
 
     for i in range(count):

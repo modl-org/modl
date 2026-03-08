@@ -1,5 +1,6 @@
 use axum::{
-    extract::Path,
+    Json,
+    extract::{Multipart, Path},
     http::{StatusCode, header},
     response::{Html, IntoResponse},
 };
@@ -59,4 +60,84 @@ pub async fn serve_ui_asset(Path(path): Path<String>) -> impl IntoResponse {
 
 pub async fn index_page() -> Html<String> {
     Html(include_str!("../dist/index.html").to_string())
+}
+
+/// Accept a file upload (multipart), save to ~/.modl/tmp/, return the server path.
+/// Used by the UI to upload init images for img2img / inpainting masks.
+pub async fn api_upload(mut multipart: Multipart) -> impl IntoResponse {
+    let tmp_dir = modl_root().join("tmp");
+    if let Err(e) = tokio::fs::create_dir_all(&tmp_dir).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("Failed to create tmp dir: {e}") })),
+        )
+            .into_response();
+    }
+
+    let field = match multipart.next_field().await {
+        Ok(Some(f)) => f,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "No file in upload" })),
+            )
+                .into_response();
+        }
+    };
+
+    let original_name = field.file_name().unwrap_or("upload.png").to_string();
+
+    // Sanitize filename: keep only the extension
+    let ext = std::path::Path::new(&original_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("png");
+
+    // Validate it's an image extension
+    if !matches!(ext, "png" | "jpg" | "jpeg" | "webp" | "bmp" | "tiff") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("Unsupported file type: .{ext}") })),
+        )
+            .into_response();
+    }
+
+    let bytes = match field.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("Failed to read upload: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    // Size guard: 50MB max
+    if bytes.len() > 50 * 1024 * 1024 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "File too large (max 50MB)" })),
+        )
+            .into_response();
+    }
+
+    let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S%.3f");
+    let filename = format!("{timestamp}.{ext}");
+    let dest = tmp_dir.join(&filename);
+
+    if let Err(e) = tokio::fs::write(&dest, &bytes).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("Failed to write file: {e}") })),
+        )
+            .into_response();
+    }
+
+    let server_path = dest.to_string_lossy().to_string();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "path": server_path })),
+    )
+        .into_response()
 }

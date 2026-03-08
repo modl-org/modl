@@ -215,6 +215,15 @@ pub struct GenerateParams {
     #[serde(default)]
     pub seed: Option<u64>,
     pub count: u32,
+    /// Source image path for img2img / inpainting
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init_image: Option<String>,
+    /// Mask image path (white = regenerate region) for inpainting
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<String>,
+    /// Denoising strength for img2img (0.0 = no change, 1.0 = full denoise)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strength: Option<f32>,
 }
 
 // ---------------------------------------------------------------------------

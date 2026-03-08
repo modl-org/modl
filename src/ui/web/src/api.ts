@@ -162,6 +162,9 @@ export type GenerateRequest = {
   seed?: number
   num_images: number
   loras: Array<{ id: string; strength: number }>
+  init_image?: string  // server-side path to init image for img2img
+  mask?: string        // server-side path to mask image for inpainting
+  strength?: number    // denoising strength (0.0-1.0)
 }
 
 export type EnhanceRequest = {
@@ -248,6 +251,17 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path }),
     }),
+  /** Upload a file (init image, mask) and return its server-side path. */
+  upload: async (file: File): Promise<{ path: string }> => {
+    const form = new FormData()
+    form.append('file', file)
+    const res = await fetch('/api/upload', { method: 'POST', body: form })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
+      throw new Error(body.error ?? `Upload failed: HTTP ${res.status}`)
+    }
+    return res.json()
+  },
   generate: (req: GenerateRequest) =>
     fetch('/api/generate', {
       method: 'POST',

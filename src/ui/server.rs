@@ -92,6 +92,8 @@ pub async fn start(port: u16, open_browser: bool) -> Result<()> {
         .route("/api/models/{id}", delete(models::api_delete_model))
         .route("/api/registry/search", get(models::api_search_registry))
         .route("/api/models/install", post(models::api_install_model))
+        // File upload (img2img init images, masks)
+        .route("/api/upload", post(files::api_upload))
         // Generation
         .route("/api/generate", post(generate::api_generate))
         .route("/api/generate/stream", get(generate::api_generate_stream))

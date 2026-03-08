@@ -15,6 +15,7 @@ import { GenerateActions } from './GenerateActions'
 import { GenerateProgressBar, type GenerateProgressState } from './GenerateProgressBar'
 import { GenerationGallery } from './GenerationGallery'
 import { ImagePreview, type PreviewImage } from './ImagePreview'
+import { Img2ImgPanel } from './Img2ImgPanel'
 import { LoraPanel } from './LoraPanel'
 import { ModelPanel } from './ModelPanel'
 import { PromptPanel } from './PromptPanel'
@@ -179,6 +180,19 @@ export function GenerateView({ setTab: _setTab }: Props) {
   const handleGenerate = useCallback(async () => {
     if (!form.prompt.trim() || !form.base_model_id) return
 
+    // Upload init image if in img2img mode
+    let initImagePath: string | undefined
+    if (form.mode === 'img2img' && form.init_image_file) {
+      try {
+        const uploaded = await api.upload(form.init_image_file)
+        initImagePath = uploaded.path
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        toast.error(`Image upload failed: ${message}`)
+        return
+      }
+    }
+
     // Build the request
     const req: GenerateRequest = {
       prompt: form.prompt,
@@ -191,6 +205,8 @@ export function GenerateView({ setTab: _setTab }: Props) {
       seed: form.seed,
       num_images: form.batch_count,
       loras: form.loras.map((l) => ({ id: l.id, strength: l.strength })),
+      init_image: initImagePath,
+      strength: initImagePath ? form.denoise_strength : undefined,
     }
 
     // If not currently generating, this is a fresh start
@@ -313,6 +329,11 @@ export function GenerateView({ setTab: _setTab }: Props) {
               <SizePanel form={form} setForm={setForm} />
               <BatchPanel form={form} setForm={setForm} />
             </div>
+          </CollapsibleSection>
+
+          {/* ─── Img2Img ─── */}
+          <CollapsibleSection title="Img2Img" defaultOpen={false}>
+            <Img2ImgPanel form={form} setForm={setForm} />
           </CollapsibleSection>
 
           {/* ─── Sampling ─── */}

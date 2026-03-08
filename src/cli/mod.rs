@@ -441,6 +441,15 @@ pub enum Commands {
         /// Cloud provider to use (modal, replicate, runpod)
         #[arg(long, value_enum)]
         provider: Option<CloudProvider>,
+        /// Source image for img2img / inpainting
+        #[arg(long)]
+        init_image: Option<String>,
+        /// Mask image (white = regenerate region) for inpainting
+        #[arg(long)]
+        mask: Option<String>,
+        /// Denoising strength for img2img (0.0-1.0, default: 0.75)
+        #[arg(long)]
+        strength: Option<f32>,
         /// Force one-shot mode (skip persistent worker, cold start every time)
         #[arg(long)]
         no_worker: bool,
@@ -795,6 +804,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             steps,
             guidance,
             count,
+            init_image,
+            mask,
+            strength,
             cloud,
             provider,
             no_worker,
@@ -810,6 +822,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                 steps,
                 guidance,
                 count,
+                init_image.as_deref(),
+                mask.as_deref(),
+                strength,
                 cloud,
                 provider,
                 no_worker,

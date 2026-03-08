@@ -41,6 +41,8 @@ QWEN_24GB_STYLE_QTYPE = "uint3|ostris/accuracy_recovery_adapters/qwen_image_torc
 ARCH_CONFIGS: dict[str, dict] = {
     "flux": {
         "pipeline_class": "FluxPipeline",
+        "img2img_class": "FluxImg2ImgPipeline",
+        "inpaint_class": "FluxInpaintPipeline",
         "model_flags": {"is_flux": True, "quantize": True},
         "noise_scheduler": "flowmatch",
         "dtype": "bf16",
@@ -51,6 +53,8 @@ ARCH_CONFIGS: dict[str, dict] = {
     },
     "flux_schnell": {
         "pipeline_class": "FluxPipeline",
+        "img2img_class": "FluxImg2ImgPipeline",
+        "inpaint_class": "FluxInpaintPipeline",
         "model_flags": {
             "is_flux": True,
             "quantize": True,
@@ -143,6 +147,8 @@ ARCH_CONFIGS: dict[str, dict] = {
     },
     "sdxl": {
         "pipeline_class": "StableDiffusionXLPipeline",
+        "img2img_class": "StableDiffusionXLImg2ImgPipeline",
+        "inpaint_class": "StableDiffusionXLInpaintPipeline",
         "model_flags": {"arch": "sdxl"},
         "noise_scheduler": "ddpm",
         "dtype": "bf16",
@@ -154,6 +160,8 @@ ARCH_CONFIGS: dict[str, dict] = {
     },
     "sd15": {
         "pipeline_class": "StableDiffusionPipeline",
+        "img2img_class": "StableDiffusionImg2ImgPipeline",
+        "inpaint_class": "StableDiffusionInpaintPipeline",
         "model_flags": {},
         "noise_scheduler": "ddpm",
         "dtype": "fp16",
@@ -229,6 +237,22 @@ def resolve_pipeline_class(base_model_id: str) -> str:
     """Return the diffusers pipeline class name for a model ID."""
     arch = detect_arch(base_model_id)
     config = ARCH_CONFIGS.get(arch, ARCH_CONFIGS["sdxl"])
+    return config["pipeline_class"]
+
+
+def resolve_pipeline_class_for_mode(base_model_id: str, mode: str = "txt2img") -> str:
+    """Return the diffusers pipeline class name for a model ID and generation mode.
+
+    Args:
+        base_model_id: modl model ID (e.g. "flux-dev")
+        mode: "txt2img", "img2img", or "inpaint"
+    """
+    arch = detect_arch(base_model_id)
+    config = ARCH_CONFIGS.get(arch, ARCH_CONFIGS["sdxl"])
+    if mode == "img2img":
+        return config.get("img2img_class", config["pipeline_class"])
+    elif mode == "inpaint":
+        return config.get("inpaint_class", config["pipeline_class"])
     return config["pipeline_class"]
 
 

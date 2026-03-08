@@ -70,14 +70,15 @@ class SocketEventEmitter(EventEmitter):
 class CacheKey:
     model_id: str
     dtype: str  # "bfloat16", "float16"
+    mode: str = "txt2img"  # "txt2img", "img2img", "inpaint"
 
     def __hash__(self) -> int:
-        return hash((self.model_id, self.dtype))
+        return hash((self.model_id, self.dtype, self.mode))
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, CacheKey):
             return NotImplemented
-        return self.model_id == other.model_id and self.dtype == other.dtype
+        return self.model_id == other.model_id and self.dtype == other.dtype and self.mode == other.mode
 
 
 @dataclass
@@ -104,11 +105,21 @@ class ModelCache:
         self._max_models = max_models
         self._lock = threading.Lock()
 
+    def _detect_mode(self, spec: dict) -> str:
+        """Detect generation mode from spec params."""
+        params = spec.get("params", {})
+        if params.get("mask") and params.get("init_image"):
+            return "inpaint"
+        elif params.get("init_image"):
+            return "img2img"
+        return "txt2img"
+
     def get_or_load(self, spec: dict, emitter: EventEmitter) -> tuple[Any, str]:
         """Return (pipeline, cls_name) — cached or freshly loaded.
 
         Also handles LoRA reconciliation (hot-swap if base model matches
-        but LoRA changed).
+        but LoRA changed). Supports mode switching (txt2img -> img2img ->
+        inpaint) via from_pipe(), caching each mode variant.
         """
         import torch
         from modl_worker.adapters.gen_adapter import (
@@ -116,27 +127,56 @@ class ModelCache:
             _get_pipeline,
             _hf_id_for_model,
         )
-        from modl_worker.adapters.arch_config import resolve_gen_components
+        from modl_worker.adapters.arch_config import (
+            resolve_gen_components,
+            resolve_pipeline_class_for_mode,
+        )
 
         model_info = spec.get("model", {})
         base_model_id = model_info.get("base_model_id", "flux-schnell")
         base_model_path = model_info.get("base_model_path")
+        mode = self._detect_mode(spec)
 
-        key = CacheKey(model_id=base_model_id, dtype="bfloat16")
+        key = CacheKey(model_id=base_model_id, dtype="bfloat16", mode=mode)
+        base_key = CacheKey(model_id=base_model_id, dtype="bfloat16", mode="txt2img")
 
         with self._lock:
+            # Check for exact mode match in cache
             if key in self._cache:
                 cached = self._cache[key]
                 cached.last_used = time.time()
-                emitter.info(f"Model cache HIT: {base_model_id} (loaded {self._ago(cached.loaded_at)})")
+                emitter.info(f"Model cache HIT: {base_model_id} mode={mode} (loaded {self._ago(cached.loaded_at)})")
                 self._reconcile_lora(cached, spec, emitter)
                 return cached.pipeline, cached.cls_name
+
+            # If we need img2img/inpaint but have the base txt2img cached,
+            # use from_pipe() to create the mode variant (shares weights, ~0ms)
+            if mode != "txt2img" and base_key in self._cache:
+                base_cached = self._cache[base_key]
+                base_cached.last_used = time.time()
+                target_cls_name = resolve_pipeline_class_for_mode(base_model_id, mode)
+                emitter.info(f"Mode switch via from_pipe(): {base_cached.cls_name} -> {target_cls_name}")
+                TargetClass = _get_pipeline(target_cls_name)
+                mode_pipe = TargetClass.from_pipe(base_cached.pipeline)
+                now = time.time()
+                mode_cached = CachedPipeline(
+                    pipeline=mode_pipe,
+                    cls_name=target_cls_name,
+                    loaded_at=now,
+                    last_used=now,
+                    vram_estimate_mb=0,  # shares weights with base
+                    lora_id=base_cached.lora_id,
+                    lora_weight=base_cached.lora_weight,
+                )
+                self._cache[key] = mode_cached
+                self._reconcile_lora(mode_cached, spec, emitter)
+                return mode_pipe, target_cls_name
 
             # Cache miss — evict LRU if at capacity
             if len(self._cache) >= self._max_models:
                 self._evict_lru(emitter)
 
-            # Load fresh pipeline
+            # Load fresh pipeline (always load txt2img base first)
             emitter.info(f"Model cache MISS: loading {base_model_id}...")
             cls_name = _resolve_pipeline_class(base_model_id)
             PipelineClass = _get_pipeline(cls_name)
@@ -176,10 +216,28 @@ class ModelCache:
                 last_used=now,
                 vram_estimate_mb=self._estimate_vram(pipe),
             )
-            self._cache[key] = cached
+            self._cache[base_key] = cached
 
             # Handle LoRA for freshly-loaded pipeline
             self._apply_lora(cached, spec, emitter)
+
+            # If we need a non-txt2img mode, switch via from_pipe()
+            if mode != "txt2img":
+                target_cls_name = resolve_pipeline_class_for_mode(base_model_id, mode)
+                emitter.info(f"Mode switch via from_pipe(): {cls_name} -> {target_cls_name}")
+                TargetClass = _get_pipeline(target_cls_name)
+                mode_pipe = TargetClass.from_pipe(pipe)
+                mode_cached = CachedPipeline(
+                    pipeline=mode_pipe,
+                    cls_name=target_cls_name,
+                    loaded_at=now,
+                    last_used=now,
+                    vram_estimate_mb=0,
+                    lora_id=cached.lora_id,
+                    lora_weight=cached.lora_weight,
+                )
+                self._cache[key] = mode_cached
+                return mode_pipe, target_cls_name
 
             return pipe, cls_name
 
@@ -199,6 +257,7 @@ class ModelCache:
                 models.append({
                     "model_id": key.model_id,
                     "dtype": key.dtype,
+                    "mode": key.mode,
                     "loaded_at": cached.loaded_at,
                     "last_used": cached.last_used,
                     "vram_estimate_mb": cached.vram_estimate_mb,

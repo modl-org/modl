@@ -38,6 +38,15 @@ pub struct GenerateRequest {
     pub num_images: u32,
     #[serde(default)]
     pub loras: Vec<GenerateLoraRequest>,
+    /// Path to init image for img2img / inpainting (server-side path)
+    #[serde(default)]
+    pub init_image: Option<String>,
+    /// Path to mask image for inpainting
+    #[serde(default)]
+    pub mask: Option<String>,
+    /// Denoising strength for img2img (0.0-1.0)
+    #[serde(default)]
+    pub strength: Option<f32>,
 }
 
 #[derive(Serialize)]
@@ -108,6 +117,9 @@ async fn run_single_generate(sender: &broadcast::Sender<String>, req: GenerateRe
         Some(req.steps),
         Some(req.guidance),
         req.num_images,
+        req.init_image.as_deref(),
+        req.mask.as_deref(),
+        req.strength,
         false,
         None,
         false, // no_worker: use persistent worker if available
