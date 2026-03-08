@@ -55,3 +55,22 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets -- -D warnings
+
+  docs:
+    name: CLI docs freshness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check README commands match CLI
+        run: |
+          cargo build --quiet
+          LIVE_COMMANDS=$(./target/debug/modl cli-schema 2>/dev/null | jq -r '.commands[].name' | sort)
+          README_COMMANDS=$(grep -oP '`modl (\S+)`' README.md | sed 's/`modl //;s/`//' | sort -u)
+          # Check if any CLI command is completely missing from README
+          MISSING=$(comm -23 <(echo "$LIVE_COMMANDS") <(echo "$README_COMMANDS") || true)
+          if [ -n "$MISSING" ]; then
+            echo "::warning::README may be stale — these CLI commands are not mentioned: $MISSING"
+            echo "Run: scripts/generate-cli-reference.sh"
+          fi
