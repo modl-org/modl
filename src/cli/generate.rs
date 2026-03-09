@@ -79,6 +79,8 @@ fn default_steps(base_model: &str) -> u32 {
         8
     } else if lower.contains("schnell") || lower.contains("turbo") || lower.contains("lightning") {
         4
+    } else if lower.contains("flux2") || lower.contains("flux.2") || lower.contains("flux-2") {
+        28
     } else if lower.contains("chroma") {
         25
     } else if lower.contains("sdxl") {
@@ -95,7 +97,11 @@ fn default_guidance(base_model: &str) -> f32 {
         1.0
     } else if lower.contains("schnell") || lower.contains("turbo") || lower.contains("lightning") {
         0.0
-    } else if lower.contains("chroma") {
+    } else if lower.contains("flux2")
+        || lower.contains("flux.2")
+        || lower.contains("flux-2")
+        || lower.contains("chroma")
+    {
         4.0
     } else if lower.contains("sdxl") {
         7.5

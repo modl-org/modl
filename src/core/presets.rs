@@ -21,6 +21,7 @@ pub struct GpuContext {
 pub enum BaseModelFamily {
     Flux,
     FluxSchnell,
+    Flux2,
     ZImage,
     Chroma,
     QwenImage,
@@ -40,6 +41,8 @@ impl BaseModelFamily {
             Ok(Self::QwenImage)
         } else if lower.contains("flux") && lower.contains("schnell") {
             Ok(Self::FluxSchnell)
+        } else if lower.contains("flux2") || lower.contains("flux.2") || lower.contains("flux-2") {
+            Ok(Self::Flux2)
         } else if lower.contains("flux") {
             Ok(Self::Flux)
         } else if lower.contains("sdxl") || lower.contains("xl") {
@@ -49,7 +52,7 @@ impl BaseModelFamily {
         } else {
             bail!(
                 "Unknown base model family for '{id}'. Supported families include:\n\
-                 - flux-dev / flux-schnell\n\
+                 - flux-dev / flux-schnell / flux2-dev\n\
                  - z-image / z-image-turbo\n\
                  - chroma\n\
                  - qwen-image\n\
@@ -65,6 +68,7 @@ impl BaseModelFamily {
         match self {
             Self::Flux
             | Self::FluxSchnell
+            | Self::Flux2
             | Self::Sdxl
             | Self::ZImage
             | Self::Chroma

@@ -281,6 +281,10 @@ def assemble_pipeline(
                 "class": model_class_name,
             }
 
+            # Check if this is an NF4-quantized model (HF directory with
+            # quantization config, e.g. Flux2's Mistral3 text encoder)
+            quantize_nf4 = spec.get("quantize_nf4", False)
+
             if hasattr(ModelClass, "from_single_file"):
                 # Diffusers models (VAE) — from_single_file handles memory
                 components[param_name] = ModelClass.from_single_file(
@@ -288,6 +292,22 @@ def assemble_pipeline(
                     config=str(config_dir),
                     torch_dtype=torch.bfloat16,
                 )
+            elif os.path.isdir(resolved_path):
+                # HF directory layout (e.g. quantized Mistral3 from BFL)
+                load_kwargs = {"torch_dtype": torch.bfloat16}
+                if quantize_nf4:
+                    try:
+                        from transformers import BitsAndBytesConfig
+                        load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                            load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                        )
+                        emitter.info(f"  → NF4 quantization enabled for {param_name}")
+                    except ImportError:
+                        emitter.info(f"  → bitsandbytes not available, loading in bf16")
+                model = ModelClass.from_pretrained(
+                    resolved_path, config=str(config_dir), **load_kwargs,
+                )
+                components[param_name] = model
             else:
                 # Transformers models (CLIP, T5) — use empty weights to
                 # avoid ~44GB fp32 allocation for large models like T5-XXL

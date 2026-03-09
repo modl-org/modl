@@ -1,0 +1,38 @@
+{
+  "architectures": ["Mistral3ForConditionalGeneration"],
+  "model_type": "mistral3",
+  "dtype": "bfloat16",
+  "image_token_index": 10,
+  "multimodal_projector_bias": false,
+  "projector_hidden_act": "gelu",
+  "spatial_merge_size": 2,
+  "text_config": {
+    "hidden_act": "silu",
+    "hidden_size": 5120,
+    "intermediate_size": 32768,
+    "max_position_embeddings": 131072,
+    "num_attention_heads": 32,
+    "num_hidden_layers": 40,
+    "num_key_value_heads": 8,
+    "head_dim": 128,
+    "rms_norm_eps": 1e-05,
+    "rope_theta": 1000000000.0,
+    "use_cache": true,
+    "vocab_size": 131072,
+    "model_type": "mistral"
+  },
+  "vision_config": {
+    "hidden_act": "silu",
+    "hidden_size": 1024,
+    "image_size": 1540,
+    "intermediate_size": 4096,
+    "num_attention_heads": 16,
+    "num_channels": 3,
+    "num_hidden_layers": 24,
+    "patch_size": 14,
+    "head_dim": 64,
+    "rope_theta": 10000.0,
+    "model_type": "pixtral"
+  },
+  "vision_feature_layer": -1
+}

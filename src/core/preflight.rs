@@ -56,7 +56,7 @@ pub fn check_base_model(base_model_id: &str) -> Result<()> {
 /// download time since not all Civitai models require auth.
 pub fn check_auth_if_gated(base_model_id: &str) -> Result<()> {
     // Models known to be gated on HuggingFace
-    const GATED_MODELS: &[&str] = &["flux-dev", "sd-3.5-large", "sd-3.5-medium"];
+    const GATED_MODELS: &[&str] = &["flux-dev", "flux2-dev", "sd-3.5-large", "sd-3.5-medium"];
 
     if !GATED_MODELS.contains(&base_model_id) {
         return Ok(());
