@@ -19,6 +19,7 @@ pub struct EditArgs<'a> {
     pub steps: Option<u32>,
     pub guidance: Option<f32>,
     pub count: u32,
+    pub fast: bool,
     pub cloud: bool,
     pub provider: Option<CloudProvider>,
     pub no_worker: bool,
@@ -89,6 +90,34 @@ fn resolve_base_model_path(base_model: &str, db: &Database) -> Option<String> {
     None
 }
 
+/// Resolve a LoRA name to its store path by looking in the DB.
+fn resolve_lora(name: &str, weight: f32, db: &Database) -> Result<Option<LoraRef>> {
+    let path = PathBuf::from(name);
+    if path.exists() && path.extension().is_some_and(|e| e == "safetensors") {
+        return Ok(Some(LoraRef {
+            name: path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+            path: path.to_string_lossy().to_string(),
+            weight,
+        }));
+    }
+
+    let installed = db.list_installed(None)?;
+    for model in &installed {
+        if (model.name == name || model.id == name) && model.asset_type == "lora" {
+            return Ok(Some(LoraRef {
+                name: model.name.clone(),
+                path: model.store_path.clone(),
+                weight,
+            }));
+        }
+    }
+    Ok(None)
+}
+
 pub async fn run(args: EditArgs<'_>) -> Result<()> {
     let db = Database::open()?;
 
@@ -100,6 +129,7 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
         steps,
         guidance,
         count,
+        fast,
         cloud,
         provider,
         no_worker,
@@ -133,6 +163,35 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
     let base_model_path = resolve_base_model_path(&base_model, &db);
 
     // -------------------------------------------------------------------
+    // Resolve --fast (Lightning LoRA)
+    // -------------------------------------------------------------------
+    let (fast_lora, fast_steps, fast_guidance) = if fast {
+        let lightning = model_family::lightning_config(&base_model).with_context(|| {
+            let supported: Vec<&str> = model_family::LIGHTNING_CONFIGS
+                .iter()
+                .map(|c| c.base_model_id)
+                .collect();
+            format!(
+                "--fast is not yet supported for '{}'. Supported: {}",
+                base_model,
+                supported.join(", ")
+            )
+        })?;
+
+        let lora_ref = resolve_lora(lightning.lora_registry_id, 1.0, &db).with_context(|| {
+            format!(
+                "Lightning LoRA '{}' is not installed.\n\n  \
+                 Install it:\n\n    modl pull {} --variant {}\n",
+                lightning.lora_registry_id, lightning.lora_registry_id, lightning.lora_variant,
+            )
+        })?;
+
+        (lora_ref, Some(lightning.steps), Some(lightning.guidance))
+    } else {
+        (None, None, None)
+    };
+
+    // -------------------------------------------------------------------
     // Resolve image inputs (download URLs if needed)
     // -------------------------------------------------------------------
     let mut resolved_paths = Vec::new();
@@ -153,11 +212,11 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
     std::fs::create_dir_all(&output_dir)?;
 
     // -------------------------------------------------------------------
-    // Resolve defaults
+    // Resolve defaults (--fast overrides, then explicit --steps/--guidance)
     // -------------------------------------------------------------------
     let (default_steps, default_guidance) = model_family::model_defaults(&base_model);
-    let steps = steps.unwrap_or(default_steps);
-    let guidance = guidance.unwrap_or(default_guidance);
+    let steps = steps.or(fast_steps).unwrap_or(default_steps);
+    let guidance = guidance.or(fast_guidance).unwrap_or(default_guidance);
 
     // -------------------------------------------------------------------
     // Build spec
@@ -168,6 +227,7 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
             base_model_id: base_model.clone(),
             base_model_path,
         },
+        lora: fast_lora,
         output: GenerateOutputRef {
             output_dir: output_dir.to_string_lossy().to_string(),
         },
@@ -197,6 +257,12 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
         println!("{} Editing image(s)...", style("→").cyan());
         println!("  Prompt: {}", style(prompt).italic());
         println!("  Model:  {}", base_model);
+        if fast {
+            println!(
+                "  Mode:   {}",
+                style("fast (Lightning LoRA)").green().bold()
+            );
+        }
         for (i, path) in resolved_paths.iter().enumerate() {
             println!("  Image {}: {}", i + 1, path);
         }

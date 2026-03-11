@@ -69,7 +69,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     srv = sub.add_parser("serve", help="Start persistent worker daemon")
     srv.add_argument("--timeout", type=int, default=600, help="Idle timeout in seconds (default: 600)")
-    srv.add_argument("--max-models", type=int, default=2, help="Max models to cache in VRAM (default: 2)")
+    srv.add_argument("--max-models", type=int,
+                     default=int(os.environ.get("MODL_MAX_MODELS", "2")),
+                     help="Max models to cache in VRAM (default: 2, env: MODL_MAX_MODELS)")
 
     return parser
 

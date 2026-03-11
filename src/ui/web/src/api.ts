@@ -168,6 +168,22 @@ export type GenerateRequest = {
   fast?: boolean       // use Lightning distillation LoRA
 }
 
+export type EditRequest = {
+  prompt: string
+  model_id: string
+  images: string[] // server-side paths (uploaded via /api/upload)
+  steps: number
+  guidance: number
+  seed?: number
+  num_images: number
+}
+
+export type AnalysisResponse = {
+  status: string
+  output_path?: string
+  error?: string
+}
+
 export type EnhanceRequest = {
   prompt: string
   model_hint?: string
@@ -310,6 +326,24 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req),
+    }),
+  edit: (req: EditRequest) =>
+    fetch('/api/edit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+    }),
+  upscale: (imagePath: string, scale = 4) =>
+    fetchJson<AnalysisResponse>('/api/analysis/upscale', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image_path: imagePath, scale }),
+    }),
+  removeBg: (imagePath: string) =>
+    fetchJson<AnalysisResponse>('/api/analysis/remove-bg', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image_path: imagePath }),
     }),
   queueStatus: () => fetchJson<{ running: boolean; queue_length: number }>('/api/generate/queue'),
   clearQueue: () =>

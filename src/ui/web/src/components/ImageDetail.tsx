@@ -1,5 +1,6 @@
-import { useCallback, useEffect, type Dispatch, type SetStateAction } from 'react'
-import { ChevronLeft, ChevronRight } from 'lucide-react'
+import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from 'react'
+import { ArrowUpIcon, ChevronLeft, ChevronRight, EraserIcon, LoaderCircleIcon, PencilIcon } from 'lucide-react'
+import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -10,7 +11,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import type { GeneratedImage } from '../api'
+import { api, type GeneratedImage } from '../api'
 import { randomSeed, type GenerateFormState } from './generate/generate-state'
 
 type AppTab = 'train' | 'generate' | 'outputs' | 'datasets'
@@ -26,6 +27,8 @@ type Props = {
   onNavigate?: (image: GeneratedImage) => void
   /** Toggle favourite */
   onToggleFavorite?: (path: string) => void
+  /** Send image to edit mode */
+  onEditImage?: (imageUrl: string, serverPath: string) => void
 }
 
 function valueForDisplay(value: unknown): string {
@@ -71,7 +74,43 @@ function openAsRecipe(
   setActiveTab('generate')
 }
 
-export function ImageDetail({ image, onClose, setForm, setActiveTab, allImages, onNavigate, onToggleFavorite }: Props) {
+export function ImageDetail({ image, onClose, setForm, setActiveTab, allImages, onNavigate, onToggleFavorite, onEditImage }: Props) {
+  const [upscaling, setUpscaling] = useState(false)
+  const [removingBg, setRemovingBg] = useState(false)
+
+  const handleUpscale = useCallback(async () => {
+    if (!image || upscaling) return
+    setUpscaling(true)
+    try {
+      const result = await api.upscale(image.path)
+      if (result.status === 'completed') {
+        toast.success('Upscaled successfully')
+      } else {
+        toast.error(result.error ?? 'Upscale failed')
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Upscale failed')
+    } finally {
+      setUpscaling(false)
+    }
+  }, [image, upscaling])
+
+  const handleRemoveBg = useCallback(async () => {
+    if (!image || removingBg) return
+    setRemovingBg(true)
+    try {
+      const result = await api.removeBg(image.path)
+      if (result.status === 'completed') {
+        toast.success('Background removed')
+      } else {
+        toast.error(result.error ?? 'Background removal failed')
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Background removal failed')
+    } finally {
+      setRemovingBg(false)
+    }
+  }, [image, removingBg])
   const currentIndex = image && allImages ? allImages.findIndex((img) => img.path === image.path) : -1
   const prevImage = allImages && currentIndex > 0 ? allImages[currentIndex - 1] : null
   const nextImage = allImages && currentIndex >= 0 && currentIndex < allImages.length - 1 ? allImages[currentIndex + 1] : null
@@ -197,6 +236,43 @@ export function ImageDetail({ image, onClose, setForm, setActiveTab, allImages, 
                   }}
                 >
                   Open as recipe
+                </Button>
+                {onEditImage && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      onEditImage(`/files/${image.path}`, image.path)
+                      onClose()
+                    }}
+                    title="Send to Edit mode"
+                  >
+                    <PencilIcon className="mr-1 size-3" />
+                    Edit
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={upscaling}
+                  onClick={handleUpscale}
+                  title="Upscale 4x"
+                >
+                  {upscaling ? <LoaderCircleIcon className="mr-1 size-3 animate-spin" /> : <ArrowUpIcon className="mr-1 size-3" />}
+                  4x
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={removingBg}
+                  onClick={handleRemoveBg}
+                  title="Remove background"
+                >
+                  {removingBg ? <LoaderCircleIcon className="mr-1 size-3 animate-spin" /> : <EraserIcon className="mr-1 size-3" />}
+                  Remove BG
                 </Button>
                 <Button type="button" size="sm" variant="outline" onClick={onClose}>
                   Close

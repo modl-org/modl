@@ -40,6 +40,7 @@ def run_edit(config_path: Path, emitter: EventEmitter) -> int:
 
     try:
         pipe = _load_edit_pipeline(base_model_id, base_model_path, emitter)
+        _apply_lora(pipe, spec, emitter)
         emitter.job_started(config=str(config_path))
     except Exception as exc:
         emitter.error(
@@ -139,6 +140,7 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
             try:
                 from PIL.PngImagePlugin import PngInfo
 
+                lora_info = spec.get("lora")
                 embedded_meta = {
                     "generated_with": "modl.run",
                     "mode": "edit",
@@ -148,6 +150,8 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
                     "steps": steps,
                     "guidance": guidance,
                     "seed": image_seed,
+                    "lora_name": lora_info.get("name") if lora_info else None,
+                    "lora_strength": lora_info.get("weight") if lora_info else None,
                     "image_index": i,
                     "count": count,
                     "timestamp": timestamp,
@@ -185,6 +189,42 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
         emitter.error("NO_IMAGES_GENERATED", "All edit attempts failed.", recoverable=False)
 
     return 0 if artifact_paths else 1
+
+
+def _apply_lora(pipeline, spec: dict, emitter: EventEmitter) -> None:
+    """Load and fuse a LoRA onto the edit pipeline if specified in the spec."""
+    lora_info = spec.get("lora")
+    if not lora_info:
+        return
+
+    lora_path = lora_info.get("path")
+    lora_weight = lora_info.get("weight", 1.0)
+    lora_name = lora_info.get("name", "unnamed")
+
+    # GGUF models: PEFT uses weight.shape (packed/quantized) for dimension matching,
+    # but GGUFLinear stores [out, packed] instead of [out, in]. This causes a mismatch
+    # with LoRA weights trained for the logical dimensions (in_features/out_features).
+    # TODO: Implement ComfyUI-style forward patching — load LoRA safetensors manually,
+    # wrap each target layer's forward to add the LoRA delta (lora_up @ lora_down * scale)
+    # using the logical dimensions. This bypasses PEFT entirely and is the proven approach
+    # for GGUF + LoRA in the ecosystem.
+    model_info = spec.get("model", {})
+    base_path = model_info.get("base_model_path", "")
+    if base_path and base_path.endswith(".gguf"):
+        raise RuntimeError(
+            f"Cannot apply LoRA '{lora_name}' to a GGUF model (not yet supported). "
+            f"Install a bf16 or fp8 variant: modl pull qwen-image-edit --variant fp8"
+        )
+
+    if lora_path and os.path.exists(lora_path):
+        emitter.info(f"Loading LoRA: {lora_name} (weight={lora_weight})")
+        lora_dir = os.path.dirname(lora_path)
+        lora_file = os.path.basename(lora_path)
+        pipeline.load_lora_weights(lora_dir, weight_name=lora_file)
+        pipeline.fuse_lora(lora_scale=lora_weight)
+        emitter.info(f"LoRA applied and fused")
+    elif lora_path:
+        emitter.warning("LORA_NOT_FOUND", f"LoRA file not found: {lora_path}")
 
 
 def _load_edit_pipeline(base_model_id: str, base_model_path: str | None, emitter: EventEmitter):

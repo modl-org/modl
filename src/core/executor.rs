@@ -123,6 +123,7 @@ impl Executor for LocalExecutor {
             .arg("--job-id")
             .arg(&job_id)
             .env("PYTHONPATH", &py_path)
+            .env("HF_HUB_OFFLINE", "1")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -180,7 +181,15 @@ impl Executor for LocalExecutor {
     }
 
     fn submit_generate(&mut self, spec: &GenerateJobSpec) -> Result<JobHandle> {
-        let job_id = format!("gen-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
+        let job_id = format!(
+            "gen-{}-{:04x}",
+            chrono::Utc::now().format("%Y%m%d-%H%M%S"),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_micros()
+                % 0xFFFF
+        );
 
         // -------------------------------------------------------------------
         // Try persistent worker socket first (warm model, fast path)
@@ -199,7 +208,15 @@ impl Executor for LocalExecutor {
     }
 
     fn submit_edit(&mut self, spec: &EditJobSpec) -> Result<JobHandle> {
-        let job_id = format!("edit-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
+        let job_id = format!(
+            "edit-{}-{:04x}",
+            chrono::Utc::now().format("%Y%m%d-%H%M%S"),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_micros()
+                % 0xFFFF
+        );
 
         if self.use_worker
             && let Some(handle) = self.try_submit_via_socket_action(&job_id, "edit", spec)?
@@ -407,6 +424,7 @@ impl LocalExecutor {
             .arg("--job-id")
             .arg(job_id)
             .env("PYTHONPATH", py_path)
+            .env("HF_HUB_OFFLINE", "1")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -488,6 +506,7 @@ impl LocalExecutor {
             .arg("--job-id")
             .arg(job_id)
             .env("PYTHONPATH", py_path)
+            .env("HF_HUB_OFFLINE", "1")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 

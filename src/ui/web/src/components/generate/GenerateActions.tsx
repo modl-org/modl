@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { ListIcon, SparklesIcon, SquareIcon, XIcon, ZapIcon } from 'lucide-react'
+import { ListIcon, PencilIcon, SparklesIcon, SquareIcon, XIcon, ZapIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import type { GpuStatus } from '../../api'
 import type { GenerateFormState } from './generate-state'
@@ -9,26 +9,26 @@ type Props = {
   gpu: GpuStatus
   isGenerating: boolean
   queueCount: number
+  isEditMode?: boolean
   onGenerate: () => void
   onInterrupt?: () => void
   onClearQueue?: () => void
   onToggleFast?: (fast: boolean) => void
 }
 
-export function GenerateActions({ form, gpu, isGenerating, queueCount, onGenerate, onInterrupt, onClearQueue, onToggleFast }: Props) {
+export function GenerateActions({ form, gpu, isGenerating, queueCount, isEditMode, onGenerate, onInterrupt, onClearQueue, onToggleFast }: Props) {
   const canSubmit = useMemo(() => {
-    return (
-      !gpu.training_active &&
-      form.prompt.trim().length > 0 &&
-      form.base_model_id.length > 0
-    )
-  }, [form.base_model_id, form.prompt, gpu.training_active])
+    const baseOk = !gpu.training_active && form.prompt.trim().length > 0 && form.base_model_id.length > 0
+    if (isEditMode) return baseOk && (form.edit_images?.length ?? 0) > 0
+    return baseOk
+  }, [form.base_model_id, form.prompt, form.edit_images.length, gpu.training_active, isEditMode])
 
+  const actionWord = isEditMode ? 'Edit' : 'Generate'
   const buttonLabel = gpu.training_active
     ? 'GPU busy — training'
     : isGenerating
       ? `Enqueue${form.batch_count > 1 ? ` (${form.batch_count})` : ''}`
-      : `Generate${form.batch_count > 1 ? ` (${form.batch_count})` : ''}`
+      : `${actionWord}${form.batch_count > 1 ? ` (${form.batch_count})` : ''}`
 
   return (
     <div className="w-full space-y-2">
@@ -57,6 +57,8 @@ export function GenerateActions({ form, gpu, isGenerating, queueCount, onGenerat
         >
           {isGenerating ? (
             <ListIcon className="size-4" />
+          ) : isEditMode ? (
+            <PencilIcon className="size-4" />
           ) : (
             <SparklesIcon className="size-4" />
           )}

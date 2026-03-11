@@ -245,6 +245,7 @@ class ModelCache:
 
     def evict_all(self, emitter: EventEmitter | None = None) -> None:
         """Evict all cached models (diffusion + utility) and free VRAM."""
+        import gc
         import torch
         with self._lock:
             for key in list(self._cache.keys()):
@@ -255,6 +256,7 @@ class ModelCache:
                 if emitter:
                     emitter.info(f"Evicting {len(self._utility_cache)} utility model(s)")
                 self._utility_cache.clear()
+            gc.collect()
             torch.cuda.empty_cache()
 
     def _reconcile_lora(self, cached: CachedPipeline, spec: dict, emitter: EventEmitter) -> None:
@@ -292,13 +294,16 @@ class ModelCache:
 
         if lora_path and os.path.exists(lora_path):
             emitter.info(f"Loading LoRA: {lora_name} (weight={lora_weight})")
-            cached.pipeline.load_lora_weights(lora_path)
+            lora_dir = os.path.dirname(lora_path)
+            lora_file = os.path.basename(lora_path)
+            cached.pipeline.load_lora_weights(lora_dir, weight_name=lora_file)
             cached.pipeline.fuse_lora(lora_scale=lora_weight)
             cached.lora_id = lora_path
             cached.lora_weight = lora_weight
 
     def _evict_lru(self, emitter: EventEmitter) -> None:
         """Remove the least-recently-used model from the cache."""
+        import gc
         import torch
         if not self._cache:
             return
@@ -306,6 +311,7 @@ class ModelCache:
         lru_key = min(self._cache, key=lambda k: self._cache[k].last_used)
         emitter.info(f"Evicting LRU model: {lru_key.model_id}")
         del self._cache[lru_key]
+        gc.collect()
         torch.cuda.empty_cache()
 
     @staticmethod

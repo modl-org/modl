@@ -177,8 +177,14 @@ pub async fn start(timeout: u32) -> Result<()> {
         .arg("--timeout")
         .arg(timeout.to_string())
         .env("PYTHONPATH", py_path)
-        .stdout(std::process::Stdio::null())
-        .stderr(log_file);
+        .env("HF_HUB_OFFLINE", "1");
+
+    // Pass through MODL_MAX_MODELS if set (default: 2)
+    if let Ok(max_models) = std::env::var("MODL_MAX_MODELS") {
+        command.arg("--max-models").arg(&max_models);
+    }
+
+    command.stdout(std::process::Stdio::null()).stderr(log_file);
 
     // Detach from parent process group so it survives terminal close
     #[cfg(unix)]

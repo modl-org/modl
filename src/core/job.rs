@@ -215,6 +215,8 @@ pub struct RemoveBgJobSpec {
 pub struct EditJobSpec {
     pub prompt: String,
     pub model: ModelRef,
+    #[serde(default)]
+    pub lora: Option<LoraRef>,
     pub output: GenerateOutputRef,
     pub params: EditParams,
     pub runtime: RuntimeRef,

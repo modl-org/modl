@@ -1,3 +1,4 @@
+pub mod analysis;
 pub mod datasets;
 pub mod files;
 pub mod generate;

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 
-use super::routes::{datasets, files, generate, models, outputs, studio, training};
+use super::routes::{analysis, datasets, files, generate, models, outputs, studio, training};
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -26,7 +26,7 @@ pub struct UiState {
 /// Internal generation state protected by a Mutex.
 pub struct GenerateInner {
     pub running: bool,
-    pub queue: VecDeque<generate::GenerateRequest>,
+    pub queue: VecDeque<generate::QueuedJob>,
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +124,11 @@ pub async fn start(port: u16, open_browser: bool) -> Result<()> {
             get(outputs::api_list_outputs).delete(outputs::api_delete_output),
         )
         .route("/api/outputs/favorite", post(outputs::api_toggle_favorite))
+        // Edit (shares generate queue + SSE stream)
+        .route("/api/edit", post(generate::api_edit))
+        // Analysis (upscale, remove-bg)
+        .route("/api/analysis/upscale", post(analysis::api_upscale))
+        .route("/api/analysis/remove-bg", post(analysis::api_remove_bg))
         // Studio
         .route(
             "/api/studio/sessions",

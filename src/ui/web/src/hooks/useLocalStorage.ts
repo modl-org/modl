@@ -14,7 +14,13 @@ export function useLocalStorage<T>(key: string, initialValue: T | (() => T)) {
 
     try {
       const item = window.localStorage.getItem(key)
-      return item ? (JSON.parse(item) as T) : fallback
+      if (!item) return fallback
+      const parsed = JSON.parse(item) as T
+      // Merge with defaults so new fields are always present
+      if (typeof fallback === 'object' && fallback !== null && !Array.isArray(fallback)) {
+        return { ...fallback, ...parsed }
+      }
+      return parsed
     } catch {
       return fallback
     }

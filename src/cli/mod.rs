@@ -1,11 +1,11 @@
-mod analysis;
+pub(crate) mod analysis;
 mod auth;
 mod compare;
 mod config;
 mod datasets;
 mod detect;
 mod doctor;
-mod edit;
+pub(crate) mod edit;
 mod enhance;
 mod export;
 mod face_restore;
@@ -486,6 +486,9 @@ pub enum Commands {
         /// Number of output images
         #[arg(long, default_value = "1")]
         count: u32,
+        /// Use Lightning distillation LoRA for fast editing (fewer steps)
+        #[arg(long)]
+        fast: bool,
         /// Run on cloud
         #[arg(long)]
         cloud: bool,
@@ -917,6 +920,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             steps,
             guidance,
             count,
+            fast,
             cloud,
             provider,
             no_worker,
@@ -930,6 +934,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 steps,
                 guidance,
                 count,
+                fast,
                 cloud,
                 provider,
                 no_worker,

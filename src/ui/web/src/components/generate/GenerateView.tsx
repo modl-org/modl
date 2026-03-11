@@ -5,8 +5,10 @@ import {
   DownloadIcon,
   Maximize2Icon,
   Minimize2Icon,
+  PencilIcon,
+  SparklesIcon,
 } from 'lucide-react'
-import { api, type GeneratedImage, type GeneratedOutput, type GenerateRequest, type GpuStatus, type InstalledModel, type ModelFamily } from '../../api'
+import { api, type EditRequest, type GeneratedImage, type GeneratedOutput, type GenerateRequest, type GpuStatus, type InstalledModel, type ModelFamily } from '../../api'
 import { useLocalStorage } from '../../hooks/useLocalStorage'
 import { useSSE } from '../../hooks/useSSE'
 import { CollapsibleSection } from '../ui/collapsible-section'
@@ -21,7 +23,8 @@ import { ModelPanel } from './ModelPanel'
 import { PromptPanel } from './PromptPanel'
 import { SamplingPanel } from './SamplingPanel'
 import { SizePanel } from './SizePanel'
-import { createDefaultGenerateFormState, findModelFamily, type GenerateFormState } from './generate-state'
+import { EditImagesPanel } from './EditImagesPanel'
+import { createDefaultGenerateFormState, findModelFamily, modelDefaults, randomSeed, type GenerateFormState, type GenerationMode } from './generate-state'
 
 // ---------------------------------------------------------------------------
 // GenerateView — pro sidebar layout with scrollable controls + fixed canvas
@@ -168,13 +171,41 @@ export function GenerateView({ setTab: _setTab }: Props) {
     onError: handleSSEError,
   })
 
+  // ── Mode switch ────────────────────────────────────────────────────
+  const handleModeSwitch = useCallback((mode: GenerationMode) => {
+    setForm((prev) => {
+      const updates: Partial<GenerateFormState> = { mode }
+      if (mode === 'edit') {
+        // Auto-select qwen-image-edit if available + apply its defaults
+        const editModel = models.find(
+          (m) => m.id === 'qwen-image-edit' || m.name.toLowerCase().includes('qwen-image-edit'),
+        )
+        if (editModel) {
+          updates.base_model_id = editModel.id
+          const info = findModelFamily(editModel.name, families)
+          const defaults = modelDefaults(editModel.name, info)
+          updates.steps = defaults.steps
+          updates.guidance = defaults.guidance
+        }
+      }
+      return { ...prev, ...updates }
+    })
+  }, [models, families, setForm])
+
+  // Top-level mode for the view (generate vs edit)
+  const isEditMode = form.mode === 'edit'
+
   // ── Keyboard shortcut: Ctrl/Cmd + Enter ──────────────────────────────
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
         e.preventDefault()
         if (form.prompt.trim() && form.base_model_id) {
-          handleGenerate()
+          if (isEditMode) {
+            handleEdit()
+          } else {
+            handleGenerate()
+          }
         }
       }
     }
@@ -185,6 +216,13 @@ export function GenerateView({ setTab: _setTab }: Props) {
   // ── Submit generation (supports enqueue) ─────────────────────────────
   const handleGenerate = useCallback(async () => {
     if (!form.prompt.trim() || !form.base_model_id) return
+
+    // Randomize seed if not locked
+    if (!form.seed_locked) {
+      const newSeed = randomSeed()
+      setForm((prev) => ({ ...prev, seed: newSeed }))
+      form.seed = newSeed // use in this request too
+    }
 
     // Upload init image if in img2img mode
     let initImagePath: string | undefined
@@ -260,6 +298,86 @@ export function GenerateView({ setTab: _setTab }: Props) {
     }
   }, [form, isGenerating])
 
+  // ── Submit edit ────────────────────────────────────────────────────
+  const handleEdit = useCallback(async () => {
+    const editImages = form.edit_images ?? []
+    if (!form.prompt.trim() || !form.base_model_id || editImages.length === 0) return
+
+    // Randomize seed if not locked
+    if (!form.seed_locked) {
+      const newSeed = randomSeed()
+      setForm((prev) => ({ ...prev, seed: newSeed }))
+      form.seed = newSeed
+    }
+
+    // Resolve all edit images to server-side paths
+    const uploadedPaths: string[] = []
+    try {
+      for (const img of editImages) {
+        if (img.type === 'server') {
+          uploadedPaths.push(img.serverPath)
+        } else {
+          const uploaded = await api.upload(img.file)
+          uploadedPaths.push(uploaded.path)
+        }
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      toast.error(`Image upload failed: ${message}`)
+      return
+    }
+
+    const req: EditRequest = {
+      prompt: form.prompt,
+      model_id: form.base_model_id,
+      images: uploadedPaths,
+      steps: form.steps,
+      guidance: form.guidance,
+      seed: form.seed,
+      num_images: form.batch_count,
+    }
+
+    if (!isGenerating) {
+      expectedCountRef.current = form.batch_count
+      setPreviewImages([])
+      setProgressState({ status: 'submitting' })
+    }
+
+    setSseConnected(true)
+    console.log('[edit] submitting:', req.model_id, req.prompt.slice(0, 60))
+
+    try {
+      const res = await api.edit(req)
+      if (!res.ok) {
+        let message = `HTTP ${res.status}`
+        try {
+          const body = await res.json()
+          if (body.error) message = body.error
+        } catch {
+          const text = await res.text()
+          if (text) message = text
+        }
+        throw new Error(message)
+      }
+      const body = await res.json()
+      const queueLen = body.queue_length ?? 0
+      setQueueCount(queueLen)
+
+      if (queueLen > 0) {
+        toast.info(`Enqueued — position ${queueLen}`)
+      } else if (!isGenerating) {
+        setProgressState({ status: 'streaming', lines: [] })
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      console.error('[edit] submit failed:', message)
+      toast.error(message)
+      if (!isGenerating) {
+        setProgressState({ status: 'error', message })
+      }
+    }
+  }, [form, isGenerating])
+
   // ── Gallery click → load params ──────────────────────────────────────
   const handleGallerySelect = useCallback(
     (img: GeneratedImage) => {
@@ -295,6 +413,40 @@ export function GenerateView({ setTab: _setTab }: Props) {
     a.click()
   }, [previewImages])
 
+  // ── Send image to edit mode ─────────────────────────────────────────
+  const sendToEdit = useCallback(
+    (imageUrl: string, serverPath: string) => {
+      setForm((prev) => {
+        // Auto-select qwen-image-edit if available + apply its defaults
+        let modelId = prev.base_model_id
+        let steps = prev.steps
+        let guidance = prev.guidance
+        const editModel = models.find(
+          (m) => m.id === 'qwen-image-edit' || m.name.toLowerCase().includes('qwen-image-edit'),
+        )
+        if (editModel) {
+          modelId = editModel.id
+          const info = findModelFamily(editModel.name, families)
+          const defaults = modelDefaults(editModel.name, info)
+          steps = defaults.steps
+          guidance = defaults.guidance
+        }
+
+        return {
+          ...prev,
+          mode: 'edit' as const,
+          base_model_id: modelId,
+          steps,
+          guidance,
+          edit_images: [
+            { type: 'server' as const, preview: imageUrl, serverPath },
+          ],
+        }
+      })
+    },
+    [models, families, setForm],
+  )
+
   const activePreviewImage = previewImages[0]
 
   // ── Render ───────────────────────────────────────────────────────────
@@ -302,6 +454,36 @@ export function GenerateView({ setTab: _setTab }: Props) {
     <div className="flex h-full">
       {/* ──────────────── Control Panel (Left Sidebar) ──────────────── */}
       <div className="flex w-[340px] shrink-0 flex-col border-r border-border/40 lg:w-[360px]">
+        {/* Mode switcher */}
+        <div className="flex shrink-0 border-b border-border/40 px-4 py-2">
+          <div className="flex w-full rounded-lg bg-secondary/30 p-0.5">
+            <button
+              type="button"
+              onClick={() => handleModeSwitch(form.mode === 'edit' ? 'txt2img' : form.mode)}
+              className={`flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                !isEditMode
+                  ? 'bg-background text-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              <SparklesIcon className="size-3" />
+              Generate
+            </button>
+            <button
+              type="button"
+              onClick={() => handleModeSwitch('edit')}
+              className={`flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                isEditMode
+                  ? 'bg-background text-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              <PencilIcon className="size-3" />
+              Edit
+            </button>
+          </div>
+        </div>
+
         {/* Scrollable controls */}
         <div className="flex-1 overflow-y-auto px-4 py-4">
           {/* Warning */}
@@ -320,6 +502,7 @@ export function GenerateView({ setTab: _setTab }: Props) {
             form={form}
             setForm={setForm}
             modelHint={models.find((m) => m.id === form.base_model_id)?.name}
+            placeholder={isEditMode ? 'Describe how to edit the image(s)...' : undefined}
           />
 
           {/* ─── Model & LoRA ─── */}
@@ -330,26 +513,37 @@ export function GenerateView({ setTab: _setTab }: Props) {
             </div>
           </CollapsibleSection>
 
-          {/* ─── Dimensions ─── */}
-          <CollapsibleSection title="Dimensions">
-            <div className="space-y-3">
-              <SizePanel form={form} setForm={setForm} />
-              <BatchPanel form={form} setForm={setForm} />
-            </div>
-          </CollapsibleSection>
+          {/* ─── Edit Images (edit mode only) ─── */}
+          {isEditMode && (
+            <CollapsibleSection title="Source Images" defaultOpen={true}>
+              <EditImagesPanel form={form} setForm={setForm} />
+            </CollapsibleSection>
+          )}
 
-          {/* ─── Img2Img ─── */}
-          <CollapsibleSection title="Img2Img" defaultOpen={false}>
-            <Img2ImgPanel
-              form={form}
-              setForm={setForm}
-              modelInfo={
-                models.find((m) => m.id === form.base_model_id)
-                  ? findModelFamily(models.find((m) => m.id === form.base_model_id)!.name, families)
-                  : null
-              }
-            />
-          </CollapsibleSection>
+          {/* ─── Dimensions ─── */}
+          {!isEditMode && (
+            <CollapsibleSection title="Dimensions">
+              <div className="space-y-3">
+                <SizePanel form={form} setForm={setForm} />
+                <BatchPanel form={form} setForm={setForm} />
+              </div>
+            </CollapsibleSection>
+          )}
+
+          {/* ─── Img2Img (not shown in edit mode) ─── */}
+          {!isEditMode && (
+            <CollapsibleSection title="Img2Img" defaultOpen={false}>
+              <Img2ImgPanel
+                form={form}
+                setForm={setForm}
+                modelInfo={
+                  models.find((m) => m.id === form.base_model_id)
+                    ? findModelFamily(models.find((m) => m.id === form.base_model_id)!.name, families)
+                    : null
+                }
+              />
+            </CollapsibleSection>
+          )}
 
           {/* ─── Sampling ─── */}
           <CollapsibleSection title="Sampling" defaultOpen={false}>
@@ -364,7 +558,8 @@ export function GenerateView({ setTab: _setTab }: Props) {
             gpu={gpu}
             isGenerating={isGenerating}
             queueCount={queueCount}
-            onGenerate={handleGenerate}
+            isEditMode={isEditMode}
+            onGenerate={isEditMode ? handleEdit : handleGenerate}
             onInterrupt={() => {
               setProgressState({ status: 'idle' })
             }}
@@ -421,6 +616,21 @@ export function GenerateView({ setTab: _setTab }: Props) {
                 title="Download"
               >
                 <DownloadIcon className="size-3.5" />
+              </button>
+              <div className="mx-0.5 h-4 w-px bg-border/40" />
+              <button
+                type="button"
+                onClick={() => {
+                  const img = previewImages[0]
+                  if (!img) return
+                  // Extract server path from URL: /files/outputs/... → outputs/...
+                  const serverPath = img.url.replace(/^\/files\//, '')
+                  sendToEdit(img.url, serverPath)
+                }}
+                className="rounded p-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                title="Send to Edit mode"
+              >
+                <PencilIcon className="size-3.5" />
               </button>
             </div>
           )}

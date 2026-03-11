@@ -400,6 +400,34 @@ def assemble_pipeline(
                         f"  → fp8 model prepared: {n_hooked} linear layers "
                         f"hooked, {n_cast} small params cast to bf16"
                     )
+                elif has_comfy_fp8_scales:
+                    # Small fp8 model dequantized to bf16: the in-memory
+                    # checkpoint is already clean bf16. We can't call
+                    # from_single_file (it would re-read the raw fp8 file
+                    # and choke on scale tensors). Use from_config +
+                    # load_state_dict with the dequantized checkpoint.
+                    if model_class_name == "FluxTransformer2DModel":
+                        from diffusers.loaders.single_file_utils import (
+                            convert_flux_transformer_checkpoint_to_diffusers,
+                        )
+                        convert_fn = convert_flux_transformer_checkpoint_to_diffusers
+                    else:
+                        from diffusers.loaders.single_file_utils import (
+                            convert_flux2_transformer_checkpoint_to_diffusers,
+                        )
+                        convert_fn = convert_flux2_transformer_checkpoint_to_diffusers
+                    config_dict = ModelClass.load_config(str(config_dir))
+                    with init_empty_weights():
+                        model = ModelClass.from_config(config_dict)
+                    converted = convert_fn(checkpoint)
+                    del checkpoint
+                    model.load_state_dict(converted, strict=False, assign=True)
+                    del converted
+                    _materialize_meta_tensors(model)
+                    model = model.to(torch.bfloat16)
+                    emitter.info(
+                        f"  → Loaded dequantized fp8 → bf16 via from_config"
+                    )
                 else:
                     model = ModelClass.from_single_file(
                         base_model_path, config=str(config_dir),
@@ -568,10 +596,18 @@ def load_pipeline(
         weight_dtype = _detect_weight_dtype(model_source)
         filename = Path(model_source).name
         emitter.info(f"Loading checkpoint: {filename} (weights={weight_dtype})")
-        pipe = PipelineClass.from_single_file(
-            model_source,
-            torch_dtype=torch.bfloat16,
-        )
+        # full_checkpoint (e.g. SDXL) needs HF Hub access for component config
+        # resolution during from_single_file(). Temporarily allow it.
+        from huggingface_hub import constants as hf_constants
+        was_offline = hf_constants.HF_HUB_OFFLINE
+        hf_constants.HF_HUB_OFFLINE = False
+        try:
+            pipe = PipelineClass.from_single_file(
+                model_source,
+                torch_dtype=torch.bfloat16,
+            )
+        finally:
+            hf_constants.HF_HUB_OFFLINE = was_offline
         pipe._modl_loaded_files = {
             "checkpoint": {"file": filename, "path": model_source, "weight_dtype": weight_dtype},
         }
@@ -682,7 +718,9 @@ def run_generate(config_path: Path, emitter: EventEmitter) -> int:
             lora_weight = lora_info.get("weight", 1.0)
             if lora_path and os.path.exists(lora_path):
                 emitter.info(f"Loading LoRA: {lora_info.get('name', 'unnamed')} (weight={lora_weight})")
-                pipe.load_lora_weights(lora_path)
+                lora_dir = os.path.dirname(lora_path)
+                lora_file = os.path.basename(lora_path)
+                pipe.load_lora_weights(lora_dir, weight_name=lora_file)
                 pipe.fuse_lora(lora_scale=lora_weight)
 
         emitter.job_started(config=str(config_path))

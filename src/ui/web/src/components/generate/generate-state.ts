@@ -8,7 +8,7 @@ export type LoraEntry = {
   strength: number
 }
 
-export type GenerationMode = 'txt2img' | 'img2img'
+export type GenerationMode = 'txt2img' | 'img2img' | 'edit'
 
 export type GenerateFormState = {
   // Mode
@@ -28,6 +28,7 @@ export type GenerateFormState = {
   steps: number
   guidance: number
   seed: number
+  seed_locked: boolean
   scheduler: string
 
   // Size
@@ -44,7 +45,14 @@ export type GenerateFormState = {
   init_image: string | null // data-url or object-url
   init_image_file: File | null
   denoise_strength: number
+
+  // Edit mode
+  edit_images: EditImage[]
 }
+
+export type EditImage =
+  | { type: 'file'; preview: string; file: File }           // user-uploaded, needs upload
+  | { type: 'server'; preview: string; serverPath: string } // already on server
 
 export function randomSeed(): number {
   return Math.floor(Math.random() * 4_294_967_295)
@@ -60,6 +68,7 @@ export function createDefaultGenerateFormState(): GenerateFormState {
     steps: 28,
     guidance: 7,
     seed: randomSeed(),
+    seed_locked: false,
     scheduler: 'euler',
     width: 1024,
     height: 1024,
@@ -68,6 +77,7 @@ export function createDefaultGenerateFormState(): GenerateFormState {
     init_image: null,
     init_image_file: null,
     denoise_strength: 0.7,
+    edit_images: [],
   }
 }
 

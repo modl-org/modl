@@ -331,6 +331,14 @@ export function OutputsGallery({ setForm, setActiveTab }: Props) {
         allImages={allFilteredImages}
         onNavigate={setSelected}
         onToggleFavorite={(path) => favoriteMutation.mutate(path)}
+        onEditImage={(imageUrl, serverPath) => {
+          setForm((prev) => ({
+            ...prev,
+            mode: 'edit' as const,
+            edit_images: [{ type: 'server' as const, preview: imageUrl, serverPath }],
+          }))
+          setActiveTab('generate')
+        }}
       />
     </div>
   )

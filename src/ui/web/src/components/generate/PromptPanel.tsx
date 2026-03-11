@@ -12,9 +12,11 @@ type Props = {
   showNegative?: boolean
   /** Model name hint for model-specific enhancement */
   modelHint?: string
+  /** Placeholder override for the prompt textarea */
+  placeholder?: string
 }
 
-export function PromptPanel({ form, setForm, showNegative = true, modelHint }: Props) {
+export function PromptPanel({ form, setForm, showNegative = true, modelHint, placeholder }: Props) {
   const [isEnhancing, setIsEnhancing] = useState(false)
   const [negOpen, setNegOpen] = useState(!!form.negative_prompt.trim())
 
@@ -66,7 +68,7 @@ export function PromptPanel({ form, setForm, showNegative = true, modelHint }: P
           value={form.prompt}
           onChange={(e) => setForm((prev) => ({ ...prev, prompt: e.target.value }))}
           rows={4}
-          placeholder="Describe the image you want to create..."
+          placeholder={placeholder ?? "Describe the image you want to create..."}
           className="resize-y bg-background/60 font-mono text-sm leading-relaxed placeholder:text-muted-foreground/40"
         />
       </div>
