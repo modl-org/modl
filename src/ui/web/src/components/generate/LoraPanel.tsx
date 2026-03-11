@@ -134,13 +134,12 @@ export function LoraPanel({ models, families, form, setForm }: Props) {
         </Button>
       </div>
 
-      {form.loras.length === 0 && (
+      {form.loras.length === 0 && allLoras.length === 0 && (
+        <p className="text-[11px] text-muted-foreground/60">No LoRAs installed</p>
+      )}
+      {form.loras.length === 0 && allLoras.length > 0 && loras.length === 0 && incompatibleCount > 0 && (
         <p className="text-[11px] text-muted-foreground/60">
-          {allLoras.length === 0
-            ? 'No LoRAs installed'
-            : loras.length === 0
-              ? `No compatible LoRAs (${incompatibleCount} hidden)`
-              : 'No LoRAs applied'}
+          No compatible LoRAs ({incompatibleCount} hidden)
         </p>
       )}
 

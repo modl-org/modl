@@ -60,7 +60,7 @@ function AspectPreview({ w, h, active }: { w: number; h: number; active: boolean
   const scale = 14
   return (
     <div
-      className={`rounded-[2px] border-[1.5px] ${active ? 'border-primary' : 'border-muted-foreground/30'}`}
+      className={`rounded-[2px] border-[1.5px] transition-colors ${active ? 'border-primary-foreground/70' : 'border-muted-foreground/30'}`}
       style={{
         width: Math.round(scale * Math.min(w / h, 1.4)),
         height: Math.round(scale * Math.min(h / w, 1.4)),
@@ -79,22 +79,22 @@ export function SizePanel({ form, setForm }: Props) {
   return (
     <div className="space-y-2.5">
       {/* Preset buttons with aspect ratio previews */}
-      <div className="flex gap-1">
+      <div className="flex gap-1.5">
         {SIZE_PRESETS.map((preset) => {
           const isActive = activePreset === preset.label
           return (
             <button
               key={preset.label}
               type="button"
-              className={`flex flex-1 flex-col items-center gap-1.5 rounded-lg border px-2 py-2 transition-colors ${
+              className={`flex flex-1 flex-col items-center gap-1.5 rounded-lg border px-2 py-2.5 transition-colors ${
                 isActive
-                  ? 'border-primary/50 bg-primary/10'
-                  : 'border-border/40 bg-secondary/10 hover:bg-secondary/30'
+                  ? 'border-primary bg-primary text-primary-foreground shadow-sm'
+                  : 'border-border/40 bg-secondary/10 text-muted-foreground hover:bg-secondary/30'
               }`}
               onClick={() => applyPreset(preset.width, preset.height)}
             >
               <AspectPreview w={preset.width} h={preset.height} active={isActive} />
-              <span className={`text-[10px] ${isActive ? 'font-semibold text-primary' : 'text-muted-foreground'}`}>
+              <span className={`text-[10px] ${isActive ? 'font-semibold' : ''}`}>
                 {preset.label}
               </span>
             </button>
@@ -102,13 +102,13 @@ export function SizePanel({ form, setForm }: Props) {
         })}
       </div>
 
-      {/* Dimensions display — click to edit */}
+      {/* Editable dimensions — tied below presets */}
       <div className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
         <EditableSize
           value={form.width}
           onChange={(v) => setForm((prev) => ({ ...prev, width: snapTo8(v) }))}
         />
-        <span className="text-muted-foreground/40">×</span>
+        <span className="text-muted-foreground/40">&times;</span>
         <EditableSize
           value={form.height}
           onChange={(v) => setForm((prev) => ({ ...prev, height: snapTo8(v) }))}

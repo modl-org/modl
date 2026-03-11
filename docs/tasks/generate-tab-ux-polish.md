@@ -16,20 +16,20 @@ Feedback from design review + code review findings. Ordered by impact.
 
 ## Prompt Area
 
-- [ ] **Move Enhance button inline** — Currently reads as a section toggle. Make it a pill/icon inside or attached to the bottom-right of the textarea so it reads as an action on the prompt.
-- [ ] **Auto-grow textarea** — Default is too tall for typical 1-3 line prompts. Start small, grow on content. Saves vertical sidebar space.
-- [ ] **Improve negative prompt toggle visibility** — Chevron is too subtle. Use a +/- icon or slightly bolder toggle for power user discoverability.
+- [x] **Move Enhance button inline** — Currently reads as a section toggle. Make it a pill/icon inside or attached to the bottom-right of the textarea so it reads as an action on the prompt.
+- [x] **Auto-grow textarea** — Default is too tall for typical 1-3 line prompts. Start small, grow on content. Saves vertical sidebar space.
+- [x] **Improve negative prompt toggle visibility** — Chevron is too subtle. Use a +/- icon or slightly bolder toggle for power user discoverability.
 
 ## Model & LoRA
 
-- [ ] **Split model info into two lines** — "Qwen Image 20B (gguf-q5km) 13.9GB" is too dense inline. Put quantization + size on a secondary muted line.
-- [ ] **Remove "No LoRAs applied" dead text** — The "+ Add" button is self-explanatory. Either hide the empty state entirely or make it an interactive drop zone.
+- [x] **Split model info into two lines** — "Qwen Image 20B (gguf-q5km) 13.9GB" is too dense inline. Put quantization + size on a secondary muted line.
+- [x] **Remove "No LoRAs applied" dead text** — The "+ Add" button is self-explanatory. Either hide the empty state entirely or make it an interactive drop zone.
 
 ## Dimensions
 
-- [ ] **Increase selected state contrast** — Purple outline on dark bg is low contrast. Use a filled background, not just border, for the active ratio preset.
-- [ ] **Widen hit targets** — Aspect ratio buttons are tight. Add more spacing between them.
-- [ ] **Visually tie dimensions to selected preset** — "1152 × 896 px" feels orphaned. Show it directly below the highlighted option or as a tooltip.
+- [x] **Increase selected state contrast** — Purple outline on dark bg is low contrast. Use a filled background, not just border, for the active ratio preset.
+- [x] **Widen hit targets** — Aspect ratio buttons are tight. Add more spacing between them.
+- [x] **Visually tie dimensions to selected preset** — "1152 × 896 px" feels orphaned. Show it directly below the highlighted option or as a tooltip. But allow editing.
 
 ## Generation Controls
 

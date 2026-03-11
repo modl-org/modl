@@ -1,6 +1,5 @@
 import { useCallback, useState } from 'react'
-import { ChevronDownIcon, SparklesIcon, LoaderCircleIcon } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { MinusIcon, PlusIcon, SparklesIcon, LoaderCircleIcon } from 'lucide-react'
 import { Textarea } from '@/components/ui/textarea'
 import { cn } from '@/lib/utils'
 import { api, type EnhanceRequest } from '../../api'
@@ -43,18 +42,23 @@ export function PromptPanel({ form, setForm, showNegative = true, modelHint, pla
     <div className="space-y-2 pb-3 border-b border-border/20">
       {/* Positive prompt */}
       <div className="flex flex-col gap-1.5">
-        <div className="flex items-center justify-between">
-          <span className="text-xs font-semibold text-foreground/90">
-            Prompt
-          </span>
-          <Button
+        <span className="text-xs font-semibold text-foreground/90">
+          Prompt
+        </span>
+        <div className="relative">
+          <Textarea
+            value={form.prompt}
+            onChange={(e) => setForm((prev) => ({ ...prev, prompt: e.target.value }))}
+            placeholder={placeholder ?? "Describe the image you want to create..."}
+            className="min-h-[3.5rem] resize-y bg-background/60 pb-8 font-mono text-sm leading-relaxed placeholder:text-muted-foreground/40"
+          />
+          {/* Enhance — inline pill at bottom-right of textarea */}
+          <button
             type="button"
-            variant="ghost"
-            size="sm"
-            className="h-6 gap-1 px-2 text-[10px] text-muted-foreground hover:text-primary"
             disabled={!form.prompt.trim() || isEnhancing}
             onClick={handleEnhance}
             title="Rewrite prompt with AI to improve image quality"
+            className="absolute bottom-2 right-2 flex items-center gap-1 rounded-full border border-border/40 bg-background/80 px-2 py-0.5 text-[10px] font-medium text-muted-foreground backdrop-blur transition-colors hover:border-primary/40 hover:text-primary disabled:pointer-events-none disabled:opacity-40"
           >
             {isEnhancing ? (
               <LoaderCircleIcon className="size-3 animate-spin" />
@@ -62,15 +66,8 @@ export function PromptPanel({ form, setForm, showNegative = true, modelHint, pla
               <SparklesIcon className="size-3" />
             )}
             Enhance
-          </Button>
+          </button>
         </div>
-        <Textarea
-          value={form.prompt}
-          onChange={(e) => setForm((prev) => ({ ...prev, prompt: e.target.value }))}
-          rows={4}
-          placeholder={placeholder ?? "Describe the image you want to create..."}
-          className="resize-y bg-background/60 font-mono text-sm leading-relaxed placeholder:text-muted-foreground/40"
-        />
       </div>
 
       {/* Negative prompt — collapsible */}
@@ -81,12 +78,11 @@ export function PromptPanel({ form, setForm, showNegative = true, modelHint, pla
             className="flex w-full items-center gap-1.5 py-1 text-left"
             onClick={() => setNegOpen((o) => !o)}
           >
-            <ChevronDownIcon
-              className={cn(
-                'size-3 text-muted-foreground/50 transition-transform',
-                negOpen && 'rotate-180',
-              )}
-            />
+            {negOpen ? (
+              <MinusIcon className="size-3 text-muted-foreground/60" />
+            ) : (
+              <PlusIcon className="size-3 text-muted-foreground/60" />
+            )}
             <span className="text-[11px] font-medium text-muted-foreground/70">
               Negative prompt
             </span>

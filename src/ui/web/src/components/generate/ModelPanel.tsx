@@ -67,33 +67,40 @@ export function ModelPanel({ models, families, form, setForm, autoDefaults = tru
         <SelectContent>
           {checkpoints.map((model) => {
             const info = findModelFamily(model.name, families)
+            const sizeGB = (model.size_bytes / 1024 / 1024 / 1024).toFixed(1)
             return (
               <SelectItem key={model.id} value={model.id} className="py-2">
-                <div className="flex flex-col gap-1">
+                <div className="flex flex-col gap-0.5">
+                  {/* Line 1: model name + param count */}
                   <div className="flex items-center gap-2">
                     <span className="font-medium">{model.name}</span>
-                    {model.variant && (
-                      <span className="text-[10px] text-muted-foreground">({model.variant})</span>
-                    )}
                     {info && (
                       <span className="text-[10px] text-muted-foreground/60">
                         {info.total_b}B
                       </span>
                     )}
-                    <span className="ml-auto text-[10px] text-muted-foreground/60">
-                      {(model.size_bytes / 1024 / 1024 / 1024).toFixed(1)}GB
-                    </span>
                   </div>
-                  {info && (
-                    <div className="flex items-center gap-3">
-                      <div className="flex items-center gap-1">
-                        <span className="text-[9px] text-muted-foreground/50">quality</span>
-                        <RatingDots value={info.quality} />
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <span className="text-[9px] text-muted-foreground/50">speed</span>
-                        <RatingDots value={info.speed} />
-                      </div>
+                  {/* Line 2: variant + size + ratings */}
+                  <div className="flex items-center gap-2 text-[10px] text-muted-foreground/60">
+                    {model.variant && <span>{model.variant}</span>}
+                    <span>{sizeGB} GB</span>
+                    {info && (
+                      <>
+                        <span className="text-border">|</span>
+                        <div className="flex items-center gap-1">
+                          <span className="text-[9px]">quality</span>
+                          <RatingDots value={info.quality} />
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <span className="text-[9px]">speed</span>
+                          <RatingDots value={info.speed} />
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  {/* Line 3: capability badges (only if info exists and has notable caps) */}
+                  {info && (info.capabilities.img2img || info.capabilities.inpaint || info.text_rendering) && (
+                    <div className="flex items-center gap-1.5 pt-0.5">
                       {info.capabilities.img2img && (
                         <span className="rounded bg-secondary/60 px-1 py-0.5 text-[8px] text-muted-foreground/60">img2img</span>
                       )}
