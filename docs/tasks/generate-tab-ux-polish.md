@@ -33,23 +33,23 @@ Feedback from design review + code review findings. Ordered by impact.
 
 ## Generation Controls
 
-- [ ] **Add tooltip/label to stop button** — Red square next to Enqueue has no affordance. Users can't tell if it cancels queue or stops current gen. Add tooltip at minimum.
-- [ ] **Expand queue status into mini drawer** — Truncated prompt text is hard to distinguish between jobs. The expandable queue panel exists but the collapsed state is too compressed. Consider always showing it as a mini-list when >1 job.
-- [ ] **Add GPU warning state** — "GPU: 7.6 GB free" is passive. When free VRAM is too low for the selected model, show a warning (yellow/red) instead of just static text.
+- [x] **Add tooltip/label to stop button** — Red square next to Enqueue has no affordance. Users can't tell if it cancels queue or stops current gen. Add tooltip at minimum.
+- [x] **Expand queue status into mini drawer** — Truncated prompt text is hard to distinguish between jobs. The expandable queue panel exists but the collapsed state is too compressed. Consider always showing it as a mini-list when >1 job.
+- [x] **Add GPU warning state** — "GPU: 7.6 GB free" is passive. When free VRAM is too low for the selected model, show a warning (yellow/red) instead of just static text.
 
 ## Generation Preview (Right Canvas)
 
-- [ ] **Show progress in loading state** — The circular progress ring exists but needs to be more visible.
-- [ ] **Differentiate prompt echo styling** — Prompt text below the loading card uses similar styling to the editable prompt. Use italics, quotes, or smaller/dimmer text so it reads as reference not input.
-- [ ] **Clarify X button behavior** — The close button on the generating card is ambiguous (cancel? dismiss? hide?). Either label it "Cancel" or remove it during active generation and only show it for queue items.
+- [x] **Show progress in loading state** — The circular progress ring exists but needs to be more visible.
+- [x] **Differentiate prompt echo styling** — Prompt text below the loading card uses similar styling to the editable prompt. Use italics, quotes, or smaller/dimmer text so it reads as reference not input.
+- [x] **Clarify X button behavior** — The close button on the generating card is ambiguous (cancel? dismiss? hide?). Either label it "Cancel" or remove it during active generation and only show it for queue items.
 
 ## History Bar
 
-- [ ] **Group thumbnails by prompt/session** — 20 images across 5 prompts becomes an undifferentiated wall. Add subtle dividers between sessions or show prompt on hover.
-- [ ] **Increase HISTORY label contrast** — Low-contrast label is easy to miss. Give it more visual weight if it's the entry point to full history.
+- [x] **Group thumbnails by prompt/session** — 20 images across 5 prompts becomes an undifferentiated wall. Add subtle dividers between sessions or show prompt on hover.
+- [x] **Increase HISTORY label contrast** — Low-contrast label is easy to miss. Give it more visual weight if it's the entry point to full history.
 
 ## Layout & Theme
 
 - [ ] **Consider collapsing sidebar sections** — Prompt, model, LoRA, dimensions, queue, GPU status is a lot for one panel. Consider moving LoRA + dimensions into a "Settings" expandable or second tab. Keep primary flow: prompt → model → generate.
 - [ ] **Differentiate purple accent usage** — Purple currently means: selected state, generating state, button fill, active tab, queue pill. Introduce brightness/saturation variations or a secondary accent for hierarchy.
-- [ ] **Lazy-mount inactive tabs** — All tabs (Datasets, Models, Training, Outputs) are always mounted with running queries. Conditionally render heavy tabs; only keep GenerateView always-mounted.
+- [x] **Lazy-mount inactive tabs** — All tabs (Datasets, Models, Training, Outputs) are always mounted with running queries. Conditionally render heavy tabs; only keep GenerateView always-mounted.

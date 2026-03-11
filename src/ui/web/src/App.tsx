@@ -78,36 +78,44 @@ function App() {
 
         {/* Scrollable content */}
         <main className="flex-1 overflow-y-auto bg-[#09090e]">
-          {/* Tab: Train */}
-          <div className={tab === 'train' ? 'flex h-full flex-col pb-24 pt-16 md:pb-0 md:pt-0' : 'hidden'}>
-            {gpu.training_active && (
-              <div className="space-y-4 border-b border-border/50 px-4 py-4 md:px-6">
-                <GpuBanner gpu={gpu} />
-                <TrainingStatusBar />
-              </div>
-            )}
-            <TrainingRuns />
-          </div>
+          {/* Tab: Train — lazy-mounted */}
+          {tab === 'train' && (
+            <div className="flex h-full flex-col pb-24 pt-16 md:pb-0 md:pt-0">
+              {gpu.training_active && (
+                <div className="space-y-4 border-b border-border/50 px-4 py-4 md:px-6">
+                  <GpuBanner gpu={gpu} />
+                  <TrainingStatusBar />
+                </div>
+              )}
+              <TrainingRuns />
+            </div>
+          )}
 
-          {/* Tab: Generate — full-bleed, no padding, no scroll (component manages its own layout) */}
+          {/* Tab: Generate — always mounted (primary view, preserves SSE + session state) */}
           <div className={tab === 'generate' ? 'h-full' : 'hidden'}>
             <GenerateView form={form} setForm={setForm} setTab={(t) => setTab(t as Tab)} />
           </div>
 
-          {/* Tab: Outputs */}
-          <div className={tab === 'outputs' ? 'px-4 py-6 pb-24 md:px-6 md:pb-6 pt-16 md:pt-6' : 'hidden'}>
-            <OutputsGallery setForm={setForm} setActiveTab={setTab} />
-          </div>
+          {/* Tab: Outputs — lazy-mounted */}
+          {tab === 'outputs' && (
+            <div className="px-4 py-6 pb-24 md:px-6 md:pb-6 pt-16 md:pt-6">
+              <OutputsGallery setForm={setForm} setActiveTab={setTab} />
+            </div>
+          )}
 
-          {/* Tab: Datasets */}
-          <div className={tab === 'datasets' ? 'px-4 py-6 pb-24 md:px-6 md:pb-6 pt-16 md:pt-6' : 'hidden'}>
-            <DatasetViewer />
-          </div>
+          {/* Tab: Datasets — lazy-mounted */}
+          {tab === 'datasets' && (
+            <div className="px-4 py-6 pb-24 md:px-6 md:pb-6 pt-16 md:pt-6">
+              <DatasetViewer />
+            </div>
+          )}
 
-          {/* Tab: Models */}
-          <div className={tab === 'models' ? 'px-4 py-6 pb-24 md:px-6 md:pb-6 pt-16 md:pt-6' : 'hidden'}>
-            <ModelsView />
-          </div>
+          {/* Tab: Models — lazy-mounted */}
+          {tab === 'models' && (
+            <div className="px-4 py-6 pb-24 md:px-6 md:pb-6 pt-16 md:pt-6">
+              <ModelsView />
+            </div>
+          )}
         </main>
       </div>
 

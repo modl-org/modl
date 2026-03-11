@@ -735,6 +735,8 @@ export function GenerateView({ form, setForm, setTab: _setTab }: Props) {
             }}
             sessionItems={sessionItems}
             onRemoveQueueItem={handleCancelQueued}
+            models={models}
+            families={families}
           />
           <GenerateProgressBar state={progressState} />
           <p className="mt-1 text-center text-[10px] text-muted-foreground/30">

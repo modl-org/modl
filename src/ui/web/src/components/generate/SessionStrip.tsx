@@ -98,33 +98,39 @@ export function SessionStrip({
 
         {/* History label */}
         {hasHistory && (
-          <span className="mr-1 shrink-0 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/30">
+          <span className="mr-1 shrink-0 rounded bg-secondary/40 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-widest text-muted-foreground/50">
             History
           </span>
         )}
 
-        {/* History thumbnails */}
-        {recentImages.map((img) => {
+        {/* History thumbnails — grouped by prompt with subtle dividers */}
+        {recentImages.map((img, idx) => {
           const isActive = activePath === img.path
+          const prevImg = recentImages[idx - 1]
+          const showDivider = idx > 0 && prevImg && prevImg.prompt !== img.prompt
           return (
-            <button
-              key={img.path}
-              type="button"
-              className={`relative shrink-0 overflow-hidden rounded transition-transform ${
-                isActive
-                  ? 'scale-105 ring-2 ring-primary/70'
-                  : 'opacity-50 ring-1 ring-border/20 hover:opacity-80 hover:ring-border/40'
-              }`}
-              style={{ width: THUMB, height: THUMB }}
-              onClick={() => onHistorySelect?.(img)}
-              title={img.prompt ?? img.filename}
-            >
-              <LazyImage
-                src={`/files/${img.path}`}
-                alt={img.prompt ?? img.filename}
-                className="h-full w-full"
-              />
-            </button>
+            <div key={img.path} className="flex shrink-0 items-center">
+              {showDivider && (
+                <div className="mx-0.5 h-6 w-px bg-border/20" />
+              )}
+              <button
+                type="button"
+                className={`relative shrink-0 overflow-hidden rounded transition-transform ${
+                  isActive
+                    ? 'scale-105 ring-2 ring-primary/70'
+                    : 'opacity-50 ring-1 ring-border/20 hover:opacity-80 hover:ring-border/40'
+                }`}
+                style={{ width: THUMB, height: THUMB }}
+                onClick={() => onHistorySelect?.(img)}
+                title={img.prompt ?? img.filename}
+              >
+                <LazyImage
+                  src={`/files/${img.path}`}
+                  alt={img.prompt ?? img.filename}
+                  className="h-full w-full"
+                />
+              </button>
+            </div>
           )
         })}
       </div>
