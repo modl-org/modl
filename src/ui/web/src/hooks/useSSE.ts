@@ -5,6 +5,7 @@ import { useEffect, useRef } from 'react'
  *
  * Connects when `url` is non-null, disconnects when `url` becomes null or on unmount.
  * Automatically filters keepalive/idle pings before forwarding to `onMessage`.
+ * Uses exponential backoff on reconnect (1s → 2s → 4s → … → 30s cap).
  */
 export function useSSE(
   url: string | null,
@@ -20,21 +21,47 @@ export function useSSE(
   useEffect(() => {
     if (!url) return
 
-    const es = new EventSource(url)
+    let es: EventSource | null = null
+    let backoff = 1000
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let cancelled = false
 
-    es.onmessage = (event) => {
-      const data: string = event.data
-      if (data === 'keepalive' || data === 'idle') return
-      onMessageRef.current(data)
+    function connect() {
+      if (cancelled) return
+      es = new EventSource(url!)
+
+      es.onopen = () => {
+        backoff = 1000 // reset on successful connection
+      }
+
+      es.onmessage = (event) => {
+        const data: string = event.data
+        if (data === 'keepalive' || data === 'idle') return
+        onMessageRef.current(data)
+      }
+
+      es.onerror = () => {
+        es?.close()
+        es = null
+        if (cancelled) return
+
+        // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s cap
+        timer = setTimeout(() => {
+          timer = null
+          connect()
+        }, backoff)
+        backoff = Math.min(backoff * 2, 30_000)
+
+        onErrorRef.current?.()
+      }
     }
 
-    es.onerror = () => {
-      es.close()
-      onErrorRef.current?.()
-    }
+    connect()
 
     return () => {
-      es.close()
+      cancelled = true
+      es?.close()
+      if (timer) clearTimeout(timer)
     }
   }, [url])
 }
