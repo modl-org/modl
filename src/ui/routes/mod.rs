@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod civitai;
 pub mod datasets;
 pub mod files;
 pub mod generate;

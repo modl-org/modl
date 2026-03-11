@@ -9,7 +9,9 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 
-use super::routes::{analysis, datasets, files, generate, models, outputs, studio, training};
+use super::routes::{
+    analysis, civitai, datasets, files, generate, models, outputs, studio, training,
+};
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -96,6 +98,9 @@ pub async fn start(port: u16, open_browser: bool) -> Result<()> {
         .route("/api/models/{id}", delete(models::api_delete_model))
         .route("/api/registry/search", get(models::api_search_registry))
         .route("/api/models/install", post(models::api_install_model))
+        // CivitAI LoRA browsing
+        .route("/api/civitai/loras", get(civitai::api_search_loras))
+        .route("/api/civitai/install", post(civitai::api_install_lora))
         // File upload (img2img init images, masks)
         .route("/api/upload", post(files::api_upload))
         // Generation

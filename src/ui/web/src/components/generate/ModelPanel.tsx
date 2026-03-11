@@ -68,8 +68,13 @@ export function ModelPanel({ models, families, form, setForm, autoDefaults = tru
           {checkpoints.map((model) => {
             const info = findModelFamily(model.name, families)
             const sizeGB = (model.size_bytes / 1024 / 1024 / 1024).toFixed(1)
+            const triggerLabel = [
+              model.name,
+              model.variant,
+              info ? `${info.total_b}B` : null,
+            ].filter(Boolean).join(' · ')
             return (
-              <SelectItem key={model.id} value={model.id} className="py-2">
+              <SelectItem key={model.id} value={model.id} textValue={triggerLabel} className="py-2">
                 <div className="flex flex-col gap-0.5">
                   {/* Line 1: model name + param count */}
                   <div className="flex items-center gap-2">

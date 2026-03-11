@@ -1,4 +1,5 @@
 import { ChevronsLeft, ChevronsRight, Database, HardDrive, Images, ListIcon, Sparkles, Zap } from 'lucide-react'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 
 function ModlLogo({ size = 28 }: { size?: number }) {
   return (
@@ -94,11 +95,10 @@ export function AppSidebar({ activeTab, onTabChange, collapsed, onToggleCollapse
         )}
         {NAV_ITEMS.map(({ id, label, icon: Icon }) => {
           const isActive = activeTab === id
-          return (
+          const btn = (
             <button
               key={id}
               onClick={() => onTabChange(id)}
-              title={collapsed ? label : undefined}
               className={cn(
                 'relative flex w-full items-center rounded-md text-sm font-medium transition-colors',
                 collapsed ? 'justify-center px-0 py-2.5' : 'gap-3 px-3 py-2',
@@ -120,74 +120,99 @@ export function AppSidebar({ activeTab, onTabChange, collapsed, onToggleCollapse
               )}
             </button>
           )
+          if (collapsed) {
+            return (
+              <Tooltip key={id}>
+                <TooltipTrigger asChild>{btn}</TooltipTrigger>
+                <TooltipContent side="right" sideOffset={8}>{label}</TooltipContent>
+              </Tooltip>
+            )
+          }
+          return btn
         })}
       </nav>
 
       {/* Queue pill — always visible when jobs are active */}
       {queueJobCount > 0 && (
         <div className="border-t border-border/40 px-2 py-2">
-          <button
-            onClick={() => onTabChange('generate')}
-            title={`${queueJobCount} in queue`}
-            className={cn(
-              'flex w-full items-center rounded-md py-2 transition-colors hover:bg-accent',
-              collapsed ? 'justify-center px-0' : 'gap-3 px-3',
-            )}
-          >
-            {collapsed ? (
+          {collapsed ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={() => onTabChange('generate')}
+                  className="flex w-full items-center justify-center rounded-md py-2 transition-colors hover:bg-accent"
+                >
+                  <div className="relative">
+                    <ListIcon className="h-4 w-4 text-primary" />
+                    <span className="absolute -right-1 -top-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-primary text-[8px] font-bold text-primary-foreground">
+                      {queueJobCount}
+                    </span>
+                    <span className="absolute -bottom-0.5 -right-0.5 h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
+                  </div>
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="right" sideOffset={8}>{queueJobCount} in queue</TooltipContent>
+            </Tooltip>
+          ) : (
+            <button
+              onClick={() => onTabChange('generate')}
+              className="flex w-full items-center gap-3 rounded-md px-3 py-2 transition-colors hover:bg-accent"
+            >
               <div className="relative">
                 <ListIcon className="h-4 w-4 text-primary" />
-                <span className="absolute -right-1 -top-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-primary text-[8px] font-bold text-primary-foreground">
-                  {queueJobCount}
-                </span>
                 <span className="absolute -bottom-0.5 -right-0.5 h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
               </div>
-            ) : (
-              <>
-                <div className="relative">
-                  <ListIcon className="h-4 w-4 text-primary" />
-                  <span className="absolute -bottom-0.5 -right-0.5 h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
-                </div>
-                <span className="text-xs font-medium text-primary">{queueJobCount}</span>
-                <span className="text-xs text-muted-foreground">in queue</span>
-              </>
-            )}
-          </button>
+              <span className="text-xs font-medium text-primary">{queueJobCount}</span>
+              <span className="text-xs text-muted-foreground">in queue</span>
+            </button>
+          )}
         </div>
       )}
 
       {/* Collapse toggle */}
       <div className="border-t border-border/40 px-2 py-2">
-        <button
-          onClick={onToggleCollapse}
-          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-          className={cn(
-            'flex w-full items-center rounded-md py-2 text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground',
-            collapsed ? 'justify-center px-0' : 'gap-3 px-3',
-          )}
-        >
-          {collapsed ? (
-            <ChevronsRight className="h-4 w-4" />
-          ) : (
-            <>
-              <ChevronsLeft className="h-4 w-4" />
-              <span className="text-xs">Collapse</span>
-            </>
-          )}
-        </button>
+        {collapsed ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                onClick={onToggleCollapse}
+                className="flex w-full items-center justify-center rounded-md py-2 text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
+              >
+                <ChevronsRight className="h-4 w-4" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="right" sideOffset={8}>Expand</TooltipContent>
+          </Tooltip>
+        ) : (
+          <button
+            onClick={onToggleCollapse}
+            className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <ChevronsLeft className="h-4 w-4" />
+            <span className="text-xs">Collapse</span>
+          </button>
+        )}
       </div>
 
       {/* GPU status footer */}
       <div className="border-t border-border px-2 py-3">
         {collapsed ? (
-          <div className="flex justify-center" title={gpu?.training_active ? 'Training active' : `GPU idle${vramGB ? ` • ${vramGB} GB free` : ''}`}>
-            <span
-              className={cn(
-                'h-2 w-2 shrink-0 rounded-full',
-                gpu?.training_active ? 'animate-pulse bg-amber-400' : 'bg-emerald-500',
-              )}
-            />
-          </div>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div className="flex justify-center">
+                <span
+                  className={cn(
+                    'h-2 w-2 shrink-0 rounded-full',
+                    gpu?.training_active ? 'animate-pulse bg-amber-400' : 'bg-emerald-500',
+                  )}
+                />
+              </div>
+            </TooltipTrigger>
+            <TooltipContent side="right" sideOffset={8}>
+              {gpu?.training_active ? 'Training active' : 'GPU idle'}
+              {vramGB && ` • ${vramGB} GB free`}
+            </TooltipContent>
+          </Tooltip>
         ) : gpu?.training_active ? (
           <div className="flex items-center gap-2 px-2 text-xs text-amber-300">
             <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-400" />

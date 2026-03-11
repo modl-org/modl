@@ -449,4 +449,5 @@ export const api = {
       `/api/studio/sessions/${encodeURIComponent(sessionId)}`,
       { method: 'DELETE' },
     ),
+
 }

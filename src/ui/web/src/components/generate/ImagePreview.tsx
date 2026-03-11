@@ -34,6 +34,8 @@ type Props = {
   width: number
   height: number
   onImageClick?: (img: PreviewImage) => void
+  /** Clear the preview — returns to idle placeholder */
+  onClear?: () => void
   /** Context about what's being generated — shown in the loading state */
   generating?: GeneratingContext
 }
@@ -45,6 +47,7 @@ export function ImagePreview({
   width,
   height,
   onImageClick,
+  onClear,
   generating,
 }: Props) {
   const aspectRatio = width / height
@@ -61,19 +64,25 @@ export function ImagePreview({
           ? 3
           : 4
 
-  // ── Idle placeholder ──
+  // ── Idle placeholder — styled to match the generating card ──
   if (!hasImages && !isGenerating) {
     return (
-      <div
-        className="relative flex w-full max-w-lg items-center justify-center rounded-lg border border-dashed border-border/40 bg-secondary/10"
-        style={{ aspectRatio: isGrid ? undefined : aspectRatio, minHeight: isGrid ? 300 : 200 }}
-      >
-        <div className="flex flex-col items-center gap-2 text-muted-foreground/30">
-          <div className="text-4xl">🖼</div>
-          <span className="text-xs">Generated images will appear here</span>
-          <span className="font-mono text-[10px]">
-            {width}×{height}
-          </span>
+      <div className="flex w-full max-w-md flex-col items-center gap-6">
+        <div
+          className="relative flex w-full items-center justify-center overflow-hidden rounded-2xl border border-border/20"
+          style={{ aspectRatio: isGrid ? undefined : Math.max(aspectRatio, 0.75), minHeight: isGrid ? 300 : undefined }}
+        >
+          <div
+            className="absolute inset-0"
+            style={{ background: 'linear-gradient(135deg, #0e0e18 0%, #131320 50%, #0e0e18 100%)' }}
+          />
+          <div className="relative flex flex-col items-center gap-3 text-muted-foreground/30">
+            <SparklesIcon className="size-8" />
+            <span className="text-xs">Generated images will appear here</span>
+          </div>
+        </div>
+        <div className="flex items-center gap-3 text-[10px] text-muted-foreground/40">
+          <span className="font-mono">{width}×{height}</span>
         </div>
       </div>
     )
@@ -172,7 +181,7 @@ export function ImagePreview({
             )}
 
             {/* Prompt echo — styled distinctly from the editable prompt */}
-            <p className="max-w-[280px] text-center text-[11px] italic leading-relaxed text-muted-foreground/30">
+            <p className="max-w-[280px] text-center text-[11px] italic leading-relaxed text-muted-foreground/50">
               &ldquo;{prompt.length > 120 ? prompt.slice(0, 120) + '\u2026' : prompt}&rdquo;
             </p>
           </div>
@@ -191,7 +200,7 @@ export function ImagePreview({
         </div>
 
         {/* Details below card */}
-        <div className="flex items-center gap-3 text-[10px] text-muted-foreground/30">
+        <div className="flex items-center gap-3 text-[10px] text-muted-foreground/50">
           <span>{modelName}</span>
           <span>&middot;</span>
           <span className="font-mono">{width}×{height}</span>
@@ -259,26 +268,26 @@ export function ImagePreview({
 
   // ── Single image — scales down to fit the available space without cropping ──
   const img = images[0]
-  const isTall = aspectRatio < 1
   return (
-    <div
-      className="group relative flex items-center justify-center"
-      style={{
-        maxHeight: '100%',
-        maxWidth: '100%',
-        width: isTall ? 'auto' : '100%',
-        height: isTall ? '100%' : 'auto',
-      }}
-    >
+    <div className="group relative flex h-full w-full items-center justify-center">
       {img ? (
         <>
           <img
             src={img.url}
             alt="Generated"
             className="max-h-full max-w-full cursor-pointer rounded-lg object-contain"
-            style={{ aspectRatio }}
             onClick={() => onImageClick?.(img)}
           />
+          {onClear && (
+            <button
+              type="button"
+              onClick={onClear}
+              className="absolute right-2 top-2 rounded-lg bg-background/60 p-1 text-muted-foreground/40 opacity-0 backdrop-blur transition-opacity hover:text-foreground group-hover:opacity-100"
+              title="Dismiss"
+            >
+              <XIcon className="size-4" />
+            </button>
+          )}
           {img.seed != null && (
             <span className="absolute bottom-2 right-2 rounded bg-background/80 px-2 py-1 font-mono text-[10px] text-muted-foreground opacity-0 backdrop-blur transition-opacity group-hover:opacity-100">
               seed: {img.seed}
@@ -288,7 +297,7 @@ export function ImagePreview({
       ) : (
         <div
           className="flex items-center justify-center rounded-lg border border-primary/10 bg-primary/5"
-          style={{ aspectRatio, maxHeight: '100%', maxWidth: isTall ? 'none' : 500, width: isTall ? 'auto' : '100%', height: isTall ? '100%' : 'auto' }}
+          style={{ aspectRatio, maxHeight: '100%', maxWidth: 500 }}
         >
           <LoaderCircleIcon className="size-8 animate-spin text-primary/20" />
         </div>

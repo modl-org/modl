@@ -1,5 +1,6 @@
 pub(crate) mod analysis;
 mod auth;
+mod civitai;
 mod compare;
 mod config;
 mod datasets;
@@ -338,6 +339,15 @@ pub enum Commands {
         /// Show popular/trending models (ignores query)
         #[arg(long)]
         popular: bool,
+        /// Search CivitAI for LoRAs instead of the modl registry
+        #[arg(long)]
+        civitai: bool,
+        /// Base model filter for CivitAI search (e.g., "SDXL 1.0", "Flux.1 D")
+        #[arg(long)]
+        base_model: Option<String>,
+        /// Sort order for CivitAI search (Most Downloaded, Highest Rated, Newest)
+        #[arg(long)]
+        sort: Option<String>,
     },
 
     /// Train a LoRA with managed runtime
@@ -751,7 +761,16 @@ pub async fn run(cli: Cli) -> Result<()> {
             variant,
             dry_run,
             force,
-        } => install::run(&id, variant.as_deref(), dry_run, force).await,
+        } => {
+            if let Some(version_id) = id.strip_prefix("civitai:") {
+                if dry_run {
+                    anyhow::bail!("--dry-run is not supported for CivitAI installs");
+                }
+                civitai::install(version_id, force).await
+            } else {
+                install::run(&id, variant.as_deref(), dry_run, force).await
+            }
+        }
         Commands::Rm { id, force } => uninstall::run(&id, force).await,
         Commands::Ls { r#type, summary } => {
             if summary {
@@ -768,8 +787,17 @@ pub async fn run(cli: Cli) -> Result<()> {
             tag,
             min_rating,
             popular,
+            civitai: civitai_flag,
+            base_model,
+            sort,
         } => {
-            if popular {
+            if civitai_flag {
+                let q = query.as_deref().unwrap_or("");
+                if q.is_empty() {
+                    anyhow::bail!("Search query required for --civitai");
+                }
+                civitai::search(q, base_model.as_deref(), sort.as_deref()).await
+            } else if popular {
                 popular::run(r#type, r#for.as_deref()).await
             } else {
                 let q = query.as_deref().unwrap_or("");

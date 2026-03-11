@@ -34,6 +34,14 @@ function displayName(name: string): { base: string; step: number | null } {
   return { base: name, step: null }
 }
 
+/** Find the parent ModelFamily for a ModelFamilyInfo */
+function findParentFamily(
+  info: import('../../api').ModelFamilyInfo,
+  families: ModelFamily[],
+): ModelFamily | undefined {
+  return families.find((f) => f.models.some((m) => m.id === info.id))
+}
+
 /** Check if a LoRA is compatible with the selected base model.
  *  LoRAs trained on the same family (e.g. flux-dev LoRA on flux-schnell) are compatible. */
 function isLoraCompatible(
@@ -41,15 +49,47 @@ function isLoraCompatible(
   selectedModelName: string,
   families: ModelFamily[],
 ): boolean {
-  if (!lora.base_model_id) return true // unknown base = show it
-  const loraFamily = findModelFamily(lora.base_model_id, families)
   const selectedFamily = findModelFamily(selectedModelName, families)
-  if (!loraFamily || !selectedFamily) return true // can't determine = show it
-  // Same family = compatible (e.g. flux-dev LoRA works on flux-schnell)
-  // Find parent family by checking which family contains each model
-  const loraParent = families.find((f) => f.models.some((m) => m.id === loraFamily.id))
-  const selectedParent = families.find((f) => f.models.some((m) => m.id === selectedFamily.id))
-  return loraParent?.id === selectedParent?.id
+  if (!selectedFamily) return true // can't determine selected model = show it
+
+  const selectedParent = findParentFamily(selectedFamily, families)
+  if (!selectedParent) return true
+
+  // Try base_model_id first (set by artifact metadata for trained LoRAs)
+  if (lora.base_model_id) {
+    const loraFamily = findModelFamily(lora.base_model_id, families)
+    if (loraFamily) {
+      const loraParent = findParentFamily(loraFamily, families)
+      return loraParent?.id === selectedParent.id
+    }
+  }
+
+  // Fall back to depends_on (set by registry for pulled LoRAs)
+  if (lora.depends_on && lora.depends_on.length > 0) {
+    // Check if any dependency is in the same family as the selected model
+    for (const dep of lora.depends_on) {
+      const depFamily = findModelFamily(dep.id, families)
+      if (depFamily) {
+        const depParent = findParentFamily(depFamily, families)
+        if (depParent) {
+          return depParent.id === selectedParent.id
+        }
+      }
+    }
+    // Has dependencies but none matched a family — likely incompatible
+    return false
+  }
+
+  // Also try matching by LoRA name itself (e.g. "qwen-image-lightning_step4070")
+  const loraFamily = findModelFamily(lora.name, families)
+  if (loraFamily) {
+    const loraParent = findParentFamily(loraFamily, families)
+    if (loraParent) {
+      return loraParent.id === selectedParent.id
+    }
+  }
+
+  return true // truly unknown = show it
 }
 
 /** Mini toggle switch */
@@ -80,7 +120,6 @@ export function LoraPanel({ models, families, form, setForm }: Props) {
   const compatibleLoras = allLoras.filter((l) =>
     isLoraCompatible(l, selectedModel?.name ?? '', families),
   )
-  const incompatibleCount = allLoras.length - compatibleLoras.length
   const loras = compatibleLoras
 
   /** Insert a trigger word into the prompt (at the start, if not already present) */
@@ -137,15 +176,15 @@ export function LoraPanel({ models, families, form, setForm }: Props) {
       {form.loras.length === 0 && allLoras.length === 0 && (
         <p className="text-[11px] text-muted-foreground/60">No LoRAs installed</p>
       )}
-      {form.loras.length === 0 && allLoras.length > 0 && loras.length === 0 && incompatibleCount > 0 && (
+      {form.loras.length === 0 && allLoras.length > 0 && loras.length === 0 && (
         <p className="text-[11px] text-muted-foreground/60">
-          No compatible LoRAs ({incompatibleCount} hidden)
+          No compatible LoRAs for this model
         </p>
       )}
 
       <div className="space-y-2">
         {form.loras.map((entry, idx) => {
-          const loraModel = loras.find((l) => l.id === entry.id)
+          const loraModel = allLoras.find((l) => l.id === entry.id)
           const triggerWord = loraModel?.trigger_word
           const sampleUrl = loraModel?.sample_image_url
           const { base, step } = displayName(entry.name)
@@ -195,16 +234,17 @@ export function LoraPanel({ models, families, form, setForm }: Props) {
                     </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
-                    {loras.map((model) => {
+                    {allLoras.map((model) => {
                       const d = displayName(model.name)
+                      const compatible = isLoraCompatible(model, selectedModel?.name ?? '', families)
                       return (
-                        <SelectItem key={model.id} value={model.id}>
+                        <SelectItem key={model.id} value={model.id} disabled={!compatible}>
                           <span className="flex items-center gap-2">
                             {model.sample_image_url && (
                               <img
                                 src={`/files/${model.sample_image_url}`}
                                 alt=""
-                                className="size-5 rounded object-cover"
+                                className={`size-5 rounded object-cover ${!compatible ? 'opacity-40 grayscale' : ''}`}
                               />
                             )}
                             <span className="flex flex-col">
@@ -213,6 +253,11 @@ export function LoraPanel({ models, families, form, setForm }: Props) {
                                 {d.step != null && (
                                   <span className="rounded bg-secondary/60 px-1 py-0.5 font-mono text-[9px] text-muted-foreground">
                                     {d.step.toLocaleString()}
+                                  </span>
+                                )}
+                                {!compatible && (
+                                  <span className="rounded bg-destructive/10 px-1 py-0.5 text-[8px] text-destructive/60">
+                                    incompatible
                                   </span>
                                 )}
                               </span>
