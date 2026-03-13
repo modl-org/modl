@@ -1,4 +1,6 @@
-use anyhow::{Context, Result};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use anyhow::Context;
+use anyhow::Result;
 use console::style;
 
 pub async fn run(port: u16, no_open: bool, foreground: bool) -> Result<()> {
@@ -78,14 +80,10 @@ pub async fn install_service(port: u16) -> Result<()> {
     let exe = std::env::current_exe()?.to_string_lossy().to_string();
 
     #[cfg(target_os = "linux")]
-    {
-        install_systemd_service(&exe, port)?;
-    }
+    return install_systemd_service(&exe, port);
 
     #[cfg(target_os = "macos")]
-    {
-        install_launchd_service(&exe, port)?;
-    }
+    return install_launchd_service(&exe, port);
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -94,27 +92,17 @@ pub async fn install_service(port: u16) -> Result<()> {
             "Service installation is only supported on Linux (systemd) and macOS (launchd)"
         );
     }
-
-    Ok(())
 }
 
 pub async fn remove_service() -> Result<()> {
     #[cfg(target_os = "linux")]
-    {
-        remove_systemd_service()?;
-    }
+    return remove_systemd_service();
 
     #[cfg(target_os = "macos")]
-    {
-        remove_launchd_service()?;
-    }
+    return remove_launchd_service();
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        anyhow::bail!("Service removal is only supported on Linux (systemd) and macOS (launchd)");
-    }
-
-    Ok(())
+    anyhow::bail!("Service removal is only supported on Linux (systemd) and macOS (launchd)");
 }
 
 #[cfg(target_os = "linux")]
