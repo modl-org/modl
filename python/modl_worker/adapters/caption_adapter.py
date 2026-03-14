@@ -219,9 +219,9 @@ def run_caption(config_path: Path, emitter: EventEmitter) -> int:
         elif model_name.lower() in ("blip", "blip-2", "blip2"):
             model, processor = _load_blip(emitter, model_path)
             caption_fn = lambda m, p, img: _caption_blip(m, p, img, style_mode=style_mode)
-        elif model_name.lower() in ("qwen", "qwen-vl", "qwen25-vl", "qwen25-vl-3b"):
+        elif model_name.lower() in ("qwen", "qwen-vl", "qwen3-vl", "qwen3-vl-2b", "qwen25-vl", "qwen25-vl-3b"):
             from modl_worker.adapters.vl_common import load_qwen_vl, run_vl_inference
-            model, processor = load_qwen_vl(emitter, "qwen25-vl-3b")
+            model, processor = load_qwen_vl(emitter)
             if style_mode:
                 _qwen_prompt = "Describe what is depicted in this image without mentioning the art style, medium, or drawing technique. Be concise."
             else:

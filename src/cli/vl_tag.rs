@@ -21,7 +21,7 @@ pub async fn run(
         }
     }
 
-    let model_id = model.unwrap_or("qwen25-vl-3b").to_string();
+    let model_id = model.unwrap_or("qwen3-vl-2b").to_string();
 
     let spec = VlTagJobSpec {
         image_paths: paths.to_vec(),

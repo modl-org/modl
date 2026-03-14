@@ -8,24 +8,27 @@ from modl_worker.protocol import EventEmitter
 
 # Map modl model IDs to HuggingFace repos
 VL_MODEL_REPOS = {
+    "qwen3-vl-2b": "Qwen/Qwen3-VL-2B-Instruct",
+    "qwen3-vl-8b": "Qwen/Qwen3-VL-8B-Instruct",
+    # Legacy aliases
     "qwen25-vl-3b": "Qwen/Qwen2.5-VL-3B-Instruct",
     "qwen25-vl-7b": "Qwen/Qwen2.5-VL-7B-Instruct",
 }
 
-DEFAULT_VL_MODEL = "qwen25-vl-3b"
+DEFAULT_VL_MODEL = "qwen3-vl-2b"
 
 
 def load_qwen_vl(emitter: EventEmitter, model_id: str | None = None):
-    """Load a Qwen2.5-VL model and processor.
+    """Load a Qwen VL model and processor.
 
     Args:
         emitter: EventEmitter for progress logging
-        model_id: Model ID (qwen25-vl-3b or qwen25-vl-7b). Defaults to 3B.
+        model_id: Model ID (qwen3-vl-2b or qwen3-vl-8b). Defaults to 2B.
 
     Returns:
         (model, processor) tuple
     """
-    from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+    from transformers import AutoModelForImageTextToText, AutoProcessor
 
     model_id = model_id or DEFAULT_VL_MODEL
     repo = VL_MODEL_REPOS.get(model_id)
@@ -36,7 +39,7 @@ def load_qwen_vl(emitter: EventEmitter, model_id: str | None = None):
 
     emitter.info(f"Loading {repo}...")
 
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+    model = AutoModelForImageTextToText.from_pretrained(
         repo,
         torch_dtype=torch.float16,
         device_map="cuda",

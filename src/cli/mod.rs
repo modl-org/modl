@@ -571,7 +571,7 @@ pub enum Commands {
         /// Minimum confidence threshold
         #[arg(long)]
         threshold: Option<f64>,
-        /// VL model: qwen25-vl-3b (fast, 6GB) or qwen25-vl-7b (quality, 16GB)
+        /// VL model: qwen3-vl-2b (fast, 4GB) or qwen3-vl-8b (quality, 16GB)
         #[arg(long)]
         model: Option<String>,
         /// Output result as JSON
@@ -587,7 +587,7 @@ pub enum Commands {
         /// Detail level: brief, detailed, verbose
         #[arg(long, default_value = "detailed")]
         detail: String,
-        /// VL model: qwen25-vl-3b (fast, 6GB) or qwen25-vl-7b (quality, 16GB)
+        /// VL model: qwen3-vl-2b (fast, 4GB) or qwen3-vl-8b (quality, 16GB)
         #[arg(long)]
         model: Option<String>,
         /// Output result as JSON
@@ -604,7 +604,7 @@ pub enum Commands {
         /// Maximum number of tags
         #[arg(long)]
         max_tags: Option<usize>,
-        /// VL model: qwen25-vl-3b (fast, 6GB) or qwen25-vl-7b (quality, 16GB)
+        /// VL model: qwen3-vl-2b (fast, 4GB) or qwen3-vl-8b (quality, 16GB)
         #[arg(long)]
         model: Option<String>,
         /// Output result as JSON

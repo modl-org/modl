@@ -4,6 +4,7 @@
   "attention_head_dim": 128,
   "guidance_embeds": true,
   "in_channels": 384,
+  "out_channels": 64,
   "joint_attention_dim": 4096,
   "num_attention_heads": 24,
   "num_layers": 19,

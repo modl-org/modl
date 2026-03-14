@@ -436,6 +436,20 @@ def assemble_pipeline(
                     emitter.info(
                         f"  → Loaded via from_single_file (bf16)"
                     )
+
+            # Large bf16 transformers (>15GB): apply fp8 layerwise casting
+            # to halve VRAM usage. Weights stored in fp8, compute in bf16.
+            if not is_fp8 and not is_gguf:
+                file_size_gb = Path(base_model_path).stat().st_size / (1024**3)
+                if file_size_gb > 15.0:
+                    model.enable_layerwise_casting(
+                        storage_dtype=torch.float8_e4m3fn,
+                        compute_dtype=torch.bfloat16,
+                    )
+                    emitter.info(
+                        f"  → Enabled fp8 layerwise casting ({file_size_gb:.1f}GB bf16 → ~{file_size_gb/2:.1f}GB fp8)"
+                    )
+
             components["transformer"] = model
 
         elif param_name in ("scheduler",):
