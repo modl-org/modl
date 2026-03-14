@@ -392,6 +392,28 @@ pub struct GenerateParams {
     /// ControlNet inputs
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub controlnet: Vec<ControlNetInput>,
+    /// Style reference inputs (IP-Adapter or native multi-ref)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub style_ref: Vec<StyleRefInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StyleRefInput {
+    /// Path to the reference image
+    pub image: String,
+    /// How strongly the reference influences output (0.0-1.0)
+    #[serde(default = "default_style_strength")]
+    pub strength: f32,
+    /// Style type: style, face, content (SDXL IP-Adapter only)
+    #[serde(default = "default_style_type")]
+    pub style_type: String,
+}
+
+fn default_style_strength() -> f32 {
+    0.6
+}
+fn default_style_type() -> String {
+    "style".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

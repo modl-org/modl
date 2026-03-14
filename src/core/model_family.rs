@@ -800,6 +800,84 @@ pub fn validate_controlnet(model_id: &str, control_type: &str) -> Result<(), Str
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Style reference / IP-Adapter support metadata
+// ---------------------------------------------------------------------------
+
+/// Describes style-ref availability for a base model.
+#[allow(dead_code)]
+pub struct StyleRefSupport {
+    pub base_model_id: &'static str,
+    /// "native" (built-in, e.g. Klein multi-ref) or "ip-adapter"
+    pub mechanism: &'static str,
+    /// Registry manifest ID for the IP-Adapter weights (None for native)
+    pub manifest_id: Option<&'static str>,
+    pub default_strength: f32,
+}
+
+pub static STYLE_REF_SUPPORT: &[StyleRefSupport] = &[
+    StyleRefSupport {
+        base_model_id: "flux2-klein-4b",
+        mechanism: "native",
+        manifest_id: None,
+        default_strength: 0.6,
+    },
+    StyleRefSupport {
+        base_model_id: "flux2-klein-9b",
+        mechanism: "native",
+        manifest_id: None,
+        default_strength: 0.6,
+    },
+    StyleRefSupport {
+        base_model_id: "sdxl",
+        mechanism: "ip-adapter",
+        manifest_id: Some("sdxl-ip-adapter"),
+        default_strength: 0.6,
+    },
+    StyleRefSupport {
+        base_model_id: "flux-dev",
+        mechanism: "ip-adapter",
+        manifest_id: Some("flux-dev-ip-adapter"),
+        default_strength: 0.5,
+    },
+];
+
+/// Find style-ref support for a base model.
+#[allow(dead_code)]
+pub fn style_ref_support(model_id: &str) -> Option<&'static StyleRefSupport> {
+    let resolved = resolve_model(model_id)?;
+    STYLE_REF_SUPPORT
+        .iter()
+        .find(|s| s.base_model_id == resolved.id)
+}
+
+/// Validate that a model supports --style-ref.
+/// Returns Ok(()) or an error message with suggestions.
+pub fn validate_style_ref(model_id: &str) -> Result<(), String> {
+    let resolved = match resolve_model(model_id) {
+        Some(m) => m,
+        None => return Ok(()),
+    };
+
+    if STYLE_REF_SUPPORT
+        .iter()
+        .any(|s| s.base_model_id == resolved.id)
+    {
+        return Ok(());
+    }
+
+    let alternatives: Vec<&str> = STYLE_REF_SUPPORT.iter().map(|s| s.base_model_id).collect();
+    Err(format!(
+        "{} does not support --style-ref (no IP-Adapter available).\n\n\
+         Alternatives:\n\
+         • Train a style LoRA: modl train --dataset <folder> --base {} --lora-type style\n\
+         • Use a model with style-ref support: {}",
+        resolved.name,
+        resolved.id,
+        alternatives.join(", ")
+    ))
+}
+
 /// List all models that support a given capability.
 #[allow(dead_code)]
 pub fn models_with_capability(capability: &str) -> Vec<&'static ModelInfo> {

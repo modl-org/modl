@@ -482,6 +482,15 @@ pub enum Commands {
         /// ControlNet type: canny, depth, pose, softedge, scribble, hed, mlsd, gray, normal (auto-detected from filename if omitted)
         #[arg(long)]
         cn_type: Option<String>,
+        /// Style reference image (can be repeated; backend varies by model)
+        #[arg(long)]
+        style_ref: Vec<String>,
+        /// Style reference strength (0.0-1.0)
+        #[arg(long, default_value = "0.6")]
+        style_strength: f32,
+        /// Style type: style, face, content (SDXL IP-Adapter variants only)
+        #[arg(long)]
+        style_type: Option<String>,
         /// Use Lightning distillation LoRA for faster generation (fewer steps)
         #[arg(long)]
         fast: bool,
@@ -1009,6 +1018,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             cn_strength,
             cn_end,
             cn_type,
+            style_ref,
+            style_strength,
+            style_type,
             fast,
             cloud,
             provider,
@@ -1032,6 +1044,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                 cn_strength: &cn_strength,
                 cn_end: &cn_end,
                 cn_type: cn_type.as_deref(),
+                style_ref: &style_ref,
+                style_strength,
+                style_type: style_type.as_deref(),
                 fast,
                 cloud,
                 provider,

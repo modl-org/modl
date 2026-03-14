@@ -921,6 +921,80 @@ def _resolve_control_modes(cn_types: list[str], arch: str) -> list[int] | None:
     return result
 
 
+# ---------------------------------------------------------------------------
+# Style reference / IP-Adapter support
+# ---------------------------------------------------------------------------
+
+STYLE_REF_CONFIGS = {
+    "sdxl": {
+        "mechanism": "ip-adapter",
+        "repo": "h94/IP-Adapter",
+        "subfolder": "sdxl_models",
+        "weight_name": "ip-adapter-plus_sdxl_vit-h.safetensors",
+        "image_encoder_repo": "laion/CLIP-ViT-H-14-laion2B-s32B-b79K",
+    },
+    "flux": {
+        "mechanism": "ip-adapter",
+        "repo": "InstantX/FLUX.1-dev-IP-Adapter",
+        "weight_name": "ip-adapter.bin",
+        "image_encoder_repo": "google/siglip-so400m-patch14-384",
+    },
+    "flux2_klein": {
+        "mechanism": "native",
+    },
+    "flux2_klein_9b": {
+        "mechanism": "native",
+    },
+}
+
+
+def _load_style_ref(
+    style_inputs: list[dict],
+    base_model_id: str,
+    arch: str,
+    pipe: object,
+    emitter: EventEmitter,
+) -> tuple:
+    """Load style reference mechanism and prepare images.
+
+    Returns (style_images, strength, mechanism).
+    """
+    from PIL import Image
+    from modl_worker.image_util import load_image as _load_img
+
+    config = STYLE_REF_CONFIGS.get(arch)
+    if not config:
+        emitter.warning(
+            "STYLE_REF_NOT_SUPPORTED",
+            f"Style reference not supported for architecture '{arch}'. Generating without style-ref.",
+        )
+        return [], 0.0, None
+
+    mechanism = config["mechanism"]
+    images = [_load_img(inp["image"]) for inp in style_inputs]
+    strength = style_inputs[0].get("strength", 0.6) if style_inputs else 0.6
+
+    if mechanism == "ip-adapter":
+        # Load IP-Adapter into the pipeline
+        emitter.info(f"Loading IP-Adapter for {arch}...")
+        try:
+            pipe.load_ip_adapter(
+                config["repo"],
+                subfolder=config.get("subfolder"),
+                weight_name=config["weight_name"],
+            )
+            pipe.set_ip_adapter_scale(strength)
+            emitter.info("IP-Adapter loaded")
+        except Exception as exc:
+            emitter.warning(
+                "IP_ADAPTER_LOAD_FAILED",
+                f"Failed to load IP-Adapter: {exc}. Generating without style-ref.",
+            )
+            return [], 0.0, None
+
+    return images, strength, mechanism
+
+
 def run_generate_with_pipeline(
     spec: dict,
     emitter: EventEmitter,
@@ -1009,6 +1083,16 @@ def run_generate_with_pipeline(
             cn_inputs, base_model_id, arch, pipe, emitter
         )
 
+    # Load style reference if requested
+    style_inputs = params.get("style_ref", [])
+    style_images = []
+    style_strength = 0.6
+    style_mechanism = None
+    if style_inputs:
+        style_images, style_strength, style_mechanism = _load_style_ref(
+            style_inputs, base_model_id, arch, pipe, emitter
+        )
+
     output_dir = output_info.get("output_dir", ".")
     os.makedirs(output_dir, exist_ok=True)
 
@@ -1065,6 +1149,13 @@ def run_generate_with_pipeline(
         if control_modes is not None:
             cm = control_modes[0] if len(control_modes) == 1 else control_modes
             gen_kwargs["control_mode"] = cm
+
+    # Add style reference images to generation kwargs
+    if style_images and style_mechanism == "ip-adapter":
+        gen_kwargs["ip_adapter_image"] = style_images if len(style_images) > 1 else style_images[0]
+    elif style_images and style_mechanism == "native":
+        # Flux 2 Klein native multi-ref: pass as reference_images
+        gen_kwargs["reference_images"] = style_images
 
     artifact_paths = []
 

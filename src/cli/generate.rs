@@ -192,6 +192,9 @@ pub struct GenerateArgs<'a> {
     pub cn_strength: &'a str,
     pub cn_end: &'a str,
     pub cn_type: Option<&'a str>,
+    pub style_ref: &'a [String],
+    pub style_strength: f32,
+    pub style_type: Option<&'a str>,
     pub fast: bool,
     pub cloud: bool,
     pub provider: Option<CloudProvider>,
@@ -220,6 +223,9 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
         cn_strength,
         cn_end,
         cn_type,
+        style_ref,
+        style_strength,
+        style_type,
         fast,
         cloud,
         provider,
@@ -392,6 +398,34 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
     };
 
     // -------------------------------------------------------------------
+    // Validate and build style-ref inputs
+    // -------------------------------------------------------------------
+    let style_inputs: Vec<StyleRefInput> = if !style_ref.is_empty() {
+        // Validate model supports style-ref
+        if let Err(msg) = model_family::validate_style_ref(&effective_model) {
+            anyhow::bail!(msg);
+        }
+
+        let style_type_str = style_type.unwrap_or("style").to_string();
+
+        style_ref
+            .iter()
+            .map(|path| {
+                if !PathBuf::from(path).exists() {
+                    anyhow::bail!("Style reference image not found: {path}");
+                }
+                Ok(StyleRefInput {
+                    image: path.clone(),
+                    strength: style_strength,
+                    style_type: style_type_str.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
+
+    // -------------------------------------------------------------------
     // Build output directory: ~/.modl/outputs/<date>/
     // -------------------------------------------------------------------
     let date = chrono::Local::now().format("%Y-%m-%d");
@@ -474,6 +508,7 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
             mask: mask.map(|s| s.to_string()),
             strength,
             controlnet: cn_inputs,
+            style_ref: style_inputs,
         },
         runtime: RuntimeRef {
             profile: "trainer-cu124".to_string(),
@@ -539,6 +574,22 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
                 cn.control_type,
                 cn.strength,
                 cn.control_end,
+            );
+        }
+        for (i, sr) in spec.params.style_ref.iter().enumerate() {
+            let label = if spec.params.style_ref.len() > 1 {
+                format!("Ref {}:", i + 1)
+            } else {
+                "Ref:".to_string()
+            };
+            println!(
+                "  {:<6} {} (strength: {:.2})",
+                label,
+                PathBuf::from(&sr.image)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy(),
+                sr.strength,
             );
         }
         println!("  Size:   {}×{}", width, height);
