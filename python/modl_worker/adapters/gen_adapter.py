@@ -826,22 +826,23 @@ def _resolve_controlnet_path(arch: str) -> str | None:
 
     # Try to find installed controlnet from modl's SQLite DB
     from .arch_config import _get_installed_path
-    manifest_ids = {
-        "flux": "flux-dev-controlnet-union",
-        "flux_schnell": "flux-dev-controlnet-union",
-        "sdxl": "sdxl-controlnet-union",
-        "qwen_image": "qwen-image-controlnet-union",
-        "zimage_turbo": "z-image-turbo-controlnet-union",
-        "zimage": "z-image-turbo-controlnet-union",
+    # Try multiple manifest IDs per arch (prefer newer versions first)
+    manifest_id_candidates = {
+        "flux": ["flux-dev-controlnet-union"],
+        "flux_schnell": ["flux-dev-controlnet-union"],
+        "sdxl": ["sdxl-controlnet-union"],
+        "qwen_image": ["qwen-image-controlnet-union"],
+        "zimage_turbo": ["z-image-turbo-controlnet-union-2.1", "z-image-turbo-controlnet-union"],
+        "zimage": ["z-image-turbo-controlnet-union-2.1", "z-image-turbo-controlnet-union"],
     }
-    manifest_id = manifest_ids.get(arch)
-    if manifest_id:
+    candidates = manifest_id_candidates.get(arch, [])
+    for manifest_id in candidates:
         path = _get_installed_path(manifest_id)
         if path:
             return path
 
-    # Fallback to HuggingFace repo (will download)
-    return config["repo"]
+    # Fallback to HuggingFace repo if configured (will download)
+    return config.get("repo")
 
 
 def _load_controlnet(
