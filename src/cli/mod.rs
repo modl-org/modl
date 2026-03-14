@@ -4,6 +4,7 @@ mod civitai;
 mod compare;
 mod config;
 mod datasets;
+mod describe;
 mod detect;
 mod doctor;
 pub(crate) mod edit;
@@ -13,6 +14,7 @@ mod face_restore;
 mod fmt;
 mod gc;
 pub(crate) mod generate;
+mod ground;
 mod import;
 mod info;
 mod init;
@@ -36,6 +38,7 @@ mod uninstall;
 mod update;
 mod upgrade;
 mod upscale;
+mod vl_tag;
 pub(crate) mod worker;
 
 use anyhow::Result;
@@ -558,6 +561,48 @@ pub enum Commands {
         json: bool,
     },
 
+    /// Find objects in images by text description
+    Ground {
+        /// Text query -- what to find (e.g. "coffee cup", "person")
+        query: String,
+        /// Image file(s) or directory to search
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Minimum confidence threshold
+        #[arg(long)]
+        threshold: Option<f64>,
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Describe image content (captioning)
+    Describe {
+        /// Image file(s) or directory
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Detail level: brief, detailed, verbose
+        #[arg(long, default_value = "detailed")]
+        detail: String,
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Tag images with labels
+    #[command(name = "vl-tag")]
+    VlTag {
+        /// Image file(s) or directory
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Maximum number of tags
+        #[arg(long)]
+        max_tags: Option<usize>,
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Compare images using CLIP similarity
     Compare {
         /// Image file(s) or directory to compare
@@ -1001,6 +1046,22 @@ pub async fn run(cli: Cli) -> Result<()> {
             embeddings,
             json,
         } => detect::run(&paths, &r#type, embeddings, json).await,
+        Commands::Ground {
+            query,
+            paths,
+            threshold,
+            json,
+        } => ground::run(&query, &paths, threshold, json).await,
+        Commands::Describe {
+            paths,
+            detail,
+            json,
+        } => describe::run(&paths, &detail, json).await,
+        Commands::VlTag {
+            paths,
+            max_tags,
+            json,
+        } => vl_tag::run(&paths, max_tags, json).await,
         Commands::Compare {
             paths,
             reference,

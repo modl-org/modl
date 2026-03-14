@@ -12,6 +12,9 @@ from .face_restore_adapter import run_face_restore
 from .upscale_adapter import run_upscale
 from .remove_bg_adapter import run_remove_bg
 from .face_crop_adapter import run_face_crop
+from .ground_adapter import run_ground
+from .describe_adapter import run_describe
+from .vl_tag_adapter import run_vl_tag
 
 # Config building (used by train_adapter, available for testing)
 from .config_builder import spec_to_aitoolkit_config  # noqa: F401
@@ -21,5 +24,5 @@ __all__ = [
     "run_train", "run_generate", "run_edit", "run_caption", "run_resize",
     "run_tag", "run_score", "run_detect", "run_compare",
     "run_segment", "run_face_restore", "run_upscale", "run_remove_bg",
-    "run_face_crop",
+    "run_face_crop", "run_ground", "run_describe", "run_vl_tag",
 ]

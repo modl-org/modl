@@ -142,6 +142,49 @@ fn default_detect_model() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroundJobSpec {
+    pub image_paths: Vec<String>,
+    pub query: String,
+    #[serde(default = "default_ground_model")]
+    pub model: String,
+    #[serde(default)]
+    pub threshold: Option<f64>,
+}
+
+fn default_ground_model() -> String {
+    "qwen25-vl-3b".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DescribeJobSpec {
+    pub image_paths: Vec<String>,
+    #[serde(default = "default_describe_model")]
+    pub model: String,
+    #[serde(default = "default_describe_detail")]
+    pub detail: String,
+}
+
+fn default_describe_model() -> String {
+    "qwen25-vl-3b".to_string()
+}
+fn default_describe_detail() -> String {
+    "detailed".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VlTagJobSpec {
+    pub image_paths: Vec<String>,
+    #[serde(default = "default_vl_tag_model")]
+    pub model: String,
+    #[serde(default)]
+    pub max_tags: Option<usize>,
+}
+
+fn default_vl_tag_model() -> String {
+    "qwen25-vl-3b".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompareJobSpec {
     pub image_paths: Vec<String>,
     #[serde(default)]
