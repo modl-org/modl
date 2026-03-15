@@ -973,30 +973,48 @@ def _load_controlnet(
         if mod is not None:
             remove_hook_from_module(mod, recurse=True)
 
-    # Construct the CN pipeline directly — NOT via from_pipe().
-    # from_pipe() triggers .to(dtype) on the entire pipeline, which undoes
-    # fp8 layerwise casting on the transformer and causes OOM.
-    # The pipeline constructor calls from_transformer() internally, which
-    # shares embedders/refiners from the base transformer by reference.
-    cn_pipe_cls = getattr(diffusers, config["pipeline_class"])
-    cn_pipe = cn_pipe_cls(
-        transformer=pipeline.transformer,
-        controlnet=cn_model,
-        vae=pipeline.vae,
-        text_encoder=pipeline.text_encoder,
-        tokenizer=pipeline.tokenizer,
-        scheduler=pipeline.scheduler,
-    )
+    # Check if everything fits on GPU. With force_fp8, the transformer is
+    # ~5.7GB. Lite controlnet adds ~2GB → fits. Full controlnet (6GB) needs
+    # the text encoder offloaded during denoising → use wrapper approach.
+    cn_model_size_gb = sum(
+        p.numel() * p.element_size() for p in cn_model.parameters()
+    ) / (1024**3)
+    use_wrapper = cn_model_size_gb > 4.0  # Full v2.1 is ~6GB
 
-    # The controlnet shares modules with the transformer via from_transformer().
-    # model_cpu_offload doesn't work because the controlnet's forward runs
-    # before the transformer's, and shared modules are still on CPU.
-    #
-    # .to("cuda") puts everything on GPU. With force_fp8, the transformer is
-    # ~5.7GB. Lite controlnet adds ~2GB → fits on 24GB. Full controlnet (6GB)
-    # needs the text encoder offloaded — for now, full variant requires 48GB.
-    cn_pipe.to("cuda")
-    emitter.info("ControlNet loaded")
+    if use_wrapper and arch in ("zimage_turbo", "zimage"):
+        # Single-model wrapper: combines transformer + controlnet into one
+        # nn.Module so model_cpu_offload can offload the text encoder during
+        # denoising. The wrapper's forward runs controlnet → transformer.
+        from .z_image_control import ZImageControlWrapper
+
+        wrapper = ZImageControlWrapper(pipeline.transformer, cn_model)
+        # Use the base ZImagePipeline (not ControlNet variant) — the wrapper
+        # handles controlnet internally, the pipeline just calls transformer.
+        from diffusers import ZImagePipeline
+        cn_pipe = ZImagePipeline(
+            transformer=wrapper,
+            vae=pipeline.vae,
+            text_encoder=pipeline.text_encoder,
+            tokenizer=pipeline.tokenizer,
+            scheduler=pipeline.scheduler,
+        )
+        cn_pipe.enable_model_cpu_offload()
+        emitter.info(f"ControlNet loaded ({cn_model_size_gb:.1f}GB, CPU offload via wrapper)")
+    else:
+        # Standard approach: construct the ControlNet pipeline directly.
+        # .to("cuda") puts everything on GPU — works when the controlnet
+        # is small enough to fit alongside transformer + text encoder.
+        cn_pipe_cls = getattr(diffusers, config["pipeline_class"])
+        cn_pipe = cn_pipe_cls(
+            transformer=pipeline.transformer,
+            controlnet=cn_model,
+            vae=pipeline.vae,
+            text_encoder=pipeline.text_encoder,
+            tokenizer=pipeline.tokenizer,
+            scheduler=pipeline.scheduler,
+        )
+        cn_pipe.to("cuda")
+        emitter.info(f"ControlNet loaded ({cn_model_size_gb:.1f}GB)")
 
     # Load control images
     from modl_worker.image_util import load_image as _load_img
@@ -1248,26 +1266,42 @@ def run_generate_with_pipeline(
             gen_kwargs["strength"] = strength  # Fill pipelines don't use strength
 
     # Add ControlNet conditioning
+    _cn_wrapper = None
     if cn_pipe is not None and cn_images:
-        control_image = cn_images[0] if len(cn_images) == 1 else cn_images
-        gen_kwargs["control_image"] = control_image
-        control_scale = cn_scales[0] if len(cn_scales) == 1 else cn_scales
-        gen_kwargs["controlnet_conditioning_scale"] = control_scale
+        from .z_image_control import ZImageControlWrapper
 
-        # Check which optional kwargs the pipeline accepts
-        import inspect
-        pipe_params = set(inspect.signature(pipe.__call__).parameters.keys())
+        # Check if the pipeline uses the wrapper approach (base ZImagePipeline
+        # with ZImageControlWrapper as transformer) vs the standard approach
+        # (ZImageControlNetPipeline with separate controlnet).
+        if isinstance(getattr(pipe, "transformer", None), ZImageControlWrapper):
+            # Wrapper approach: store the control image + params on the wrapper.
+            # VAE encoding happens inside the generation loop (below) when
+            # model_cpu_offload has moved the VAE to CUDA via its hook.
+            _cn_wrapper = pipe.transformer
+            _cn_wrapper._pending_control = {
+                "image": cn_images[0],
+                "scale": cn_scales[0] if cn_scales else 0.75,
+                "height": height,
+                "width": width,
+            }
+        else:
+            # Standard approach: pass control kwargs to the ControlNet pipeline.
+            control_image = cn_images[0] if len(cn_images) == 1 else cn_images
+            gen_kwargs["control_image"] = control_image
+            control_scale = cn_scales[0] if len(cn_scales) == 1 else cn_scales
+            gen_kwargs["controlnet_conditioning_scale"] = control_scale
 
-        if "control_guidance_end" in pipe_params:
-            control_end = cn_end_values[0] if len(cn_end_values) == 1 else cn_end_values
-            gen_kwargs["control_guidance_end"] = control_end
-
-        if "control_mode" in pipe_params:
-            cn_types = [inp.get("control_type", "canny") for inp in cn_inputs]
-            control_modes = _resolve_control_modes(cn_types, arch)
-            if control_modes is not None:
-                cm = control_modes[0] if len(control_modes) == 1 else control_modes
-                gen_kwargs["control_mode"] = cm
+            import inspect
+            pipe_params = set(inspect.signature(pipe.__call__).parameters.keys())
+            if "control_guidance_end" in pipe_params:
+                control_end = cn_end_values[0] if len(cn_end_values) == 1 else cn_end_values
+                gen_kwargs["control_guidance_end"] = control_end
+            if "control_mode" in pipe_params:
+                cn_types = [inp.get("control_type", "canny") for inp in cn_inputs]
+                control_modes = _resolve_control_modes(cn_types, arch)
+                if control_modes is not None:
+                    cm = control_modes[0] if len(control_modes) == 1 else control_modes
+                    gen_kwargs["control_mode"] = cm
 
     # Add style reference images to generation kwargs
     if style_images and style_mechanism == "ip-adapter":
@@ -1275,6 +1309,34 @@ def run_generate_with_pipeline(
     elif style_images and style_mechanism == "native":
         # Flux 2 Klein native multi-ref: pass as reference_images
         gen_kwargs["reference_images"] = style_images
+
+    # VAE-encode control image for wrapper approach (deferred until now so
+    # the VAE's cpu_offload hook can move it to CUDA).
+    if _cn_wrapper is not None and hasattr(_cn_wrapper, "_pending_control"):
+        pending = _cn_wrapper._pending_control
+        del _cn_wrapper._pending_control
+        from diffusers.image_processor import VaeImageProcessor
+        img_proc = VaeImageProcessor(vae_scale_factor=pipe.vae_scale_factor * 2)
+        ctrl_tensor = img_proc.preprocess(
+            pending["image"], height=pending["height"], width=pending["width"],
+        )
+        # Send to the execution device — model_cpu_offload hook will move
+        # the VAE to CUDA on forward(), so the input must already be there.
+        ctrl_tensor = ctrl_tensor.to(dtype=pipe.vae.dtype, device=pipe._execution_device)
+        with torch.no_grad():
+            ctrl_latent = pipe.vae.encode(ctrl_tensor).latent_dist.mode()
+        ctrl_latent = (ctrl_latent - pipe.vae.config.shift_factor) * pipe.vae.config.scaling_factor
+        ctrl_latent = ctrl_latent.unsqueeze(2)
+        # Pad to control_in_dim if needed (v2.0+: 16ch → 33ch)
+        cn_cfg = _cn_wrapper.controlnet.config
+        if cn_cfg.control_in_dim and cn_cfg.control_in_dim != ctrl_latent.shape[1]:
+            pad_ch = cn_cfg.control_in_dim - ctrl_latent.shape[1]
+            ctrl_latent = torch.cat([
+                ctrl_latent,
+                torch.zeros(*ctrl_latent.shape[:1], pad_ch, *ctrl_latent.shape[2:],
+                            device=ctrl_latent.device, dtype=ctrl_latent.dtype),
+            ], dim=1)
+        _cn_wrapper.set_control(list(ctrl_latent.unbind(dim=0)), scale=pending["scale"])
 
     artifact_paths = []
 
@@ -1384,6 +1446,10 @@ def run_generate_with_pipeline(
 
         artifact_paths.append(filepath)
         emitter.info(f"Image {i + 1}/{count}: {filepath} ({elapsed:.1f}s)")
+
+    # Clean up control wrapper state
+    if _cn_wrapper is not None:
+        _cn_wrapper.clear_control()
 
     # Clean up tmp files (uploaded init images / masks) after generation
     _cleanup_tmp_files(init_image_path, mask_path)
