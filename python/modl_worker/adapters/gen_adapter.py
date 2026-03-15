@@ -874,6 +874,9 @@ def _resolve_controlnet_config(arch: str, model_path: str) -> str | None:
     if arch == "qwen_image":
         return str(configs_dir / "qwen-image-controlnet")
 
+    if arch in ("flux", "flux_schnell"):
+        return str(configs_dir / "flux-controlnet-union")
+
     if arch not in ("zimage_turbo", "zimage"):
         return None
 
@@ -957,9 +960,9 @@ def _load_controlnet(
                     )
                 else:
                     cn_model = cn_cls.from_single_file(model_path, torch_dtype=dtype)
-            except (ValueError, NotImplementedError):
-                # from_single_file not supported (e.g. QwenImageControlNetModel).
-                # Fall back to from_config + load_state_dict.
+            except (ValueError, NotImplementedError, AttributeError):
+                # from_single_file not supported or missing (e.g. FluxControlNetModel,
+                # QwenImageControlNetModel). Fall back to from_config + load_state_dict.
                 if not cn_config:
                     raise
                 import safetensors.torch as sf
@@ -1015,15 +1018,22 @@ def _load_controlnet(
         emitter.info(f"ControlNet loaded ({cn_model_size_gb:.1f}GB, CPU offload via wrapper)")
     else:
         # Standard approach: construct the ControlNet pipeline directly.
+        # Forward all components from the base pipeline (some pipelines like
+        # FluxControlNetPipeline need text_encoder_2, tokenizer_2, etc.)
         cn_pipe_cls = getattr(diffusers, config["pipeline_class"])
-        cn_pipe = cn_pipe_cls(
-            transformer=pipeline.transformer,
-            controlnet=cn_model,
-            vae=pipeline.vae,
-            text_encoder=pipeline.text_encoder,
-            tokenizer=pipeline.tokenizer,
-            scheduler=pipeline.scheduler,
-        )
+        import inspect
+        cn_init_params = set(inspect.signature(cn_pipe_cls.__init__).parameters.keys())
+        cn_init_params.discard("self")
+
+        cn_kwargs = {"controlnet": cn_model}
+        for param_name in cn_init_params:
+            if param_name == "controlnet":
+                continue
+            component = getattr(pipeline, param_name, None)
+            if component is not None:
+                cn_kwargs[param_name] = component
+
+        cn_pipe = cn_pipe_cls(**cn_kwargs)
 
         # Check if the base pipeline was using model_cpu_offload (large
         # models like qwen-image). If so, use cpu_offload on the CN
@@ -1309,12 +1319,18 @@ def run_generate_with_pipeline(
         else:
             # Standard approach: pass control kwargs to the ControlNet pipeline.
             control_image = cn_images[0] if len(cn_images) == 1 else cn_images
-            gen_kwargs["control_image"] = control_image
             control_scale = cn_scales[0] if len(cn_scales) == 1 else cn_scales
-            gen_kwargs["controlnet_conditioning_scale"] = control_scale
 
+            # Different pipelines use different kwarg names for the control image:
+            # Flux/Z-Image: control_image, SDXL/SD1.5: image
             import inspect
             pipe_params = set(inspect.signature(pipe.__call__).parameters.keys())
+            if "control_image" in pipe_params:
+                gen_kwargs["control_image"] = control_image
+            else:
+                gen_kwargs["image"] = control_image
+            gen_kwargs["controlnet_conditioning_scale"] = control_scale
+
             if "control_guidance_end" in pipe_params:
                 control_end = cn_end_values[0] if len(cn_end_values) == 1 else cn_end_values
                 gen_kwargs["control_guidance_end"] = control_end

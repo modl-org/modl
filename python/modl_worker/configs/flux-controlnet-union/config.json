@@ -1,0 +1,14 @@
+{
+  "_class_name": "FluxControlNetModel",
+  "_diffusers_version": "0.38.0",
+  "patch_size": 1,
+  "in_channels": 64,
+  "num_layers": 6,
+  "num_single_layers": 0,
+  "attention_head_dim": 128,
+  "num_attention_heads": 24,
+  "joint_attention_dim": 4096,
+  "pooled_projection_dim": 768,
+  "guidance_embeds": true,
+  "axes_dims_rope": [16, 56, 56]
+}
