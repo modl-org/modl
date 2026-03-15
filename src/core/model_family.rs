@@ -155,7 +155,7 @@ pub static FAMILIES: &[ModelFamily] = &[
                     lora: true,
                     training: true,
                 },
-                default_steps: 35,
+                default_steps: 40,
                 default_guidance: 5.0,
                 default_resolution: 1024,
                 quality: 4,
