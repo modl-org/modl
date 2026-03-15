@@ -1002,8 +1002,6 @@ def _load_controlnet(
         emitter.info(f"ControlNet loaded ({cn_model_size_gb:.1f}GB, CPU offload via wrapper)")
     else:
         # Standard approach: construct the ControlNet pipeline directly.
-        # .to("cuda") puts everything on GPU — works when the controlnet
-        # is small enough to fit alongside transformer + text encoder.
         cn_pipe_cls = getattr(diffusers, config["pipeline_class"])
         cn_pipe = cn_pipe_cls(
             transformer=pipeline.transformer,
@@ -1013,8 +1011,19 @@ def _load_controlnet(
             tokenizer=pipeline.tokenizer,
             scheduler=pipeline.scheduler,
         )
-        cn_pipe.to("cuda")
-        emitter.info(f"ControlNet loaded ({cn_model_size_gb:.1f}GB)")
+
+        # Check if the base pipeline was using model_cpu_offload (large
+        # models like qwen-image). If so, use cpu_offload on the CN
+        # pipeline too and pin the controlnet on CUDA (it's independent,
+        # no shared modules — safe to keep resident).
+        base_was_offloaded = hasattr(pipeline, "_hf_hook")
+        if base_was_offloaded:
+            cn_pipe.enable_model_cpu_offload()
+            cn_pipe.controlnet.to("cuda")
+            emitter.info(f"ControlNet loaded ({cn_model_size_gb:.1f}GB, CPU offload)")
+        else:
+            cn_pipe.to("cuda")
+            emitter.info(f"ControlNet loaded ({cn_model_size_gb:.1f}GB)")
 
     # Load control images
     from modl_worker.image_util import load_image as _load_img
