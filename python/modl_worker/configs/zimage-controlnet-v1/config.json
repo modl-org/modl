@@ -1,0 +1,16 @@
+{
+  "_class_name": "ZImageControlNetModel",
+  "_diffusers_version": "0.38.0",
+  "add_control_noise_refiner": null,
+  "all_f_patch_size": [1],
+  "all_patch_size": [2],
+  "control_in_dim": 16,
+  "control_layers_places": [0, 5, 10, 15, 20, 25],
+  "control_refiner_layers_places": null,
+  "dim": 3840,
+  "n_heads": 30,
+  "n_kv_heads": 30,
+  "n_refiner_layers": 2,
+  "norm_eps": 1e-05,
+  "qk_norm": true
+}

@@ -657,6 +657,12 @@ def load_pipeline(
             torch_dtype=torch.bfloat16,
         )
 
+    if force_fp8:
+        # When fp8 is forced (ControlNet mode), use model_cpu_offload
+        # instead of .to("cuda") so that text encoder and transformer
+        # don't both occupy GPU simultaneously during inference.
+        pipe.enable_model_cpu_offload()
+        return pipe
     return pipe.to("cuda")
 
 
@@ -725,12 +731,15 @@ def run_generate(config_path: Path, emitter: EventEmitter) -> int:
     emitter.progress(stage="load", step=0, total_steps=count)
 
     try:
-        # For cold start, load the mode-specific pipeline directly
-        # Force fp8 transformer quantization if ControlNet is active —
-        # otherwise bf16 transformer + CN weights exceed 24GB VRAM
-        has_controlnet = bool(params.get("controlnet"))
+        # For cold start, load the mode-specific pipeline directly.
+        # Force fp8 when ControlNet is active — bf16 transformer + controlnet
+        # + text encoder exceeds 24GB VRAM.
         cls_name = resolve_pipeline_class_for_mode(base_model_id, cold_mode)
-        pipe = load_pipeline(base_model_id, base_model_path, cls_name, emitter, force_fp8=has_controlnet)
+        has_controlnet = bool(params.get("controlnet"))
+        pipe = load_pipeline(
+            base_model_id, base_model_path, cls_name, emitter,
+            force_fp8=has_controlnet,
+        )
 
         # Load LoRA if specified
         if lora_info:
@@ -815,6 +824,12 @@ CONTROLNET_CONFIGS = {
         "pipeline_class": "ZImageControlNetPipeline",
         "modes": ZIMAGE_CONTROLNET_MODES,
     },
+    "flux_schnell": {
+        "repo": "Shakker-Labs/FLUX.1-dev-ControlNet-Union-Pro-2.0",
+        "model_class": "FluxControlNetModel",
+        "pipeline_class": "FluxControlNetPipeline",
+        "modes": FLUX_CONTROLNET_MODES,
+    },
 }
 
 
@@ -832,6 +847,9 @@ def _resolve_controlnet_path(arch: str) -> str | None:
         "flux_schnell": ["flux-dev-controlnet-union"],
         "sdxl": ["sdxl-controlnet-union"],
         "qwen_image": ["qwen-image-controlnet-union"],
+        # Prefer v2.1 (better quality, same VRAM). Diffusers 0.38+ has full
+        # support — auto-pads control_in_dim from 16→33 in the pipeline.
+        # Falls back to v1 (6 control layers, control_in_dim=16) if v2.1 not installed.
         "zimage_turbo": ["z-image-turbo-controlnet-union-2.1", "z-image-turbo-controlnet-union"],
         "zimage": ["z-image-turbo-controlnet-union-2.1", "z-image-turbo-controlnet-union"],
     }
@@ -843,6 +861,45 @@ def _resolve_controlnet_path(arch: str) -> str | None:
 
     # Fallback to HuggingFace repo if configured (will download)
     return config.get("repo")
+
+
+def _resolve_controlnet_config(arch: str, model_path: str) -> str | None:
+    """Return bundled config path for Z-Image controlnets.
+
+    Diffusers' from_single_file misdetects the lite v2.1 variant as v1.0
+    because lite has only 3 control layers, not 15.  We inspect the embedder
+    weight shape to determine the correct version and return the bundled config.
+    """
+    if arch not in ("zimage_turbo", "zimage"):
+        return None
+
+    import safetensors.torch
+
+    configs_dir = Path(__file__).parent.parent / "configs"
+    # Peek at the embedder shape to determine control_in_dim
+    try:
+        metadata = safetensors.torch.load_file(model_path, device="cpu")
+        emb_key = "control_all_x_embedder.2-1.weight"
+        if emb_key not in metadata:
+            return None
+        emb_shape = metadata[emb_key].shape
+        del metadata  # free memory
+        # patch_size=2: embed_dim = 2*2*control_in_dim
+        control_in_dim = emb_shape[1] // 4
+    except Exception:
+        return None
+
+    if control_in_dim == 16:
+        return str(configs_dir / "zimage-controlnet-v1")
+    elif control_in_dim == 33:
+        # Distinguish full (15 layers) from lite (3 layers) by file size.
+        # Full v2.1 ~6.7GB, lite ~2GB.
+        file_size_gb = Path(model_path).stat().st_size / (1024**3)
+        if file_size_gb < 4.0:
+            return str(configs_dir / "zimage-controlnet-v21-lite")
+        else:
+            return str(configs_dir / "zimage-controlnet-v21")
+    return None
 
 
 def _load_controlnet(
@@ -881,31 +938,65 @@ def _load_controlnet(
     import diffusers
     cn_cls = getattr(diffusers, config["model_class"])
 
+    # Load ControlNet in bf16 — these are lightweight (control blocks only,
+    # ~2-3GB). The heavy shared modules (embedders, refiners) come from the
+    # base transformer via from_transformer() inside the pipeline constructor.
     dtype = torch.bfloat16
-    if hasattr(pipeline, "transformer") and hasattr(pipeline.transformer, "dtype"):
-        dtype = pipeline.transformer.dtype
 
-    # Load ControlNet weights — single file or pretrained directory
-    # Load to CPU first to avoid OOM, then let cpu_offload manage devices
     try:
         if model_path.endswith(".safetensors"):
-            cn_model = cn_cls.from_single_file(model_path, torch_dtype=dtype)
+            # Use bundled config for Z-Image controlnets — diffusers'
+            # from_single_file misdetects the lite v2.1 variant as v1.0
+            # because lite has only 3 control layers (not 15).
+            cn_config = _resolve_controlnet_config(arch, model_path)
+            if cn_config:
+                cn_model = cn_cls.from_single_file(
+                    model_path, config=cn_config, torch_dtype=dtype,
+                )
+            else:
+                cn_model = cn_cls.from_single_file(model_path, torch_dtype=dtype)
         else:
             cn_model = cn_cls.from_pretrained(model_path, torch_dtype=dtype)
     except Exception as exc:
-        emitter.warning(
+        emitter.error(
             "CONTROLNET_LOAD_FAILED",
-            f"Failed to load ControlNet: {exc}. Generating without ControlNet.",
+            f"Failed to load ControlNet weights: {exc}",
+            recoverable=True,
         )
         return None, [], [], []
 
-    # Create ControlNet pipeline via from_pipe (components stay on CPU)
-    cn_pipe_cls = getattr(diffusers, config["pipeline_class"])
-    cn_pipe = cn_pipe_cls.from_pipe(pipeline, controlnet=cn_model)
+    # Remove accelerate cpu_offload hooks from the base pipeline so the
+    # new CN pipeline can set up its own offload sequence cleanly.
+    from accelerate.hooks import remove_hook_from_module
+    for name in ["text_encoder", "transformer", "vae"]:
+        mod = getattr(pipeline, name, None)
+        if mod is not None:
+            remove_hook_from_module(mod, recurse=True)
 
-    # Keep CN on CPU for now — it'll be moved to GPU after text encoding
-    # frees the text encoder VRAM (see pre-encoding block in caller)
-    emitter.info("ControlNet loaded (CN on CPU, will move to GPU after text encoding)")
+    # Construct the CN pipeline directly — NOT via from_pipe().
+    # from_pipe() triggers .to(dtype) on the entire pipeline, which undoes
+    # fp8 layerwise casting on the transformer and causes OOM.
+    # The pipeline constructor calls from_transformer() internally, which
+    # shares embedders/refiners from the base transformer by reference.
+    cn_pipe_cls = getattr(diffusers, config["pipeline_class"])
+    cn_pipe = cn_pipe_cls(
+        transformer=pipeline.transformer,
+        controlnet=cn_model,
+        vae=pipeline.vae,
+        text_encoder=pipeline.text_encoder,
+        tokenizer=pipeline.tokenizer,
+        scheduler=pipeline.scheduler,
+    )
+
+    # The controlnet shares modules with the transformer via from_transformer().
+    # model_cpu_offload doesn't work because the controlnet's forward runs
+    # before the transformer's, and shared modules are still on CPU.
+    #
+    # .to("cuda") puts everything on GPU. With force_fp8, the transformer is
+    # ~5.7GB. Lite controlnet adds ~2GB → fits on 24GB. Full controlnet (6GB)
+    # needs the text encoder offloaded — for now, full variant requires 48GB.
+    cn_pipe.to("cuda")
+    emitter.info("ControlNet loaded")
 
     # Load control images
     from modl_worker.image_util import load_image as _load_img
@@ -1156,39 +1247,6 @@ def run_generate_with_pipeline(
         if not is_flux_fill:
             gen_kwargs["strength"] = strength  # Fill pipelines don't use strength
 
-    # When ControlNet is active, pre-encode the prompt and free the text
-    # encoder to make room for transformer + controlnet on GPU.
-    if cn_pipe is not None and cn_images and hasattr(pipe, "encode_prompt"):
-        import gc
-        emitter.info("Pre-encoding prompt to free text encoder VRAM...")
-        try:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            prompt_result = pipe.encode_prompt(
-                prompt=prompt,
-                device=device,
-            )
-            gen_kwargs["prompt_embeds"] = prompt_result[0]
-            if len(prompt_result) > 1 and prompt_result[1] is not None:
-                gen_kwargs["negative_prompt_embeds"] = prompt_result[1]
-            gen_kwargs.pop("prompt", None)
-            gen_kwargs.pop("negative_prompt", None)
-            # Free text encoder and move ControlNet to GPU
-            if hasattr(pipe, "text_encoder") and pipe.text_encoder is not None:
-                pipe.text_encoder.to("cpu")
-                del pipe.text_encoder
-                pipe.text_encoder = None
-            if hasattr(pipe, "tokenizer"):
-                pipe.tokenizer = None
-            gc.collect()
-            torch.cuda.empty_cache()
-            emitter.info(f"Text encoder freed. GPU: {torch.cuda.memory_allocated()/1024**3:.1f}GB")
-            # Now move ControlNet to GPU — there's room after TE offload
-            if hasattr(pipe, "controlnet") and pipe.controlnet is not None:
-                pipe.controlnet.to("cuda")
-                emitter.info(f"ControlNet moved to GPU. GPU: {torch.cuda.memory_allocated()/1024**3:.1f}GB")
-        except Exception as exc:
-            emitter.info(f"Pre-encoding failed ({exc}), using normal prompt")
-
     # Add ControlNet conditioning
     if cn_pipe is not None and cn_images:
         control_image = cn_images[0] if len(cn_images) == 1 else cn_images
@@ -1262,6 +1320,19 @@ def run_generate_with_pipeline(
                             "dtype": info["weight_dtype"],
                         }
 
+                # ControlNet metadata
+                cn_meta = None
+                if cn_inputs:
+                    cn_meta = [
+                        {
+                            "image": Path(inp["image"]).name,
+                            "type": inp.get("control_type", "canny"),
+                            "strength": inp.get("strength", 0.75),
+                            "end": inp.get("control_end", 0.8),
+                        }
+                        for inp in cn_inputs
+                    ]
+
                 embedded_meta = {
                     "generated_with": "modl.run",
                     "prompt": prompt,
@@ -1277,6 +1348,7 @@ def run_generate_with_pipeline(
                     "count": count,
                     "timestamp": timestamp,
                     "model_files": model_files or None,
+                    "controlnet": cn_meta,
                 }
                 pnginfo = PngInfo()
                 pnginfo.add_text("Software", "modl.run")

@@ -746,6 +746,22 @@ pub static CONTROLNET_SUPPORT: &[ControlNetSupport] = &[
         recommended_min_steps: 28,
     },
     ControlNetSupport {
+        base_model_id: "flux-schnell",
+        manifest_id: "flux-dev-controlnet-union",
+        supported_types: &["canny", "depth", "pose", "softedge", "gray"],
+        default_strength: 0.7,
+        default_end: 0.8,
+        recommended_min_steps: 4,
+    },
+    ControlNetSupport {
+        base_model_id: "z-image",
+        manifest_id: "z-image-turbo-controlnet-union",
+        supported_types: &["canny", "hed", "depth", "pose", "mlsd", "scribble", "gray"],
+        default_strength: 0.75,
+        default_end: 0.8,
+        recommended_min_steps: 20,
+    },
+    ControlNetSupport {
         base_model_id: "flux2-dev",
         manifest_id: "flux-2-dev-controlnet-union",
         supported_types: &["canny", "depth", "pose", "hed", "mlsd"],
