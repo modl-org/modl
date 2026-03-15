@@ -864,12 +864,16 @@ def _resolve_controlnet_path(arch: str) -> str | None:
 
 
 def _resolve_controlnet_config(arch: str, model_path: str) -> str | None:
-    """Return bundled config path for Z-Image controlnets.
+    """Return bundled config path for controlnets that need it.
 
-    Diffusers' from_single_file misdetects the lite v2.1 variant as v1.0
-    because lite has only 3 control layers, not 15.  We inspect the embedder
-    weight shape to determine the correct version and return the bundled config.
+    Z-Image: diffusers misdetects the lite v2.1 variant as v1.0.
+    Qwen-Image: from_single_file needs a config to avoid HF downloads.
     """
+    configs_dir = Path(__file__).parent.parent / "configs"
+
+    if arch == "qwen_image":
+        return str(configs_dir / "qwen-image-controlnet")
+
     if arch not in ("zimage_turbo", "zimage"):
         return None
 
@@ -945,16 +949,25 @@ def _load_controlnet(
 
     try:
         if model_path.endswith(".safetensors"):
-            # Use bundled config for Z-Image controlnets — diffusers'
-            # from_single_file misdetects the lite v2.1 variant as v1.0
-            # because lite has only 3 control layers (not 15).
             cn_config = _resolve_controlnet_config(arch, model_path)
-            if cn_config:
-                cn_model = cn_cls.from_single_file(
-                    model_path, config=cn_config, torch_dtype=dtype,
-                )
-            else:
-                cn_model = cn_cls.from_single_file(model_path, torch_dtype=dtype)
+            try:
+                if cn_config:
+                    cn_model = cn_cls.from_single_file(
+                        model_path, config=cn_config, torch_dtype=dtype,
+                    )
+                else:
+                    cn_model = cn_cls.from_single_file(model_path, torch_dtype=dtype)
+            except (ValueError, NotImplementedError):
+                # from_single_file not supported (e.g. QwenImageControlNetModel).
+                # Fall back to from_config + load_state_dict.
+                if not cn_config:
+                    raise
+                import safetensors.torch as sf
+                config_dict = cn_cls.load_config(cn_config)
+                cn_model = cn_cls.from_config(config_dict)
+                state_dict = sf.load_file(model_path)
+                cn_model.load_state_dict(state_dict, strict=False)
+                cn_model = cn_model.to(dtype)
         else:
             cn_model = cn_cls.from_pretrained(model_path, torch_dtype=dtype)
     except Exception as exc:
@@ -1016,7 +1029,7 @@ def _load_controlnet(
         # models like qwen-image). If so, use cpu_offload on the CN
         # pipeline too and pin the controlnet on CUDA (it's independent,
         # no shared modules — safe to keep resident).
-        base_was_offloaded = hasattr(pipeline, "_hf_hook")
+        base_was_offloaded = bool(getattr(pipeline, "_all_hooks", None))
         if base_was_offloaded:
             cn_pipe.enable_model_cpu_offload()
             cn_pipe.controlnet.to("cuda")
