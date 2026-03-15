@@ -247,7 +247,7 @@ def _apply_lora(pipeline, spec: dict, emitter: EventEmitter) -> None:
 def _load_edit_pipeline(base_model_id: str, base_model_path: str | None, emitter: EventEmitter):
     """Load the edit pipeline for the given model."""
     from .arch_config import resolve_pipeline_class
-    from .gen_adapter import load_pipeline
+    from .pipeline_loader import load_pipeline
 
     cls_name = resolve_pipeline_class(base_model_id)
     return load_pipeline(base_model_id, base_model_path, cls_name, emitter)

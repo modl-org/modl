@@ -1,5 +1,6 @@
 from .train_adapter import run_train
 from .gen_adapter import run_generate, run_generate_with_pipeline
+from .pipeline_loader import load_pipeline  # noqa: F401
 from .edit_adapter import run_edit, run_edit_with_pipeline
 from .caption_adapter import run_caption
 from .resize_adapter import run_resize

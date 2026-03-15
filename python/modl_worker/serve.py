@@ -121,7 +121,7 @@ class ModelCache:
         but LoRA changed). Supports mode switching (txt2img -> img2img ->
         inpaint) via from_pipe(), caching each mode variant.
         """
-        from modl_worker.adapters.gen_adapter import (
+        from modl_worker.adapters.pipeline_loader import (
             _resolve_pipeline_class,
             _get_pipeline,
             load_pipeline,
