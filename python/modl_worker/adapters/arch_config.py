@@ -310,6 +310,8 @@ ARCH_CONFIGS: dict[str, dict] = {
     },
     "zimage_turbo": {
         "pipeline_class": "ZImagePipeline",
+        "img2img_class": "ZImageImg2ImgPipeline",
+        "inpaint_class": "ZImageInpaintPipeline",
         "gen_components": {
             "transformer": {
                 "model_class": "ZImageTransformer2DModel",
@@ -355,6 +357,8 @@ ARCH_CONFIGS: dict[str, dict] = {
     },
     "zimage": {
         "pipeline_class": "ZImagePipeline",
+        "img2img_class": "ZImageImg2ImgPipeline",
+        "inpaint_class": "ZImageInpaintPipeline",
         "gen_components": {
             "transformer": {
                 "model_class": "ZImageTransformer2DModel",

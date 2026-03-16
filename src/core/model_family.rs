@@ -338,8 +338,8 @@ pub static FAMILIES: &[ModelFamily] = &[
                 vram_fp8_gb: 14,
                 capabilities: Capabilities {
                     txt2img: true,
-                    img2img: false,
-                    inpaint: false,
+                    img2img: true,
+                    inpaint: true,
                     edit: false,
                     lora: true,
                     training: true,
@@ -364,8 +364,8 @@ pub static FAMILIES: &[ModelFamily] = &[
                 vram_fp8_gb: 14,
                 capabilities: Capabilities {
                     txt2img: true,
-                    img2img: false,
-                    inpaint: false,
+                    img2img: true,
+                    inpaint: true,
                     edit: false,
                     lora: true,
                     training: true,
