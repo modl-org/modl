@@ -22,6 +22,7 @@ mod install;
 mod link;
 mod list;
 mod llm;
+mod mcp;
 mod outputs;
 mod popular;
 mod preprocess;
@@ -848,6 +849,14 @@ pub enum Commands {
         command: runtime::RuntimeCommands,
     },
 
+    /// Start MCP (Model Context Protocol) server for AI assistant integration
+    ///
+    /// Exposes modl tools (generate, list_models, pull_model, describe) over
+    /// the MCP stdio transport. Configure in Claude Desktop, Cursor, etc:
+    ///
+    ///   { "mcpServers": { "modl": { "command": "modl", "args": ["mcp"] } } }
+    Mcp,
+
     /// Dump CLI schema as JSON
     #[command(hide = true)]
     CliSchema,
@@ -1201,6 +1210,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
         }
         Commands::Upgrade => upgrade::run().await,
+        Commands::Mcp => mcp::run().await,
         Commands::CliSchema => {
             dump_cli_schema();
             Ok(())
