@@ -9,13 +9,12 @@ mod detect;
 mod doctor;
 pub(crate) mod edit;
 mod enhance;
-mod export;
+mod export_import;
 mod face_restore;
 mod fmt;
 mod gc;
 pub(crate) mod generate;
 mod ground;
-mod import;
 mod info;
 mod init;
 mod install;
@@ -794,15 +793,28 @@ pub enum Commands {
         root: Option<String>,
     },
 
-    /// Export installed state to a lock file
-    #[command(hide = true)]
-    Export,
+    /// Export data (outputs, trained LoRAs, DB) to a backup archive
+    Export {
+        /// Output archive path (.tar.zst)
+        output: String,
+        /// Exclude generation outputs (DB + LoRAs only)
+        #[arg(long)]
+        no_outputs: bool,
+        /// Only include outputs after this date (YYYY-MM-DD)
+        #[arg(long)]
+        since: Option<String>,
+    },
 
-    /// Import and install from a lock file
-    #[command(hide = true)]
+    /// Import data from a backup archive
     Import {
-        /// Path to modl.lock file
+        /// Path to .tar.zst backup archive
         path: String,
+        /// Preview what would be restored without making changes
+        #[arg(long)]
+        dry_run: bool,
+        /// Overwrite existing files (default: skip)
+        #[arg(long)]
+        overwrite: bool,
     },
 
     /// Browse and manage generated outputs
@@ -925,8 +937,16 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Commands::Update => update::run().await,
         Commands::Gc => gc::run().await,
-        Commands::Export => export::run().await,
-        Commands::Import { path } => import::run(&path).await,
+        Commands::Export {
+            output,
+            no_outputs,
+            since,
+        } => export_import::run_export(&output, no_outputs, since.as_deref()),
+        Commands::Import {
+            path,
+            dry_run,
+            overwrite,
+        } => export_import::run_import(&path, dry_run, overwrite),
         Commands::Init { defaults, root } => init::run(defaults, root.as_deref()).await,
         Commands::Train {
             command,

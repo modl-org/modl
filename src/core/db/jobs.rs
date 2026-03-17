@@ -155,6 +155,14 @@ impl Database {
         Ok(())
     }
 
+    /// Count total jobs in the database.
+    pub fn count_jobs(&self) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM jobs", [], |row| row.get(0))?;
+        Ok(count as usize)
+    }
+
     /// Insert a job event
     pub fn insert_job_event(&self, job_id: &str, sequence: u64, event_json: &str) -> Result<()> {
         self.conn
