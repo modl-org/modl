@@ -247,8 +247,9 @@ def run_generate_with_pipeline(
     os.makedirs(output_dir, exist_ok=True)
 
     generator = torch.Generator(device="cuda")
-    if seed is not None:
-        generator.manual_seed(seed)
+    if seed is None:
+        seed = generator.seed()  # capture the random seed for reproducibility
+    generator.manual_seed(seed)
 
     # Build inference kwargs — different pipelines accept different params
     gen_kwargs = {

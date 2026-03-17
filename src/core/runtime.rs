@@ -15,15 +15,16 @@ use crate::core::store::Store;
 
 const DEFAULT_PROFILE: &str = "trainer-cu124";
 const DEFAULT_CHANNEL: &str = "stable";
-const PYTHON_VERSION: &str = "3.11.11";
+const PYTHON_VERSION: &str = "3.11.12";
 const TRAINER_CU126_INDEX_URL: &str = "https://download.pytorch.org/whl/cu126";
 const TRAINER_TORCH_VERSION: &str = "2.7.0";
 const TRAINER_TORCHVISION_VERSION: &str = "0.22.0";
 const TRAINER_TORCHAUDIO_VERSION: &str = "2.7.0";
 const AITOOLKIT_REPO_URL: &str = "https://github.com/ostris/ai-toolkit.git";
 const AITOOLKIT_CLONE_DIR: &str = "ai-toolkit";
-const DEFAULT_PYTHON_ARTIFACT_URL: &str = "https://github.com/modl/modl-runtime-manifests/releases/download/v2026.02.1/cpython-3.11.11-linux-x86_64.tar.gz";
+const DEFAULT_PYTHON_ARTIFACT_URL: &str = "https://github.com/indygreg/python-build-standalone/releases/download/20250409/cpython-3.11.12+20250409-x86_64-unknown-linux-gnu-install_only.tar.gz";
 const PYTHON_ARTIFACT_URL_ENV: &str = "MODL_PYTHON_ARTIFACT_URL";
+const MIN_SYSTEM_PYTHON_MINOR: u32 = 11;
 
 #[derive(Debug, Clone)]
 pub struct RuntimeInstallResult {
@@ -417,7 +418,7 @@ fn write_profile_requirements_if_missing(root: &Path, profile: &str) -> Result<(
 
     let content = match profile {
         "trainer-cu124" => {
-            "# Additional trainer-cu124 requirements (base torch + ai-toolkit are installed by bootstrap logic)\naccelerate>=0.33\nsafetensors>=0.5\ntransformers>=4.51\ndiffusers>=0.31\npillow>=10.0\n"
+            "# Additional trainer-cu124 requirements (base torch + ai-toolkit are installed by bootstrap logic)\naccelerate>=0.33\nsafetensors>=0.5\ntransformers>=4.51\ndiffusers>=0.37.0\npillow>=10.0\n"
         }
         "inference-cu124" => {
             "# Runtime profile requirements for inference-cu124\n# Add/adjust heavy dependencies as manifests stabilize.\n\n"
@@ -703,6 +704,46 @@ async fn install_managed_python(root: &Path, profile: &str) -> Result<()> {
         return Ok(());
     }
 
+    // Try downloading the managed Python artifact first
+    let download_result = download_managed_python(root, profile).await;
+
+    if download_result.is_ok() && managed_python.exists() {
+        return Ok(());
+    }
+
+    // Fall back to system Python if managed download fails
+    if let Some(system_python) = find_system_python() {
+        println!(
+            "  {} Using system Python: {}",
+            style("i").cyan(),
+            system_python.display()
+        );
+        let target_dir = root.join("python").join(PYTHON_VERSION).join("bin");
+        fs::create_dir_all(&target_dir)
+            .with_context(|| format!("Failed to create {}", target_dir.display()))?;
+        let target = target_dir.join("python");
+        if target.exists() {
+            fs::remove_file(&target)?;
+        }
+        std::os::unix::fs::symlink(&system_python, &target).with_context(|| {
+            format!(
+                "Failed to symlink {} -> {}",
+                target.display(),
+                system_python.display()
+            )
+        })?;
+        return Ok(());
+    }
+
+    // Neither worked — surface the download error
+    download_result.with_context(
+        || "Failed to install managed Python and no suitable system Python (>=3.11) found",
+    )?;
+
+    Ok(())
+}
+
+async fn download_managed_python(root: &Path, profile: &str) -> Result<()> {
     let profile_manifest = read_profile_manifest(root, profile)?;
     let url = profile_manifest.python.artifact_uri;
     let expected_hash = profile_manifest.python.sha256;
@@ -735,17 +776,72 @@ async fn install_managed_python(root: &Path, profile: &str) -> Result<()> {
         }
     }
 
-    extract_python_archive(archive_path.as_path(), &root.join("python"))?;
+    let python_dir = root.join("python");
+    extract_python_archive(archive_path.as_path(), &python_dir)?;
 
-    if !managed_python.exists() {
-        bail!(
-            "Managed Python extraction completed, but {} is missing. Ensure artifact layout contains python/{}/bin/python",
-            managed_python.display(),
-            PYTHON_VERSION
-        );
+    // python-build-standalone extracts to python/ — rename to PYTHON_VERSION/
+    let extracted_dir = python_dir.join("python");
+    let target_dir = python_dir.join(PYTHON_VERSION);
+    if extracted_dir.exists() && !target_dir.exists() {
+        fs::rename(&extracted_dir, &target_dir).with_context(|| {
+            format!(
+                "Failed to rename {} -> {}",
+                extracted_dir.display(),
+                target_dir.display()
+            )
+        })?;
+    }
+
+    // Ensure the python binary is named 'python' (some builds only have python3.11)
+    let python_bin = target_dir.join("bin").join("python");
+    if !python_bin.exists() {
+        // Look for python3.XX in the bin directory
+        let bin_dir = target_dir.join("bin");
+        if let Ok(entries) = fs::read_dir(&bin_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with("python3.") && !name.contains('-') {
+                    std::os::unix::fs::symlink(entry.path(), &python_bin)?;
+                    break;
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Find a suitable system Python (>= 3.MIN_SYSTEM_PYTHON_MINOR)
+fn find_system_python() -> Option<PathBuf> {
+    // Try python3.12, python3.11, then python3
+    for candidate in &["python3.12", "python3.11", "python3"] {
+        let output = Command::new(candidate).arg("--version").output().ok()?;
+        if !output.status.success() {
+            continue;
+        }
+        let version_str = String::from_utf8_lossy(&output.stdout);
+        // Parse "Python 3.X.Y"
+        let parts: Vec<&str> = version_str.trim().split(' ').collect();
+        if parts.len() != 2 {
+            continue;
+        }
+        let ver_parts: Vec<&str> = parts[1].split('.').collect();
+        if ver_parts.len() < 2 {
+            continue;
+        }
+        let major: u32 = ver_parts[0].parse().unwrap_or(0);
+        let minor: u32 = ver_parts[1].parse().unwrap_or(0);
+        if major == 3 && minor >= MIN_SYSTEM_PYTHON_MINOR {
+            // Resolve full path
+            if let Ok(output) = Command::new("which").arg(candidate).output()
+                && output.status.success()
+            {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                return Some(PathBuf::from(path));
+            }
+        }
+    }
+    None
 }
 
 fn python_artifact_url() -> String {
