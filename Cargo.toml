@@ -71,6 +71,9 @@ urlencoding = "2"
 # UUID generation (studio sessions)
 uuid = { version = "1", features = ["v4"] }
 
+# Temp files (backup export/import)
+tempfile = "3"
+
 # Unix process management (worker daemon)
 libc = "0.2"
 

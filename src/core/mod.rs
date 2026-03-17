@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod agent_tools;
 pub mod artifacts;
+pub mod backup;
 pub mod civitai;
 pub mod cloud;
 pub mod config;
