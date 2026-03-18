@@ -35,30 +35,68 @@ def _resolve_images(image_paths: list[str]) -> list[Path]:
 
 
 def _parse_detections(response_text: str, query: str, threshold: float) -> list[dict]:
-    """Parse bounding box detections from Qwen2.5-VL response text."""
-    json_match = re.search(r"\[.*\]", response_text, re.DOTALL)
+    """Parse bounding box detections from VL model response text.
+
+    Handles multiple response formats:
+    - Clean JSON array
+    - Markdown-fenced ```json blocks
+    - Truncated responses (parse individual objects via regex)
+    - Duplicate keys in objects (common with Qwen3-VL)
+    """
+    # Strip markdown code fences
+    text = re.sub(r"```(?:json)?\s*", "", response_text)
+    text = text.strip()
+
+    # Try parsing the full JSON array first
+    json_match = re.search(r"\[.*\]", text, re.DOTALL)
     if json_match:
         try:
             raw = json.loads(json_match.group())
             if isinstance(raw, list):
-                objects = []
-                for item in raw:
-                    if not isinstance(item, dict):
-                        continue
-                    bbox = item.get("bbox_2d") or item.get("bbox")
-                    label = item.get("label", query)
-                    if bbox and isinstance(bbox, list) and len(bbox) == 4:
-                        confidence = float(item.get("confidence", 1.0))
-                        if confidence >= threshold:
-                            objects.append({
-                                "label": str(label),
-                                "bbox": [round(float(c), 1) for c in bbox],
-                                "confidence": round(confidence, 4),
-                            })
-                return objects
+                objects = _extract_objects(raw, query, threshold)
+                if objects:
+                    return objects
         except (json.JSONDecodeError, ValueError):
             pass
-    return []
+
+    # Fallback: extract individual {bbox_2d: [...]} objects via regex
+    # This handles truncated responses where the array isn't closed
+    objects = []
+    for m in re.finditer(r'\{[^{}]*"bbox_2d"\s*:\s*\[([^\]]+)\][^{}]*\}', text):
+        try:
+            coords = [float(x.strip()) for x in m.group(1).split(",")]
+            if len(coords) == 4:
+                # Extract label if present
+                label_m = re.search(r'"label"\s*:\s*"([^"]*)"', m.group(0))
+                label = label_m.group(1) if label_m else query
+                objects.append({
+                    "label": str(label),
+                    "bbox": [round(c, 1) for c in coords],
+                    "confidence": 1.0,
+                })
+        except (ValueError, IndexError):
+            continue
+
+    return objects
+
+
+def _extract_objects(raw: list, query: str, threshold: float) -> list[dict]:
+    """Extract bbox objects from a parsed JSON list."""
+    objects = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        bbox = item.get("bbox_2d") or item.get("bbox")
+        label = item.get("label", query)
+        if bbox and isinstance(bbox, list) and len(bbox) == 4:
+            confidence = float(item.get("confidence", 1.0))
+            if confidence >= threshold:
+                objects.append({
+                    "label": str(label),
+                    "bbox": [round(float(c), 1) for c in bbox],
+                    "confidence": round(confidence, 4),
+                })
+    return objects
 
 
 def run_ground(config_path: Path, emitter: EventEmitter) -> int:
