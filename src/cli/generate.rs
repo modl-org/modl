@@ -49,6 +49,18 @@ const SIZE_PRESETS: &[(&str, u32, u32)] = &[
     ("3:4", 896, 1152),
 ];
 
+/// Read image dimensions from a file on disk.
+fn image_dimensions(path: &str) -> Result<(u32, u32)> {
+    let reader = image::ImageReader::open(path)
+        .with_context(|| format!("Cannot open init-image: {path}"))?
+        .with_guessed_format()
+        .with_context(|| format!("Cannot detect format of: {path}"))?;
+    let dims = reader
+        .into_dimensions()
+        .with_context(|| format!("Cannot read dimensions of: {path}"))?;
+    Ok(dims)
+}
+
 /// Resolve a size preset string to (width, height).
 fn resolve_size(size: &str) -> Result<(u32, u32)> {
     // Check presets
@@ -193,7 +205,7 @@ pub struct GenerateArgs<'a> {
     pub lora: Option<&'a str>,
     pub lora_strength: f32,
     pub seed: Option<u64>,
-    pub size: &'a str,
+    pub size: Option<&'a str>,
     pub steps: Option<u32>,
     pub guidance: Option<f32>,
     pub count: u32,
@@ -260,9 +272,15 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
     let base_model_path = resolve_base_model_path(&base_model, &db);
 
     // -------------------------------------------------------------------
-    // Resolve size
+    // Resolve size: explicit --size wins, otherwise use init-image dims
     // -------------------------------------------------------------------
-    let (width, height) = resolve_size(size)?;
+    let (width, height) = if let Some(s) = size {
+        resolve_size(s)?
+    } else if let Some(path) = init_image {
+        image_dimensions(path)?
+    } else {
+        resolve_size("1:1")?
+    };
 
     // -------------------------------------------------------------------
     // Resolve --fast (Lightning LoRA)

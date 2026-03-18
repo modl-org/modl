@@ -418,10 +418,10 @@ fn write_profile_requirements_if_missing(root: &Path, profile: &str) -> Result<(
 
     let content = match profile {
         "trainer-cu124" => {
-            "# Additional trainer-cu124 requirements (base torch + ai-toolkit are installed by bootstrap logic)\naccelerate>=0.33\nsafetensors>=0.5\ntransformers>=4.51\ndiffusers>=0.37.0\npillow>=10.0\n"
+            "# Additional trainer-cu124 requirements (base torch + ai-toolkit are installed by bootstrap logic)\naccelerate>=0.33\nsafetensors>=0.5\ntransformers>=4.51\ndiffusers>=0.37.0\npillow>=10.0\nspandrel>=0.4\n"
         }
         "inference-cu124" => {
-            "# Runtime profile requirements for inference-cu124\n# Add/adjust heavy dependencies as manifests stabilize.\n\n"
+            "# Runtime profile requirements for inference-cu124\nspandrel>=0.4\ninsightface>=0.7\n"
         }
         _ => "# Runtime profile requirements\n\n",
     };
@@ -725,11 +725,20 @@ async fn install_managed_python(root: &Path, profile: &str) -> Result<()> {
         if target.exists() {
             fs::remove_file(&target)?;
         }
+        #[cfg(unix)]
         std::os::unix::fs::symlink(&system_python, &target).with_context(|| {
             format!(
                 "Failed to symlink {} -> {}",
                 target.display(),
                 system_python.display()
+            )
+        })?;
+        #[cfg(windows)]
+        fs::copy(&system_python, &target).with_context(|| {
+            format!(
+                "Failed to copy {} -> {}",
+                system_python.display(),
+                target.display()
             )
         })?;
         return Ok(());
@@ -801,7 +810,10 @@ async fn download_managed_python(root: &Path, profile: &str) -> Result<()> {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.starts_with("python3.") && !name.contains('-') {
+                    #[cfg(unix)]
                     std::os::unix::fs::symlink(entry.path(), &python_bin)?;
+                    #[cfg(windows)]
+                    fs::copy(entry.path(), &python_bin)?;
                     break;
                 }
             }

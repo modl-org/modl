@@ -165,7 +165,7 @@ async fn run_single_generate(sender: &broadcast::Sender<String>, req: GenerateRe
         lora: lora_id.as_deref(),
         lora_strength,
         seed: req.seed,
-        size: &size,
+        size: Some(&size),
         steps: Some(req.steps),
         guidance: Some(req.guidance),
         count: req.num_images,

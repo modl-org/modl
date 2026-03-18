@@ -91,7 +91,10 @@ pub async fn run(
     }
 
     if !result.success {
-        anyhow::bail!("Upscaling failed");
+        anyhow::bail!(
+            "Upscaling failed. Check that the Python runtime has spandrel installed:\n  \
+             modl train setup"
+        );
     }
 
     Ok(())

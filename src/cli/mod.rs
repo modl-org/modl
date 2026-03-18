@@ -443,9 +443,9 @@ pub enum Commands {
         /// Random seed for reproducibility
         #[arg(long)]
         seed: Option<u64>,
-        /// Image size preset (1:1, 16:9, 9:16, 4:3, 3:4) or WxH
-        #[arg(long, default_value = "1:1")]
-        size: String,
+        /// Image size preset (1:1, 16:9, 9:16, 4:3, 3:4) or WxH [default: 1:1, or init-image dimensions]
+        #[arg(long)]
+        size: Option<String>,
         /// Number of inference steps
         #[arg(long)]
         steps: Option<u32>,
@@ -1062,7 +1062,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 lora: lora.as_deref(),
                 lora_strength,
                 seed,
-                size: &size,
+                size: size.as_deref(),
                 steps,
                 guidance,
                 count,
