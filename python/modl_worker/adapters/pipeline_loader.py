@@ -249,6 +249,7 @@ def assemble_pipeline(
     cls_name: str,
     emitter: EventEmitter,
     force_fp8: bool = False,
+    no_offload: bool = False,
 ):
     """Assemble a pipeline from locally installed components.
 
@@ -555,7 +556,8 @@ def assemble_pipeline(
     arch_name = detect_arch(base_model_id)
     pipeline_kwargs = ARCH_CONFIGS.get(arch_name, {}).get("pipeline_kwargs", {})
     pipe = PipelineClass(**components, **pipeline_kwargs)
-    pipe.enable_model_cpu_offload()
+    if not no_offload:
+        pipe.enable_model_cpu_offload()
     # Attach loaded file info for downstream metadata embedding
     pipe._modl_loaded_files = loaded_files
     return pipe

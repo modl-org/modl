@@ -17,6 +17,7 @@ from .ground_adapter import run_ground
 from .describe_adapter import run_describe
 from .vl_tag_adapter import run_vl_tag
 from .preprocess_adapter import run_preprocess
+from .lanpaint_adapter import run_lanpaint
 
 # Config building (used by train_adapter, available for testing)
 from .config_builder import spec_to_aitoolkit_config  # noqa: F401
@@ -27,5 +28,5 @@ __all__ = [
     "run_tag", "run_score", "run_detect", "run_compare",
     "run_segment", "run_face_restore", "run_upscale", "run_remove_bg",
     "run_face_crop", "run_ground", "run_describe", "run_vl_tag",
-    "run_preprocess",
+    "run_preprocess", "run_lanpaint",
 ]

@@ -8,7 +8,7 @@ from modl_worker.adapters import (
     run_score, run_detect, run_compare,
     run_segment, run_face_restore, run_upscale, run_remove_bg,
     run_face_crop, run_ground, run_describe, run_vl_tag,
-    run_preprocess,
+    run_preprocess, run_lanpaint,
 )
 from modl_worker.protocol import EventEmitter, fatal
 
@@ -88,6 +88,10 @@ def _build_parser() -> argparse.ArgumentParser:
     pre = sub.add_parser("preprocess", help="Run control image preprocessing")
     pre.add_argument("--config", required=True, help="Path to preprocess spec yaml")
     pre.add_argument("--job-id", default="", help="Job ID for event envelope")
+
+    lp = sub.add_parser("lanpaint", help="Run LanPaint training-free inpainting")
+    lp.add_argument("--config", required=True, help="Path to generate spec yaml")
+    lp.add_argument("--job-id", default="", help="Job ID for event envelope")
 
     srv = sub.add_parser("serve", help="Start persistent worker daemon")
     srv.add_argument("--timeout", type=int, default=600, help="Idle timeout in seconds (default: 600)")
@@ -194,6 +198,11 @@ def main() -> int:
         config_path = Path(args.config)
         emitter.job_accepted(worker_pid=os.getpid())
         return run_preprocess(config_path, emitter)
+
+    if args.command == "lanpaint":
+        config_path = Path(args.config)
+        emitter.job_accepted(worker_pid=os.getpid())
+        return run_lanpaint(config_path, emitter)
 
     if args.command == "serve":
         from modl_worker.serve import run_serve
