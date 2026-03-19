@@ -99,6 +99,26 @@ def _extract_objects(raw: list, query: str, threshold: float) -> list[dict]:
     return objects
 
 
+def _denormalize_bboxes(objects: list[dict], image_w: int, image_h: int) -> list[dict]:
+    """Convert bboxes from Qwen VL 0-1000 normalized coords to pixel coords.
+
+    Qwen VL models (2.5 and 3) return bounding boxes in a normalized
+    coordinate system where both axes are mapped to [0, 1000], regardless
+    of actual image dimensions. This converts them to real pixel coords.
+    """
+    for obj in objects:
+        bbox = obj.get("bbox")
+        if bbox and len(bbox) == 4:
+            x1, y1, x2, y2 = bbox
+            obj["bbox"] = [
+                round(x1 / 1000.0 * image_w, 1),
+                round(y1 / 1000.0 * image_h, 1),
+                round(x2 / 1000.0 * image_w, 1),
+                round(y2 / 1000.0 * image_h, 1),
+            ]
+    return objects
+
+
 def run_ground(config_path: Path, emitter: EventEmitter) -> int:
     """Run text-grounded object detection on images from a GroundJobSpec YAML file."""
     import yaml
@@ -147,6 +167,8 @@ def run_ground(config_path: Path, emitter: EventEmitter) -> int:
     detections = []
     errors = 0
 
+    from PIL import Image
+
     for i, image_path in enumerate(images):
         emitter.progress(stage="ground", step=i, total_steps=total)
 
@@ -156,6 +178,11 @@ def run_ground(config_path: Path, emitter: EventEmitter) -> int:
             elapsed = time.time() - t0
 
             objects = _parse_detections(response, query, threshold)
+
+            # Qwen VL returns bboxes in 0-1000 normalized space → convert to pixels
+            img = Image.open(image_path)
+            objects = _denormalize_bboxes(objects, img.width, img.height)
+            img.close()
 
             detections.append({
                 "image": str(image_path),

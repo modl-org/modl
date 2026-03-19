@@ -15,7 +15,7 @@ VL_MODEL_REPOS = {
     "qwen25-vl-7b": "Qwen/Qwen2.5-VL-7B-Instruct",
 }
 
-DEFAULT_VL_MODEL = "qwen3-vl-2b"
+DEFAULT_VL_MODEL = "qwen3-vl-8b"
 
 
 def load_qwen_vl(emitter: EventEmitter, model_id: str | None = None):

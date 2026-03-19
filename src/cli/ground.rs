@@ -22,7 +22,7 @@ pub async fn run(
         }
     }
 
-    let model_id = model.unwrap_or("qwen3-vl-2b").to_string();
+    let model_id = model.unwrap_or("qwen3-vl-8b").to_string();
 
     let spec = GroundJobSpec {
         image_paths: paths.to_vec(),

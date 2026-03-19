@@ -43,10 +43,6 @@ def _mask_from_bbox(image_path: Path, bbox: list[float], expand_px: int) -> Imag
     draw = ImageDraw.Draw(mask)
     draw.rectangle([int(x1), int(y1), int(x2), int(y2)], fill=255)
 
-    # Feather edges with Gaussian blur
-    if expand_px > 0:
-        mask = mask.filter(ImageFilter.GaussianBlur(radius=expand_px // 2))
-
     return mask
 
 

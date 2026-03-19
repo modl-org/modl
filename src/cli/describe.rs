@@ -16,7 +16,7 @@ pub async fn run(paths: &[String], detail: &str, model: Option<&str>, json: bool
         }
     }
 
-    let model_id = model.unwrap_or("qwen3-vl-2b").to_string();
+    let model_id = model.unwrap_or("qwen3-vl-8b").to_string();
 
     let spec = DescribeJobSpec {
         image_paths: paths.to_vec(),

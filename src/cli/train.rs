@@ -10,9 +10,11 @@ use crate::core::dataset;
 use crate::core::db::Database;
 use crate::core::executor::{Executor, LocalExecutor};
 use crate::core::gpu;
+use crate::core::gpu_session;
 use crate::core::job::*;
 use crate::core::preflight;
 use crate::core::presets::{self, DatasetStats, GpuContext};
+use crate::core::remote_executor::RemoteExecutor;
 use crate::core::run_manifest;
 
 /// CLI overrides that take precedence over preset-resolved values.
@@ -45,6 +47,8 @@ pub async fn run(
     dry_run: bool,
     cloud: bool,
     provider: Option<CloudProvider>,
+    attach_gpu: bool,
+    gpu_type: &str,
 ) -> Result<()> {
     // -------------------------------------------------------------------
     // Fast path: --config <yaml> loads a full spec directly
@@ -55,8 +59,10 @@ pub async fn run(
         let mut spec: TrainJobSpec =
             serde_yaml::from_str(&yaml).context("Failed to parse TrainJobSpec YAML")?;
 
-        // Respect --cloud flag even when loading spec from file
-        if cloud {
+        // Respect --cloud / --attach-gpu flag even when loading spec from file
+        if attach_gpu {
+            spec.target = ExecutionTarget::Remote;
+        } else if cloud {
             spec.target = ExecutionTarget::Cloud;
         }
 
@@ -65,7 +71,7 @@ pub async fn run(
             return Ok(());
         }
 
-        return execute_training(spec, cloud, provider).await;
+        return execute_training(spec, cloud, provider, attach_gpu, gpu_type).await;
     }
 
     // -------------------------------------------------------------------
@@ -338,7 +344,9 @@ pub async fn run(
             profile: "trainer-cu124".to_string(),
             python_version: Some("3.11.11".to_string()),
         },
-        target: if cloud {
+        target: if attach_gpu {
+            ExecutionTarget::Remote
+        } else if cloud {
             ExecutionTarget::Cloud
         } else {
             ExecutionTarget::Local
@@ -355,7 +363,7 @@ pub async fn run(
         return Ok(());
     }
 
-    execute_training(spec, cloud, provider).await
+    execute_training(spec, cloud, provider, attach_gpu, gpu_type).await
 }
 
 /// Execute training: persist job, run executor, collect artifacts.
@@ -363,11 +371,13 @@ async fn execute_training(
     spec: TrainJobSpec,
     cloud: bool,
     provider: Option<CloudProvider>,
+    attach_gpu: bool,
+    gpu_type: &str,
 ) -> Result<()> {
     // -------------------------------------------------------------------
     // 0. Pre-flight checks (fail fast with actionable hints)
     // -------------------------------------------------------------------
-    if !cloud {
+    if !cloud && !attach_gpu {
         preflight::for_training(&spec.model.base_model_id)?;
     }
 
@@ -379,7 +389,26 @@ async fn execute_training(
     // -------------------------------------------------------------------
     // 1. Bootstrap executor
     // -------------------------------------------------------------------
-    let mut executor: Box<dyn Executor> = if cloud {
+    let mut executor: Box<dyn Executor> = if attach_gpu {
+        println!(
+            "{} Connecting to remote GPU ({})...",
+            style("→").cyan(),
+            style(gpu_type).bold()
+        );
+        let session = gpu_session::ensure_session(
+            gpu_type,
+            "2h", // training sessions get a longer idle timeout
+            std::slice::from_ref(&spec.model.base_model_id),
+        )
+        .await?;
+        println!(
+            "  {} Session {} ({})",
+            style("✓").green(),
+            style(&session.session_id).bold(),
+            session.state,
+        );
+        Box::new(RemoteExecutor::new(session))
+    } else if cloud {
         let cloud_provider = resolve_cloud_provider(provider);
         println!(
             "{} Preparing cloud training via {}...",
