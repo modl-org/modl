@@ -13,6 +13,7 @@ use crate::core::gpu;
 use crate::core::job::*;
 use crate::core::preflight;
 use crate::core::presets::{self, DatasetStats, GpuContext};
+use crate::core::run_manifest;
 
 /// CLI overrides that take precedence over preset-resolved values.
 pub struct TrainOverrides {
@@ -422,6 +423,10 @@ async fn execute_training(
         style(job_id).dim()
     );
 
+    if let Err(e) = run_manifest::refresh_manifest_for_spec(&spec, Some(job_id), "running") {
+        eprintln!("{} Could not write run manifest: {e}", style("⚠").yellow());
+    }
+
     // -------------------------------------------------------------------
     // 3. Event loop with progress bar
     // -------------------------------------------------------------------
@@ -648,6 +653,13 @@ async fn execute_training(
                 spec.output.destination_dir
             );
         }
+    }
+
+    if let Err(e) = run_manifest::refresh_manifest_for_spec(&spec, Some(job_id), final_status) {
+        eprintln!(
+            "{} Could not refresh run manifest at end of training: {e}",
+            style("⚠").yellow()
+        );
     }
 
     Ok(())

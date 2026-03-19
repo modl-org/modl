@@ -10,21 +10,24 @@ mod doctor;
 pub(crate) mod edit;
 mod enhance;
 mod export_import;
-mod face_restore;
 mod fmt;
 mod gc;
 pub(crate) mod generate;
+mod gpu;
 mod ground;
+mod hub_pull;
 mod info;
 mod init;
 mod install;
 mod link;
 mod list;
-mod llm;
+mod login;
+mod logout;
 mod mcp;
 mod outputs;
 mod popular;
 mod preprocess;
+mod push;
 mod remove_bg;
 mod runtime;
 mod score;
@@ -39,7 +42,7 @@ mod uninstall;
 mod update;
 mod upgrade;
 mod upscale;
-mod vl_tag;
+mod whoami;
 pub(crate) mod worker;
 
 use anyhow::Result;
@@ -201,7 +204,7 @@ pub enum AuthProvider {
 #[derive(Parser)]
 #[command(
     name = "modl",
-    about = "Model manager for the AI image generation ecosystem",
+    about = "AI image generation toolkit",
     version,
     propagate_version = true
 )]
@@ -209,6 +212,8 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 }
+
+// ── Subcommand groups ────────────────────────────────────────────────────
 
 #[derive(Subcommand)]
 pub enum WorkerSubcommands {
@@ -224,33 +229,6 @@ pub enum WorkerSubcommands {
 
     /// Show worker status (loaded models, VRAM, uptime)
     Status,
-}
-
-#[derive(Subcommand)]
-pub enum LlmSubcommands {
-    /// Download an LLM model (GGUF) to the local store
-    Pull {
-        /// Model ID (e.g., qwen3.5-4b-instruct-q4, qwen3-vl-8b-instruct-q4)
-        model: String,
-    },
-
-    /// Run text completion or vision-language inference
-    Chat {
-        /// Text prompt
-        prompt: String,
-        /// Path to an image for vision-language inference
-        #[arg(long)]
-        image: Option<String>,
-        /// Force cloud backend
-        #[arg(long)]
-        cloud: bool,
-        /// Use a specific model
-        #[arg(long)]
-        model: Option<String>,
-    },
-
-    /// List installed LLM models
-    Ls,
 }
 
 #[derive(Subcommand)]
@@ -282,151 +260,214 @@ pub enum TrainSubcommands {
 }
 
 #[derive(Subcommand)]
-pub enum Commands {
-    /// Download a model, LoRA, VAE, or other asset
-    #[command(after_help = MODEL_PULL_EXAMPLES)]
-    Pull {
-        /// Registry ID (e.g. flux-dev) or HuggingFace repo (hf:owner/model)
-        id: String,
-        /// Force a specific variant (e.g., fp16, fp8, gguf-q4)
+pub enum ImageCommands {
+    /// Describe image content (captioning)
+    Describe {
+        /// Image file(s) or directory
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Detail level: brief, detailed, verbose
+        #[arg(long, default_value = "detailed")]
+        detail: String,
+        /// VL model: qwen3-vl-2b (fast, 4GB) or qwen3-vl-8b (quality, 16GB)
         #[arg(long)]
-        variant: Option<String>,
-        /// Show what would be installed without doing it
+        model: Option<String>,
+        /// Output result as JSON
         #[arg(long)]
-        dry_run: bool,
-        /// Force re-download even if files already exist
-        #[arg(long)]
-        force: bool,
+        json: bool,
     },
 
-    /// Remove an installed model
-    Rm {
-        /// Model ID to remove
-        id: String,
-        /// Force removal even if other items depend on this
+    /// Score image aesthetic quality (1-10 scale)
+    Score {
+        /// Image file(s) or directory to score
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Output result as JSON
         #[arg(long)]
-        force: bool,
+        json: bool,
     },
 
-    /// List installed models
-    Ls {
-        /// Filter by asset type (checkpoint, lora, vae, text_encoder, etc.)
-        #[arg(long, short = 't', value_enum)]
-        r#type: Option<AssetType>,
-        /// Show disk usage summary grouped by type
+    /// Detect faces in images
+    Detect {
+        /// Image file(s) or directory to analyze
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Detection type (currently: face)
+        #[arg(long, default_value = "face")]
+        r#type: String,
+        /// Include face embeddings for identity matching
         #[arg(long)]
-        summary: bool,
+        embeddings: bool,
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
     },
 
-    /// Show detailed info about a model
-    Info {
-        /// Model ID to inspect
-        id: String,
+    /// Find objects in images by text description
+    Ground {
+        /// Text query -- what to find (e.g. "coffee cup", "person")
+        query: String,
+        /// Image file(s) or directory to search
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Minimum confidence threshold
+        #[arg(long)]
+        threshold: Option<f64>,
+        /// VL model: qwen3-vl-2b (fast, 4GB) or qwen3-vl-8b (quality, 16GB)
+        #[arg(long)]
+        model: Option<String>,
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
     },
 
-    /// Search the registry
-    Search {
-        /// Search query (optional with --popular)
-        query: Option<String>,
-        /// Filter by asset type
-        #[arg(long, short = 't', value_enum)]
-        r#type: Option<AssetType>,
-        /// Filter by compatible base model
+    /// Compare images using CLIP similarity
+    Compare {
+        /// Image file(s) or directory to compare
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Reference image (compare all others against this)
         #[arg(long)]
-        r#for: Option<String>,
-        /// Filter by tag
+        reference: Option<String>,
+        /// Output result as JSON
         #[arg(long)]
-        tag: Option<String>,
-        /// Minimum rating
-        #[arg(long)]
-        min_rating: Option<f32>,
-        /// Show popular/trending models (ignores query)
-        #[arg(long)]
-        popular: bool,
-        /// Search CivitAI for LoRAs instead of the modl registry
-        #[arg(long)]
-        civitai: bool,
-        /// Base model filter for CivitAI search (e.g., "SDXL 1.0", "Flux.1 D")
-        #[arg(long)]
-        base_model: Option<String>,
-        /// Sort order for CivitAI search (Most Downloaded, Highest Rated, Newest)
-        #[arg(long)]
-        sort: Option<String>,
+        json: bool,
     },
 
-    /// Train a LoRA with managed runtime
-    #[command(args_conflicts_with_subcommands = true)]
-    #[command(after_long_help = TRAIN_HELP_EXTRA)]
-    #[command(after_help = TRAIN_EXAMPLES)]
-    Train {
+    /// Generate a segmentation mask for targeted inpainting
+    Segment {
+        /// Input image
+        image: String,
+        /// Output mask path (default: <image>_mask.png)
+        #[arg(long, short = 'o')]
+        output: Option<String>,
+        /// Segmentation method: bbox, background, sam
+        #[arg(long, default_value = "bbox")]
+        method: String,
+        /// Bounding box: x1,y1,x2,y2 (for bbox/sam methods)
+        #[arg(long)]
+        bbox: Option<String>,
+        /// Point prompt: x,y (for sam method)
+        #[arg(long)]
+        point: Option<String>,
+        /// Expand mask by N pixels (feathering)
+        #[arg(long, default_value = "10")]
+        expand: u32,
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Upscale images using Real-ESRGAN
+    Upscale {
+        /// Image file(s) or directory to upscale
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Scale factor (2 or 4)
+        #[arg(long, default_value = "4")]
+        scale: u32,
+        /// Upscaler model ID (default: realesrgan-x4plus)
+        #[arg(long, default_value = "realesrgan-x4plus")]
+        model: String,
+        /// Output directory (default: ~/.modl/outputs/<date>/)
+        #[arg(long, short = 'o')]
+        output: Option<String>,
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Remove image background (outputs transparent PNG)
+    #[command(name = "remove-bg")]
+    RemoveBg {
+        /// Image file(s) or directory
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Output directory (default: ~/.modl/outputs/<date>/)
+        #[arg(long, short = 'o')]
+        output: Option<String>,
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Extract control images from an image (canny, depth, pose, softedge, scribble)
+    Preprocess {
+        /// Preprocessing method
         #[command(subcommand)]
-        command: Option<TrainSubcommands>,
-        /// Dataset name or directory path
-        #[arg(long)]
-        dataset: Option<String>,
-        /// Base model id (e.g. flux-dev, sdxl-base-1.0)
-        #[arg(long)]
-        base: Option<String>,
-        /// Output LoRA name
-        #[arg(long)]
-        name: Option<String>,
-        /// Trigger word used during training
-        #[arg(long)]
-        trigger: Option<String>,
-        /// LoRA type: style, character, object
-        #[arg(long, value_enum, rename_all = "snake_case")]
-        lora_type: Option<LoraType>,
-        /// Training preset: quick, standard, advanced
-        #[arg(long, value_enum)]
-        preset: Option<Preset>,
-        /// Override training steps
-        #[arg(long)]
-        steps: Option<u32>,
-        /// LoRA rank (capacity). Higher = more expressive but larger file
-        #[arg(long)]
-        rank: Option<u32>,
-        /// Learning rate (e.g. 1e-4, 2e-4, 5e-5)
-        #[arg(long)]
-        lr: Option<f64>,
-        /// Batch size per step (higher = faster but more VRAM)
-        #[arg(long)]
-        batch_size: Option<u32>,
-        /// Image resolution for training
-        #[arg(long)]
-        resolution: Option<u32>,
-        /// Optimizer: adamw8bit, prodigy, adamw, adafactor, sgd
-        #[arg(long, value_enum)]
-        optimizer: Option<Optimizer>,
-        /// Random seed for reproducibility
-        #[arg(long)]
-        seed: Option<u64>,
-        /// Dataset repetitions per epoch
-        #[arg(long)]
-        repeats: Option<u32>,
-        /// Caption dropout rate (0.0-1.0, higher = learn style over content)
-        #[arg(long)]
-        caption_dropout: Option<f64>,
-        /// Class word for character/object (e.g. "man", "woman", "dog")
-        #[arg(long, alias = "class")]
-        class_word: Option<String>,
-        /// Resume from a checkpoint .safetensors file
-        #[arg(long)]
-        resume: Option<String>,
-        /// Load a full TrainJobSpec YAML (escape hatch)
-        #[arg(long)]
-        config: Option<String>,
-        /// Generate spec and print it without executing
-        #[arg(long)]
-        dry_run: bool,
-        /// Run training on a cloud provider instead of locally
-        #[arg(long)]
-        cloud: bool,
-        /// Cloud provider to use (modal, replicate, runpod)
-        #[arg(long, value_enum)]
-        provider: Option<CloudProvider>,
+        command: preprocess::PreprocessMethod,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SystemCommands {
+    /// View or update configuration (e.g., storage.root, gpu.vram_mb)
+    Config {
+        /// Config key to view or set (e.g., storage.root)
+        key: Option<String>,
+        /// New value (required when setting a key)
+        value: Option<String>,
     },
 
-    /// Generate images using diffusers
+    /// Check for broken symlinks, missing deps, corrupt files
+    Doctor {
+        /// Also verify SHA256 hashes (slow for large files)
+        #[arg(long)]
+        verify_hashes: bool,
+        /// Re-populate database from orphaned store files
+        #[arg(long)]
+        repair: bool,
+    },
+
+    /// Remove unreferenced files from the store
+    Gc,
+
+    /// Fetch latest registry index
+    Update,
+
+    /// Update modl CLI to the latest release
+    Upgrade,
+
+    /// Link a tool's model folder (ComfyUI, A1111)
+    Link {
+        /// Path to model directory (assumes ComfyUI layout)
+        path: Option<String>,
+        /// Path to ComfyUI installation
+        #[arg(long)]
+        comfyui: Option<String>,
+        /// Path to A1111 installation
+        #[arg(long)]
+        a1111: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GpuCommands {
+    /// Provision a remote GPU instance
+    Attach {
+        /// GPU spec (e.g. a100, a10g, h100)
+        spec: String,
+        /// Idle timeout before auto-shutdown (e.g. 30m, 1h)
+        #[arg(long, default_value = "30m")]
+        idle: String,
+    },
+
+    /// Shut down the attached GPU instance
+    Detach,
+
+    /// Show running GPU instances
+    Status,
+
+    /// Open a shell to the attached GPU instance
+    Ssh,
+}
+
+// ── Top-level commands ───────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+pub enum Commands {
+    // ── Primary Actions (flat) ───────────────────────────────────────
+    /// Generate images from text prompts
     #[command(after_help = GENERATE_EXAMPLES)]
     Generate {
         /// Text prompt for image generation
@@ -502,7 +543,7 @@ pub enum Commands {
         json: bool,
     },
 
-    /// Edit images using AI (instruction-based editing)
+    /// Edit images using AI instructions
     Edit {
         /// Edit instruction prompt
         prompt: String,
@@ -541,7 +582,79 @@ pub enum Commands {
         json: bool,
     },
 
-    /// Enhance a prompt using AI (adds quality tags, descriptors, structure)
+    /// Train LoRA models
+    #[command(args_conflicts_with_subcommands = true)]
+    #[command(after_long_help = TRAIN_HELP_EXTRA)]
+    #[command(after_help = TRAIN_EXAMPLES)]
+    Train {
+        #[command(subcommand)]
+        command: Option<TrainSubcommands>,
+        /// Dataset name or directory path
+        #[arg(long)]
+        dataset: Option<String>,
+        /// Base model id (e.g. flux-dev, sdxl-base-1.0)
+        #[arg(long)]
+        base: Option<String>,
+        /// Output LoRA name
+        #[arg(long)]
+        name: Option<String>,
+        /// Trigger word used during training
+        #[arg(long)]
+        trigger: Option<String>,
+        /// LoRA type: style, character, object
+        #[arg(long, value_enum, rename_all = "snake_case")]
+        lora_type: Option<LoraType>,
+        /// Training preset: quick, standard, advanced
+        #[arg(long, value_enum)]
+        preset: Option<Preset>,
+        /// Override training steps
+        #[arg(long)]
+        steps: Option<u32>,
+        /// LoRA rank (capacity). Higher = more expressive but larger file
+        #[arg(long)]
+        rank: Option<u32>,
+        /// Learning rate (e.g. 1e-4, 2e-4, 5e-5)
+        #[arg(long)]
+        lr: Option<f64>,
+        /// Batch size per step (higher = faster but more VRAM)
+        #[arg(long)]
+        batch_size: Option<u32>,
+        /// Image resolution for training
+        #[arg(long)]
+        resolution: Option<u32>,
+        /// Optimizer: adamw8bit, prodigy, adamw, adafactor, sgd
+        #[arg(long, value_enum)]
+        optimizer: Option<Optimizer>,
+        /// Random seed for reproducibility
+        #[arg(long)]
+        seed: Option<u64>,
+        /// Dataset repetitions per epoch
+        #[arg(long)]
+        repeats: Option<u32>,
+        /// Caption dropout rate (0.0-1.0, higher = learn style over content)
+        #[arg(long)]
+        caption_dropout: Option<f64>,
+        /// Class word for character/object (e.g. "man", "woman", "dog")
+        #[arg(long, alias = "class")]
+        class_word: Option<String>,
+        /// Resume from a checkpoint .safetensors file
+        #[arg(long)]
+        resume: Option<String>,
+        /// Load a full TrainJobSpec YAML (escape hatch)
+        #[arg(long)]
+        config: Option<String>,
+        /// Generate spec and print it without executing
+        #[arg(long)]
+        dry_run: bool,
+        /// Run training on a cloud provider instead of locally
+        #[arg(long)]
+        cloud: bool,
+        /// Cloud provider to use (modal, replicate, runpod)
+        #[arg(long, value_enum)]
+        provider: Option<CloudProvider>,
+    },
+
+    /// Enhance prompts with AI quality tags
     #[command(after_help = ENHANCE_EXAMPLES)]
     Enhance {
         /// Text prompt to enhance
@@ -557,264 +670,142 @@ pub enum Commands {
         json: bool,
     },
 
-    /// Score image aesthetic quality (1-10 scale)
-    Score {
-        /// Image file(s) or directory to score
-        #[arg(required = true)]
-        paths: Vec<String>,
-        /// Output result as JSON
+    // ── Model Management ─────────────────────────────────────────────
+    /// Download models, LoRAs, or assets
+    #[command(after_help = MODEL_PULL_EXAMPLES)]
+    Pull {
+        /// Registry ID (e.g. flux-dev) or HuggingFace repo (hf:owner/model)
+        id: String,
+        /// Force a specific variant (e.g., fp16, fp8, gguf-q4)
         #[arg(long)]
-        json: bool,
+        variant: Option<String>,
+        /// Show what would be installed without doing it
+        #[arg(long)]
+        dry_run: bool,
+        /// Force re-download even if files already exist
+        #[arg(long)]
+        force: bool,
     },
 
-    /// Detect faces in images
-    Detect {
-        /// Image file(s) or directory to analyze
-        #[arg(required = true)]
-        paths: Vec<String>,
-        /// Detection type (currently: face)
-        #[arg(long, default_value = "face")]
-        r#type: String,
-        /// Include face embeddings for identity matching
+    /// Push LoRAs or datasets to modl hub
+    Push {
+        /// Asset kind: lora or dataset
+        #[arg(value_parser = ["lora", "dataset"])]
+        kind: String,
+        /// Source file or directory
+        source: String,
+        /// Hub slug/name
         #[arg(long)]
-        embeddings: bool,
-        /// Output result as JSON
+        name: String,
+        /// Visibility: public or private
+        #[arg(long, default_value = "public", value_parser = ["public", "private"])]
+        visibility: String,
+        /// Optional description
         #[arg(long)]
-        json: bool,
+        description: Option<String>,
+        /// Base model (mainly for LoRAs)
+        #[arg(long)]
+        base: Option<String>,
+        /// Trigger word(s) (repeat flag for multiple)
+        #[arg(long = "trigger")]
+        trigger_words: Vec<String>,
+        /// Optional owner username override
+        #[arg(long)]
+        owner: Option<String>,
     },
 
-    /// Find objects in images by text description
-    Ground {
-        /// Text query -- what to find (e.g. "coffee cup", "person")
-        query: String,
-        /// Image file(s) or directory to search
-        #[arg(required = true)]
-        paths: Vec<String>,
-        /// Minimum confidence threshold
+    /// List installed models
+    Ls {
+        /// Filter by asset type (checkpoint, lora, vae, text_encoder, etc.)
+        #[arg(long, short = 't', value_enum)]
+        r#type: Option<AssetType>,
+        /// Show disk usage summary grouped by type
         #[arg(long)]
-        threshold: Option<f64>,
-        /// VL model: qwen3-vl-2b (fast, 4GB) or qwen3-vl-8b (quality, 16GB)
-        #[arg(long)]
-        model: Option<String>,
-        /// Output result as JSON
-        #[arg(long)]
-        json: bool,
+        summary: bool,
     },
 
-    /// Describe image content (captioning)
-    Describe {
-        /// Image file(s) or directory
-        #[arg(required = true)]
-        paths: Vec<String>,
-        /// Detail level: brief, detailed, verbose
-        #[arg(long, default_value = "detailed")]
-        detail: String,
-        /// VL model: qwen3-vl-2b (fast, 4GB) or qwen3-vl-8b (quality, 16GB)
+    /// Remove an installed model
+    Rm {
+        /// Model ID to remove
+        id: String,
+        /// Force removal even if other items depend on this
         #[arg(long)]
-        model: Option<String>,
-        /// Output result as JSON
-        #[arg(long)]
-        json: bool,
+        force: bool,
     },
 
-    /// Tag images with labels
-    #[command(name = "vl-tag")]
-    VlTag {
-        /// Image file(s) or directory
-        #[arg(required = true)]
-        paths: Vec<String>,
-        /// Maximum number of tags
+    /// Search the model registry
+    Search {
+        /// Search query (optional with --popular)
+        query: Option<String>,
+        /// Filter by asset type
+        #[arg(long, short = 't', value_enum)]
+        r#type: Option<AssetType>,
+        /// Filter by compatible base model
         #[arg(long)]
-        max_tags: Option<usize>,
-        /// VL model: qwen3-vl-2b (fast, 4GB) or qwen3-vl-8b (quality, 16GB)
+        r#for: Option<String>,
+        /// Filter by tag
         #[arg(long)]
-        model: Option<String>,
-        /// Output result as JSON
+        tag: Option<String>,
+        /// Minimum rating
         #[arg(long)]
-        json: bool,
+        min_rating: Option<f32>,
+        /// Show popular/trending models (ignores query)
+        #[arg(long)]
+        popular: bool,
+        /// Search CivitAI for LoRAs instead of the modl registry
+        #[arg(long)]
+        civitai: bool,
+        /// Base model filter for CivitAI search (e.g., "SDXL 1.0", "Flux.1 D")
+        #[arg(long)]
+        base_model: Option<String>,
+        /// Sort order for CivitAI search (Most Downloaded, Highest Rated, Newest)
+        #[arg(long)]
+        sort: Option<String>,
     },
 
-    /// Compare images using CLIP similarity
-    Compare {
-        /// Image file(s) or directory to compare
-        #[arg(required = true)]
-        paths: Vec<String>,
-        /// Reference image (compare all others against this)
-        #[arg(long)]
-        reference: Option<String>,
-        /// Output result as JSON
-        #[arg(long)]
-        json: bool,
+    /// Show model details
+    Info {
+        /// Model ID to inspect
+        id: String,
     },
 
-    /// Generate a segmentation mask for targeted inpainting
-    Segment {
-        /// Input image
-        image: String,
-        /// Output mask path (default: <image>_mask.png)
-        #[arg(long, short = 'o')]
-        output: Option<String>,
-        /// Segmentation method: bbox, background, sam
-        #[arg(long, default_value = "bbox")]
-        method: String,
-        /// Bounding box: x1,y1,x2,y2 (for bbox/sam methods)
-        #[arg(long)]
-        bbox: Option<String>,
-        /// Point prompt: x,y (for sam method)
-        #[arg(long)]
-        point: Option<String>,
-        /// Expand mask by N pixels (feathering)
-        #[arg(long, default_value = "10")]
-        expand: u32,
-        /// Output result as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Restore faces in images using CodeFormer
-    #[command(name = "face-restore")]
-    FaceRestore {
-        /// Image file(s) or directory
-        #[arg(required = true)]
-        paths: Vec<String>,
-        /// Output directory (default: ~/.modl/outputs/<date>/)
-        #[arg(long, short = 'o')]
-        output: Option<String>,
-        /// Fidelity: 0.0 (max quality) to 1.0 (max faithfulness to input)
-        #[arg(long, default_value = "0.7")]
-        fidelity: f32,
-        /// Output result as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Remove image background (outputs transparent PNG)
-    #[command(name = "remove-bg")]
-    RemoveBg {
-        /// Image file(s) or directory
-        #[arg(required = true)]
-        paths: Vec<String>,
-        /// Output directory (default: ~/.modl/outputs/<date>/)
-        #[arg(long, short = 'o')]
-        output: Option<String>,
-        /// Output result as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Upscale images using Real-ESRGAN
-    Upscale {
-        /// Image file(s) or directory to upscale
-        #[arg(required = true)]
-        paths: Vec<String>,
-        /// Scale factor (2 or 4)
-        #[arg(long, default_value = "4")]
-        scale: u32,
-        /// Upscaler model ID (default: realesrgan-x4plus)
-        #[arg(long, default_value = "realesrgan-x4plus")]
-        model: String,
-        /// Output directory (default: ~/.modl/outputs/<date>/)
-        #[arg(long, short = 'o')]
-        output: Option<String>,
-        /// Output result as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Extract control images from an image (canny, depth, pose, softedge, scribble)
-    Preprocess {
-        /// Preprocessing method
+    // ── Image Tools ──────────────────────────────────────────────────
+    /// Image analysis & processing tools
+    Image {
         #[command(subcommand)]
-        command: preprocess::PreprocessMethod,
+        command: ImageCommands,
     },
 
-    /// Manage datasets for training
-    #[command(after_help = DATASET_EXAMPLES)]
-    Dataset {
+    // ── Remote GPU ───────────────────────────────────────────────────
+    /// Manage remote GPU sessions
+    Gpu {
         #[command(subcommand)]
-        command: datasets::DatasetCommands,
+        command: GpuCommands,
     },
 
-    /// Link a tool's model folder (ComfyUI, A1111)
-    Link {
-        /// Path to model directory (assumes ComfyUI layout)
-        path: Option<String>,
-        /// Path to ComfyUI installation
-        #[arg(long)]
-        comfyui: Option<String>,
-        /// Path to A1111 installation
-        #[arg(long)]
-        a1111: Option<String>,
-    },
+    // ── Hub Identity ─────────────────────────────────────────────────
+    /// Login to modl hub
+    Login,
 
-    /// Fetch latest registry index
-    Update,
+    /// Logout from modl hub
+    Logout,
 
-    /// Check for broken symlinks, missing deps, corrupt files
-    Doctor {
-        /// Also verify SHA256 hashes (slow for large files)
-        #[arg(long)]
-        verify_hashes: bool,
-        /// Re-populate database from orphaned store files
-        #[arg(long)]
-        repair: bool,
-    },
+    /// Show hub account info
+    Whoami,
 
-    /// View or update configuration (e.g., storage.root, gpu.vram_mb)
-    Config {
-        /// Config key to view or set (e.g., storage.root)
-        key: Option<String>,
-        /// New value (required when setting a key)
-        value: Option<String>,
-    },
-
-    /// Configure authentication (HuggingFace, Civitai)
+    /// Configure source auth (HuggingFace, CivitAI)
     Auth {
         /// Auth provider: huggingface or civitai
         #[arg(value_enum)]
         provider: AuthProvider,
     },
 
-    /// Remove unreferenced files from the store
-    Gc,
-
-    /// Update modl CLI to the latest release
-    Upgrade,
-
-    // ── Hidden commands ──────────────────────────────────────
-    /// Interactive first-run setup
-    #[command(hide = true)]
-    Init {
-        /// Skip all prompts (use ~/modl, auto-detect GPU, no tool targets)
-        #[arg(long)]
-        defaults: bool,
-        /// Override storage root (default: ~/modl)
-        #[arg(long)]
-        root: Option<String>,
-    },
-
-    /// Export data (outputs, trained LoRAs, DB) to a backup archive
-    Export {
-        /// Output archive path (.tar.zst)
-        output: String,
-        /// Exclude generation outputs (DB + LoRAs only)
-        #[arg(long)]
-        no_outputs: bool,
-        /// Only include outputs after this date (YYYY-MM-DD)
-        #[arg(long)]
-        since: Option<String>,
-    },
-
-    /// Import data from a backup archive
-    Import {
-        /// Path to .tar.zst backup archive
-        path: String,
-        /// Preview what would be restored without making changes
-        #[arg(long)]
-        dry_run: bool,
-        /// Overwrite existing files (default: skip)
-        #[arg(long)]
-        overwrite: bool,
+    // ── Data Management ──────────────────────────────────────────────
+    /// Manage training datasets
+    #[command(after_help = DATASET_EXAMPLES)]
+    Dataset {
+        #[command(subcommand)]
+        command: datasets::DatasetCommands,
     },
 
     /// Browse and manage generated outputs
@@ -823,6 +814,7 @@ pub enum Commands {
         command: outputs::OutputCommands,
     },
 
+    // ── Services ─────────────────────────────────────────────────────
     /// Launch the web UI
     Serve {
         /// Port to bind the preview server on
@@ -848,10 +840,57 @@ pub enum Commands {
         command: WorkerSubcommands,
     },
 
-    /// Manage LLM models and run inference
-    Llm {
+    /// Start MCP server for AI agents
+    ///
+    /// Exposes modl tools (generate, list_models, pull_model, describe, score,
+    /// upscale, remove_bg, enhance) over the MCP stdio transport.
+    ///
+    ///   { "mcpServers": { "modl": { "command": "modl", "args": ["mcp"] } } }
+    Mcp,
+
+    // ── System ───────────────────────────────────────────────────────
+    /// System maintenance (config, doctor, gc, update, upgrade)
+    System {
         #[command(subcommand)]
-        command: LlmSubcommands,
+        command: SystemCommands,
+    },
+
+    // ── Hidden ───────────────────────────────────────────────────────
+    /// Interactive first-run setup
+    #[command(hide = true)]
+    Init {
+        /// Skip all prompts (use ~/modl, auto-detect GPU, no tool targets)
+        #[arg(long)]
+        defaults: bool,
+        /// Override storage root (default: ~/modl)
+        #[arg(long)]
+        root: Option<String>,
+    },
+
+    /// Export data (outputs, trained LoRAs, DB) to a backup archive
+    #[command(hide = true)]
+    Export {
+        /// Output archive path (.tar.zst)
+        output: String,
+        /// Exclude generation outputs (DB + LoRAs only)
+        #[arg(long)]
+        no_outputs: bool,
+        /// Only include outputs after this date (YYYY-MM-DD)
+        #[arg(long)]
+        since: Option<String>,
+    },
+
+    /// Import data from a backup archive
+    #[command(hide = true)]
+    Import {
+        /// Path to .tar.zst backup archive
+        path: String,
+        /// Preview what would be restored without making changes
+        #[arg(long)]
+        dry_run: bool,
+        /// Overwrite existing files (default: skip)
+        #[arg(long)]
+        overwrite: bool,
     },
 
     /// Manage embedded Python runtime
@@ -861,14 +900,6 @@ pub enum Commands {
         command: runtime::RuntimeCommands,
     },
 
-    /// Start MCP (Model Context Protocol) server for AI assistant integration
-    ///
-    /// Exposes modl tools (generate, list_models, pull_model, describe) over
-    /// the MCP stdio transport. Configure in Claude Desktop, Cursor, etc:
-    ///
-    ///   { "mcpServers": { "modl": { "command": "modl", "args": ["mcp"] } } }
-    Mcp,
-
     /// Dump CLI schema as JSON
     #[command(hide = true)]
     CliSchema,
@@ -876,160 +907,7 @@ pub enum Commands {
 
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Commands::Pull {
-            id,
-            variant,
-            dry_run,
-            force,
-        } => {
-            if let Some(version_id) = id.strip_prefix("civitai:") {
-                if dry_run {
-                    anyhow::bail!("--dry-run is not supported for CivitAI installs");
-                }
-                civitai::install(version_id, force).await
-            } else {
-                install::run(&id, variant.as_deref(), dry_run, force).await
-            }
-        }
-        Commands::Rm { id, force } => uninstall::run(&id, force).await,
-        Commands::Ls { r#type, summary } => {
-            if summary {
-                space::run().await
-            } else {
-                list::run(r#type).await
-            }
-        }
-        Commands::Info { id } => info::run(&id).await,
-        Commands::Search {
-            query,
-            r#type,
-            r#for,
-            tag,
-            min_rating,
-            popular,
-            civitai: civitai_flag,
-            base_model,
-            sort,
-        } => {
-            if civitai_flag {
-                let q = query.as_deref().unwrap_or("");
-                if q.is_empty() {
-                    anyhow::bail!("Search query required for --civitai");
-                }
-                civitai::search(q, base_model.as_deref(), sort.as_deref()).await
-            } else if popular {
-                popular::run(r#type, r#for.as_deref()).await
-            } else {
-                let q = query.as_deref().unwrap_or("");
-                if q.is_empty() {
-                    anyhow::bail!("Search query required (or use --popular)");
-                }
-                search::run(q, r#type, r#for.as_deref(), tag.as_deref(), min_rating).await
-            }
-        }
-        Commands::Link {
-            path,
-            comfyui,
-            a1111,
-        } => {
-            let comfy = comfyui.or(path);
-            link::run(comfy.as_deref(), a1111.as_deref()).await
-        }
-        Commands::Update => update::run().await,
-        Commands::Gc => gc::run().await,
-        Commands::Export {
-            output,
-            no_outputs,
-            since,
-        } => export_import::run_export(&output, no_outputs, since.as_deref()),
-        Commands::Import {
-            path,
-            dry_run,
-            overwrite,
-        } => export_import::run_import(&path, dry_run, overwrite),
-        Commands::Init { defaults, root } => init::run(defaults, root.as_deref()).await,
-        Commands::Train {
-            command,
-            dataset,
-            base,
-            name,
-            trigger,
-            lora_type,
-            preset,
-            steps,
-            rank,
-            lr,
-            batch_size,
-            resolution,
-            optimizer,
-            seed,
-            repeats,
-            caption_dropout,
-            class_word,
-            resume,
-            config,
-            dry_run,
-            cloud,
-            provider,
-        } => match command {
-            Some(TrainSubcommands::Setup { reinstall }) => train_setup::run(reinstall).await,
-            Some(TrainSubcommands::Status { name, watch }) => {
-                train_status::run(name.as_deref(), watch)?;
-                Ok(())
-            }
-            Some(TrainSubcommands::Rm { name }) => {
-                use console::style;
-                crate::core::training::delete_training_run(&name)?;
-                println!("{} Deleted training run '{}'", style("✓").green(), name);
-                Ok(())
-            }
-            Some(TrainSubcommands::Ls) => {
-                let runs = crate::core::training::list_training_runs()?;
-                if runs.is_empty() {
-                    println!("No training runs found.");
-                } else {
-                    for name in &runs {
-                        println!("  {name}");
-                    }
-                    println!("\n{} training run(s)", runs.len());
-                }
-                Ok(())
-            }
-            None if base.is_none() || lora_type.is_none() => {
-                print_train_info();
-                Ok(())
-            }
-            None => {
-                let base_val = base.as_deref().unwrap();
-                let lora_type_val = lora_type.unwrap();
-                train::run(
-                    dataset.as_deref(),
-                    base_val,
-                    name.as_deref(),
-                    trigger.as_deref(),
-                    lora_type_val,
-                    preset,
-                    train::TrainOverrides {
-                        steps,
-                        rank,
-                        lr,
-                        batch_size,
-                        resolution,
-                        optimizer,
-                        seed,
-                        repeats,
-                        caption_dropout,
-                        class_word,
-                        resume,
-                    },
-                    config.as_deref(),
-                    dry_run,
-                    cloud,
-                    provider,
-                )
-                .await
-            }
-        },
+        // ── Primary Actions ──────────────────────────────────────────
         Commands::Generate {
             prompt,
             base,
@@ -1114,106 +992,262 @@ pub async fn run(cli: Cli) -> Result<()> {
             })
             .await
         }
+        Commands::Train {
+            command,
+            dataset,
+            base,
+            name,
+            trigger,
+            lora_type,
+            preset,
+            steps,
+            rank,
+            lr,
+            batch_size,
+            resolution,
+            optimizer,
+            seed,
+            repeats,
+            caption_dropout,
+            class_word,
+            resume,
+            config,
+            dry_run,
+            cloud,
+            provider,
+        } => match command {
+            Some(TrainSubcommands::Setup { reinstall }) => train_setup::run(reinstall).await,
+            Some(TrainSubcommands::Status { name, watch }) => {
+                train_status::run(name.as_deref(), watch)?;
+                Ok(())
+            }
+            Some(TrainSubcommands::Rm { name }) => {
+                use console::style;
+                crate::core::training::delete_training_run(&name)?;
+                println!("{} Deleted training run '{}'", style("✓").green(), name);
+                Ok(())
+            }
+            Some(TrainSubcommands::Ls) => {
+                let runs = crate::core::training::list_training_runs()?;
+                if runs.is_empty() {
+                    println!("No training runs found.");
+                } else {
+                    for name in &runs {
+                        println!("  {name}");
+                    }
+                    println!("\n{} training run(s)", runs.len());
+                }
+                Ok(())
+            }
+            None if base.is_none() || lora_type.is_none() => {
+                print_train_info();
+                Ok(())
+            }
+            None => {
+                let base_val = base.as_deref().unwrap();
+                let lora_type_val = lora_type.unwrap();
+                train::run(
+                    dataset.as_deref(),
+                    base_val,
+                    name.as_deref(),
+                    trigger.as_deref(),
+                    lora_type_val,
+                    preset,
+                    train::TrainOverrides {
+                        steps,
+                        rank,
+                        lr,
+                        batch_size,
+                        resolution,
+                        optimizer,
+                        seed,
+                        repeats,
+                        caption_dropout,
+                        class_word,
+                        resume,
+                    },
+                    config.as_deref(),
+                    dry_run,
+                    cloud,
+                    provider,
+                )
+                .await
+            }
+        },
         Commands::Enhance {
             prompt,
             model,
             intensity,
             json,
         } => enhance::run(&prompt, model.as_deref(), &intensity, json).await,
-        Commands::Score { paths, json } => score::run(&paths, json).await,
-        Commands::Detect {
-            paths,
-            r#type,
-            embeddings,
-            json,
-        } => detect::run(&paths, &r#type, embeddings, json).await,
-        Commands::Ground {
-            query,
-            paths,
-            threshold,
-            model,
-            json,
-        } => ground::run(&query, &paths, threshold, model.as_deref(), json).await,
-        Commands::Describe {
-            paths,
-            detail,
-            model,
-            json,
-        } => describe::run(&paths, &detail, model.as_deref(), json).await,
-        Commands::VlTag {
-            paths,
-            max_tags,
-            model,
-            json,
-        } => vl_tag::run(&paths, max_tags, model.as_deref(), json).await,
-        Commands::Compare {
-            paths,
-            reference,
-            json,
-        } => compare::run(&paths, reference.as_deref(), json).await,
-        Commands::Segment {
-            image,
-            output,
-            method,
-            bbox,
-            point,
-            expand,
-            json,
+
+        // ── Model Management ─────────────────────────────────────────
+        Commands::Pull {
+            id,
+            variant,
+            dry_run,
+            force,
         } => {
-            segment::run(
-                &image,
-                output.as_deref(),
-                &method,
-                bbox.as_deref(),
-                point.as_deref(),
-                expand,
-                json,
+            if crate::core::hub::parse_hub_ref(&id).is_some() {
+                if dry_run {
+                    anyhow::bail!("--dry-run is not supported for hub pulls");
+                }
+                if variant.is_some() {
+                    anyhow::bail!("--variant is not supported for hub pulls");
+                }
+                if force {
+                    anyhow::bail!("--force is not supported for hub pulls");
+                }
+                hub_pull::run(&id).await
+            } else if let Some(version_id) = id.strip_prefix("civitai:") {
+                if dry_run {
+                    anyhow::bail!("--dry-run is not supported for CivitAI installs");
+                }
+                civitai::install(version_id, force).await
+            } else {
+                install::run(&id, variant.as_deref(), dry_run, force).await
+            }
+        }
+        Commands::Push {
+            kind,
+            source,
+            name,
+            visibility,
+            description,
+            base,
+            trigger_words,
+            owner,
+        } => {
+            push::run(
+                &kind,
+                &source,
+                &name,
+                &visibility,
+                description.as_deref(),
+                base.as_deref(),
+                &trigger_words,
+                owner.as_deref(),
             )
             .await
         }
-        Commands::FaceRestore {
-            paths,
-            output,
-            fidelity,
-            json,
-        } => face_restore::run(&paths, output.as_deref(), fidelity, json).await,
-        Commands::RemoveBg {
-            paths,
-            output,
-            json,
-        } => remove_bg::run(&paths, output.as_deref(), json).await,
-        Commands::Upscale {
-            paths,
-            scale,
-            model,
-            output,
-            json,
-        } => upscale::run(&paths, output.as_deref(), scale, &model, json).await,
-        Commands::Preprocess { command } => preprocess::run(command).await,
-        Commands::Dataset { command } => datasets::run(command).await,
-        Commands::Runtime { command } => runtime::run(command).await,
-        Commands::Doctor {
-            verify_hashes,
-            repair,
-        } => doctor::run(verify_hashes, repair).await,
-        Commands::Config { key, value } => config::run(key.as_deref(), value.as_deref()).await,
-        Commands::Auth { provider } => auth::run(provider).await,
-        Commands::Outputs { command } => outputs::run(command).await,
-        Commands::Worker { command } => match command {
-            WorkerSubcommands::Start { timeout } => worker::start(timeout).await,
-            WorkerSubcommands::Stop => worker::stop().await,
-            WorkerSubcommands::Status => worker::status().await,
-        },
-        Commands::Llm { command } => match command {
-            LlmSubcommands::Pull { model } => llm::pull(&model).await,
-            LlmSubcommands::Chat {
-                prompt,
-                image,
-                cloud,
+        Commands::Ls { r#type, summary } => {
+            if summary {
+                space::run().await
+            } else {
+                list::run(r#type).await
+            }
+        }
+        Commands::Rm { id, force } => uninstall::run(&id, force).await,
+        Commands::Search {
+            query,
+            r#type,
+            r#for,
+            tag,
+            min_rating,
+            popular,
+            civitai: civitai_flag,
+            base_model,
+            sort,
+        } => {
+            if civitai_flag {
+                let q = query.as_deref().unwrap_or("");
+                if q.is_empty() {
+                    anyhow::bail!("Search query required for --civitai");
+                }
+                civitai::search(q, base_model.as_deref(), sort.as_deref()).await
+            } else if popular {
+                popular::run(r#type, r#for.as_deref()).await
+            } else {
+                let q = query.as_deref().unwrap_or("");
+                if q.is_empty() {
+                    anyhow::bail!("Search query required (or use --popular)");
+                }
+                search::run(q, r#type, r#for.as_deref(), tag.as_deref(), min_rating).await
+            }
+        }
+        Commands::Info { id } => info::run(&id).await,
+
+        // ── Image Tools ──────────────────────────────────────────────
+        Commands::Image { command } => match command {
+            ImageCommands::Describe {
+                paths,
+                detail,
                 model,
-            } => llm::chat(&prompt, image.as_deref(), cloud, model.as_deref()).await,
-            LlmSubcommands::Ls => llm::list().await,
+                json,
+            } => describe::run(&paths, &detail, model.as_deref(), json).await,
+            ImageCommands::Score { paths, json } => score::run(&paths, json).await,
+            ImageCommands::Detect {
+                paths,
+                r#type,
+                embeddings,
+                json,
+            } => detect::run(&paths, &r#type, embeddings, json).await,
+            ImageCommands::Ground {
+                query,
+                paths,
+                threshold,
+                model,
+                json,
+            } => ground::run(&query, &paths, threshold, model.as_deref(), json).await,
+            ImageCommands::Compare {
+                paths,
+                reference,
+                json,
+            } => compare::run(&paths, reference.as_deref(), json).await,
+            ImageCommands::Segment {
+                image,
+                output,
+                method,
+                bbox,
+                point,
+                expand,
+                json,
+            } => {
+                segment::run(
+                    &image,
+                    output.as_deref(),
+                    &method,
+                    bbox.as_deref(),
+                    point.as_deref(),
+                    expand,
+                    json,
+                )
+                .await
+            }
+            ImageCommands::Upscale {
+                paths,
+                scale,
+                model,
+                output,
+                json,
+            } => upscale::run(&paths, output.as_deref(), scale, &model, json).await,
+            ImageCommands::RemoveBg {
+                paths,
+                output,
+                json,
+            } => remove_bg::run(&paths, output.as_deref(), json).await,
+            ImageCommands::Preprocess { command } => preprocess::run(command).await,
         },
+
+        // ── Remote GPU ───────────────────────────────────────────────
+        Commands::Gpu { command } => match command {
+            GpuCommands::Attach { spec, idle } => gpu::attach(&spec, &idle).await,
+            GpuCommands::Detach => gpu::detach().await,
+            GpuCommands::Status => gpu::status().await,
+            GpuCommands::Ssh => gpu::ssh().await,
+        },
+
+        // ── Hub Identity ─────────────────────────────────────────────
+        Commands::Login => login::run().await,
+        Commands::Logout => logout::run().await,
+        Commands::Whoami => whoami::run().await,
+        Commands::Auth { provider } => auth::run(provider).await,
+
+        // ── Data Management ──────────────────────────────────────────
+        Commands::Dataset { command } => datasets::run(command).await,
+        Commands::Outputs { command } => outputs::run(command).await,
+
+        // ── Services ─────────────────────────────────────────────────
         Commands::Serve {
             port,
             no_open,
@@ -1229,8 +1263,48 @@ pub async fn run(cli: Cli) -> Result<()> {
                 serve::run(port, no_open, foreground).await
             }
         }
-        Commands::Upgrade => upgrade::run().await,
+        Commands::Worker { command } => match command {
+            WorkerSubcommands::Start { timeout } => worker::start(timeout).await,
+            WorkerSubcommands::Stop => worker::stop().await,
+            WorkerSubcommands::Status => worker::status().await,
+        },
         Commands::Mcp => mcp::run().await,
+
+        // ── System ───────────────────────────────────────────────────
+        Commands::System { command } => match command {
+            SystemCommands::Config { key, value } => {
+                config::run(key.as_deref(), value.as_deref()).await
+            }
+            SystemCommands::Doctor {
+                verify_hashes,
+                repair,
+            } => doctor::run(verify_hashes, repair).await,
+            SystemCommands::Gc => gc::run().await,
+            SystemCommands::Update => update::run().await,
+            SystemCommands::Upgrade => upgrade::run().await,
+            SystemCommands::Link {
+                path,
+                comfyui,
+                a1111,
+            } => {
+                let comfy = comfyui.or(path);
+                link::run(comfy.as_deref(), a1111.as_deref()).await
+            }
+        },
+
+        // ── Hidden ───────────────────────────────────────────────────
+        Commands::Init { defaults, root } => init::run(defaults, root.as_deref()).await,
+        Commands::Export {
+            output,
+            no_outputs,
+            since,
+        } => export_import::run_export(&output, no_outputs, since.as_deref()),
+        Commands::Import {
+            path,
+            dry_run,
+            overwrite,
+        } => export_import::run_import(&path, dry_run, overwrite),
+        Commands::Runtime { command } => runtime::run(command).await,
         Commands::CliSchema => {
             dump_cli_schema();
             Ok(())

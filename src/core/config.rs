@@ -290,6 +290,15 @@ pub struct Config {
 /// Cloud provider credentials and default settings
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CloudConfig {
+    /// Hub/cloud API base URL (default: https://hub.modl.run)
+    #[serde(default)]
+    pub api_base: Option<String>,
+    /// Hub/cloud API key (Bearer modl_...)
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Last known username for hub operations
+    #[serde(default)]
+    pub username: Option<String>,
     /// Default provider when --provider is omitted (modal, replicate, runpod)
     #[serde(default)]
     pub default_provider: Option<String>,

@@ -171,6 +171,7 @@ fn default_describe_detail() -> String {
     "detailed".to_string()
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VlTagJobSpec {
     pub image_paths: Vec<String>,
@@ -180,6 +181,7 @@ pub struct VlTagJobSpec {
     pub max_tags: Option<usize>,
 }
 
+#[allow(dead_code)]
 fn default_vl_tag_model() -> String {
     "qwen25-vl-3b".to_string()
 }
@@ -229,6 +231,7 @@ fn default_expand_px() -> u32 {
     10
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FaceRestoreJobSpec {
     pub image_paths: Vec<String>,
@@ -241,10 +244,12 @@ pub struct FaceRestoreJobSpec {
     pub fidelity: f32,
 }
 
+#[allow(dead_code)]
 fn default_face_restore_model() -> String {
     "codeformer".to_string()
 }
 
+#[allow(dead_code)]
 fn default_fidelity() -> f32 {
     0.7
 }

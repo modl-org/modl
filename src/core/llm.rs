@@ -105,6 +105,7 @@ pub trait LlmBackend: Send + Sync {
     fn vision(&self, images: &[PathBuf], prompt: &str) -> Result<String>;
 
     /// Backend name for logging/UI ("local-gpu", "local-cpu", "cloud", "builtin").
+    #[allow(dead_code)]
     fn name(&self) -> &str;
 }
 
@@ -534,6 +535,7 @@ pub fn resolve_backend(prefer_cloud: bool) -> Result<Box<dyn LlmBackend>> {
 }
 
 /// Resolve a specific model by ID, with device preference.
+#[allow(dead_code)]
 pub fn resolve_model(model_id: &str, prefer_gpu: bool) -> Result<Box<dyn LlmBackend>> {
     if let Ok(local) = LocalLlmBackend::load(model_id, prefer_gpu) {
         return Ok(Box::new(local));

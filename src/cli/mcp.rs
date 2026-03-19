@@ -355,7 +355,7 @@ fn tool_describe(args: &Value) -> Result<Value, (i32, String)> {
         .ok_or((-32602, "Missing required parameter: path".to_string()))?;
 
     let (stdout, stderr, success) =
-        run_modl(&["describe", "--json", path]).map_err(|e| (-32603, e))?;
+        run_modl(&["image", "describe", "--json", path]).map_err(|e| (-32603, e))?;
 
     if !success {
         return Err((-32603, format!("Describe failed: {}", stderr.trim())));
