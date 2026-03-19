@@ -162,6 +162,15 @@ const GENERATE_EXAMPLES: &str = "\
 
   # Landscape format with more steps
   modl generate \"sunset over mountains\" --size 16:9 --steps 30 --guidance 4.0
+
+  # img2img: re-style an existing image (lower strength = closer to original)
+  modl generate \"watercolor painting\" --init-image photo.png --strength 0.6
+
+  # Inpainting: regenerate masked region (white = edit, black = keep)
+  modl generate \"a garden with roses\" --init-image photo.png --mask mask.png
+
+  # Inpainting auto-routes to Flux Fill if installed (best quality)
+  modl generate \"wooden table\" --base flux-dev --init-image room.png --mask table_mask.png
 ";
 
 const DATASET_EXAMPLES: &str = "\
@@ -505,13 +514,13 @@ pub enum Commands {
         /// Cloud provider to use (modal, replicate, runpod)
         #[arg(long, value_enum)]
         provider: Option<CloudProvider>,
-        /// Source image for img2img / inpainting
+        /// Source image for img2img or inpainting (use with --mask for inpainting)
         #[arg(long)]
         init_image: Option<String>,
-        /// Mask image (white = regenerate region) for inpainting
+        /// Mask image for inpainting: white pixels = regenerate, black = preserve. Requires --init-image
         #[arg(long)]
         mask: Option<String>,
-        /// Denoising strength for img2img (0.0-1.0, default: 0.75)
+        /// Denoising strength for img2img (0.0 = identical to input, 1.0 = fully new). Default: 0.75
         #[arg(long)]
         strength: Option<f32>,
         /// Control image for ControlNet conditioning (can be repeated up to 2x)
