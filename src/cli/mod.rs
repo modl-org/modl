@@ -173,6 +173,21 @@ const GENERATE_EXAMPLES: &str = "\
   modl generate \"wooden table\" --base flux-dev --init-image room.png --mask table_mask.png
 ";
 
+const EDIT_EXAMPLES: &str = "\
+\x1b[1mExamples:\x1b[0m
+  # Edit with default model (qwen-image-edit)
+  modl edit \"make the sky sunset orange\" --image photo.png
+
+  # Use a faster/smaller model
+  modl edit \"replace the chair with a sofa\" --image room.png --base klein-4b
+
+  # Generate multiple edit variants
+  modl edit \"add sunglasses\" --image portrait.png --count 3
+
+  # Output as JSON for scripting
+  modl edit \"remove the text\" --image screenshot.png --json
+";
+
 const DATASET_EXAMPLES: &str = "\
 \x1b[1mExamples:\x1b[0m
   # Full pipeline: create → resize → caption in one command
@@ -273,7 +288,7 @@ pub enum TrainSubcommands {
 
 #[derive(Subcommand)]
 pub enum ImageCommands {
-    /// Describe image content (captioning)
+    /// Describe image content using vision-language AI (detailed captioning)
     Describe {
         /// Image file(s) or directory
         #[arg(required = true)]
@@ -289,7 +304,7 @@ pub enum ImageCommands {
         json: bool,
     },
 
-    /// Score image aesthetic quality (1-10 scale)
+    /// Score image aesthetic quality on a 1-10 scale using AI
     Score {
         /// Image file(s) or directory to score
         #[arg(required = true)]
@@ -346,7 +361,7 @@ pub enum ImageCommands {
         json: bool,
     },
 
-    /// Generate a segmentation mask for targeted inpainting
+    /// Generate a segmentation mask for use with generate --mask (inpainting)
     Segment {
         /// Input image
         image: String,
@@ -370,7 +385,7 @@ pub enum ImageCommands {
         json: bool,
     },
 
-    /// Upscale images using Real-ESRGAN
+    /// Upscale images 2x or 4x using Real-ESRGAN super-resolution
     Upscale {
         /// Image file(s) or directory to upscale
         #[arg(required = true)]
@@ -389,7 +404,7 @@ pub enum ImageCommands {
         json: bool,
     },
 
-    /// Remove image background (outputs transparent PNG)
+    /// Remove image background, output transparent PNG
     #[command(name = "remove-bg")]
     RemoveBg {
         /// Image file(s) or directory
@@ -479,7 +494,15 @@ pub enum GpuCommands {
 #[derive(Subcommand)]
 pub enum Commands {
     // ── Primary Actions (flat) ───────────────────────────────────────
-    /// Generate images from text prompts
+    /// Generate images from text prompts (txt2img, img2img, inpainting)
+    ///
+    /// Supports multiple modes:
+    ///   txt2img:    modl generate "prompt"
+    ///   img2img:    modl generate "prompt" --init-image photo.png --strength 0.6
+    ///   inpainting: modl generate "prompt" --init-image photo.png --mask mask.png
+    ///
+    /// Models: flux-schnell (default, fast), flux-dev (quality), z-image, sdxl, qwen-image, chroma.
+    /// Use --lora to apply a trained LoRA. Use --controlnet for structural guidance.
     #[command(after_help = GENERATE_EXAMPLES)]
     Generate {
         /// Text prompt for image generation
@@ -555,9 +578,20 @@ pub enum Commands {
         json: bool,
     },
 
-    /// Edit images using AI instructions
+    /// Edit images using natural language instructions (no mask needed)
+    ///
+    /// Unlike generate --mask (pixel-level inpainting), edit uses instruction-following
+    /// models that understand "change X to Y" without needing a mask.
+    ///
+    /// Models: qwen-image-edit (default, 20B), klein-4b (fast), klein-9b (quality), flux-2-dev.
+    ///
+    /// Examples:
+    ///   modl edit "make the sky sunset orange" --image photo.png
+    ///   modl edit "replace the chair with a sofa" --image room.png --base klein-4b
+    ///   modl edit "add sunglasses" --image portrait.png --count 3
+    #[command(after_help = EDIT_EXAMPLES)]
     Edit {
-        /// Edit instruction prompt
+        /// Natural language edit instruction (e.g. "make the sky sunset orange")
         prompt: String,
         /// Source image(s) — local path or URL (can be repeated)
         #[arg(long, required = true)]
@@ -666,7 +700,7 @@ pub enum Commands {
         provider: Option<CloudProvider>,
     },
 
-    /// Enhance prompts with AI quality tags
+    /// Enhance prompts with AI quality tags and descriptors for better generation results
     #[command(after_help = ENHANCE_EXAMPLES)]
     Enhance {
         /// Text prompt to enhance
@@ -683,7 +717,7 @@ pub enum Commands {
     },
 
     // ── Model Management ─────────────────────────────────────────────
-    /// Download models, LoRAs, or assets
+    /// Download models from registry, HuggingFace (hf:), CivitAI (civitai:), or hub (user/slug)
     #[command(after_help = MODEL_PULL_EXAMPLES)]
     Pull {
         /// Registry ID (e.g. flux-dev) or HuggingFace repo (hf:owner/model)
@@ -785,7 +819,7 @@ pub enum Commands {
     },
 
     // ── Image Tools ──────────────────────────────────────────────────
-    /// Image analysis & processing tools
+    /// Image analysis & processing tools (describe, score, detect, upscale, remove-bg, etc.)
     Image {
         #[command(subcommand)]
         command: ImageCommands,
