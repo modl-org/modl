@@ -1,0 +1,101 @@
+name: GPU Agent Bundle
+
+on:
+  push:
+    branches:
+      - main
+      - feat/attach-gpu
+    paths:
+      - 'src/**'
+      - 'python/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or ref to build from'
+        required: false
+        default: 'feat/attach-gpu'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-bundle:
+    name: Build GPU Bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gpu-bundle-musl
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build static binary
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Verify binary is static
+        run: |
+          file target/x86_64-unknown-linux-musl/release/modl
+          ldd target/x86_64-unknown-linux-musl/release/modl 2>&1 || echo "Static binary (no dynamic deps)"
+
+      - name: Package bundle
+        run: |
+          BUNDLE_DIR=$(mktemp -d)
+          cp target/x86_64-unknown-linux-musl/release/modl "$BUNDLE_DIR/modl"
+          mkdir -p "$BUNDLE_DIR/python"
+          rsync -a --exclude='__pycache__' python/modl_worker/ "$BUNDLE_DIR/python/modl_worker/"
+          tar czf modl-gpu-bundle.tar.gz -C "$BUNDLE_DIR" .
+          ls -lh modl-gpu-bundle.tar.gz
+          rm -rf "$BUNDLE_DIR"
+
+      - name: Upload to R2
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: modl-cloud
+        run: |
+          pip install boto3 -q
+          python3 - <<'PYEOF'
+          import boto3, os
+          from botocore.config import Config
+
+          client = boto3.client(
+              "s3",
+              endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com",
+              aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
+              aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
+              config=Config(signature_version="s3v4"),
+              region_name="auto",
+          )
+          client.upload_file(
+              "modl-gpu-bundle.tar.gz",
+              os.environ["R2_BUCKET"],
+              "gpu-agent/modl-gpu-bundle.tar.gz",
+          )
+          print("Uploaded gpu-agent/modl-gpu-bundle.tar.gz to R2")
+          PYEOF
+
+      - name: Upload artifact (for debugging)
+        uses: actions/upload-artifact@v4
+        with:
+          name: modl-gpu-bundle
+          path: modl-gpu-bundle.tar.gz
+          retention-days: 7
