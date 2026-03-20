@@ -376,7 +376,7 @@ fn fixup_spec_for_remote(spec: &serde_json::Value) -> serde_json::Value {
     // Fix output dir to use the remote instance's temp dir
     if let Some(output) = spec.get_mut("output").and_then(|o| o.as_object_mut()) {
         output.insert(
-            "destination_dir".to_string(),
+            "output_dir".to_string(),
             serde_json::json!("/tmp/modl-output"),
         );
     }
