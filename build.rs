@@ -65,8 +65,14 @@ fn ensure_stub_dist(dist_dir: &str) {
 }
 
 fn which_npm() -> String {
-    // Prefer the npm that's already on PATH; fall back to common locations
-    for candidate in ["npm", "/usr/local/bin/npm", "/usr/bin/npm"] {
+    // On Windows, Command::new("npm") won't find npm.cmd automatically,
+    // so we check npm.cmd first on Windows.
+    let candidates: &[&str] = if cfg!(windows) {
+        &["npm.cmd", "npm", "npm.exe"]
+    } else {
+        &["npm", "/usr/local/bin/npm", "/usr/bin/npm"]
+    };
+    for candidate in candidates {
         if Command::new(candidate)
             .arg("--version")
             .output()
