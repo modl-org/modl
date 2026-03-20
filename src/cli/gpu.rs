@@ -293,6 +293,22 @@ pub async fn agent(session_token: &str, api_base: &str) -> Result<()> {
         // Collect events and report them
         match result {
             Ok(events) => {
+                // Log all events for debugging
+                for event in &events {
+                    match &event.event {
+                        EventPayload::Error { code, message, .. } => {
+                            eprintln!("[agent] Event ERROR [{code}]: {message}");
+                        }
+                        EventPayload::Log { level, message } => {
+                            eprintln!("[agent] Event LOG [{level}]: {message}");
+                        }
+                        EventPayload::Warning { code, message } => {
+                            eprintln!("[agent] Event WARN [{code}]: {message}");
+                        }
+                        _ => {}
+                    }
+                }
+
                 // Upload any artifact files to R2 before reporting events
                 upload_artifacts(&client, api_base, &auth_header, &job_id, &events).await;
 
@@ -311,7 +327,7 @@ pub async fn agent(session_token: &str, api_base: &str) -> Result<()> {
                     .unwrap_or("completed");
 
                 report_job_status(&client, api_base, &auth_header, &job_id, final_status).await;
-                println!("[agent] Job {job_id} finished: {final_status}");
+                println!("[agent] Job {job_id} finished: {final_status} ({} events)", events.len());
             }
             Err(e) => {
                 eprintln!("[agent] Job {job_id} failed: {e:#}");

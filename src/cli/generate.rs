@@ -524,10 +524,31 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
     };
     let _ = steps_adjusted; // used in JSON output later
 
+    // Resolve family alias to registry manifest ID for the spec (e.g. "sdxl" → "sdxl-base-1.0").
+    // This ensures remote agents and Python workers can resolve the model correctly.
+    // We keep the original effective_model for local model_family lookups above.
+    let spec_model_id = {
+        let index = crate::core::registry::RegistryIndex::load();
+        if let Ok(ref idx) = index {
+            if idx.find(&effective_model).is_some() {
+                effective_model.clone()
+            } else if let Some(info) = model_family::resolve_model(&effective_model) {
+                // Try common patterns: exact id, then {id}-base-1.0
+                let candidates = [info.id.to_string(), format!("{}-base-1.0", info.id)];
+                candidates.into_iter().find(|c| idx.find(c).is_some())
+                    .unwrap_or_else(|| effective_model.clone())
+            } else {
+                effective_model.clone()
+            }
+        } else {
+            effective_model.clone()
+        }
+    };
+
     let spec = GenerateJobSpec {
         prompt: prompt.to_string(),
         model: ModelRef {
-            base_model_id: effective_model.clone(),
+            base_model_id: spec_model_id,
             base_model_path: effective_path,
         },
         lora: lora_ref.clone(),
