@@ -663,6 +663,8 @@ async fn execute_generate(
     // -------------------------------------------------------------------
     // 1. Bootstrap executor
     // -------------------------------------------------------------------
+    let gpu_session_ref: Option<gpu_session::GpuSession>;
+
     let mut executor: Box<dyn Executor> = if attach_gpu {
         if !json {
             println!(
@@ -685,8 +687,10 @@ async fn execute_generate(
                 session.state,
             );
         }
+        gpu_session_ref = Some(session.clone());
         Box::new(RemoteExecutor::new(session))
     } else if cloud {
+        gpu_session_ref = None;
         let cloud_provider = resolve_cloud_provider(provider);
         if !json {
             println!(
@@ -697,6 +701,7 @@ async fn execute_generate(
         }
         Box::new(CloudExecutor::new(cloud_provider)?)
     } else {
+        gpu_session_ref = None;
         if !json {
             println!("{} Preparing runtime...", style("→").cyan());
         }
@@ -726,6 +731,9 @@ async fn execute_generate(
     // 3. Event loop with progress
     // -------------------------------------------------------------------
     let rx = executor.events(job_id)?;
+    // Drop the executor now — we only need the event receiver from here.
+    // This also avoids holding a non-Send Box<dyn Executor> across .await.
+    drop(executor);
     db.update_job_status(job_id, "running")?;
 
     let pb = if json {
@@ -805,6 +813,56 @@ async fn execute_generate(
     // 4. Update status
     // -------------------------------------------------------------------
     db.update_job_status(job_id, final_status)?;
+
+    // -------------------------------------------------------------------
+    // 4b. Download remote artifacts (--attach-gpu)
+    // -------------------------------------------------------------------
+    if attach_gpu
+        && final_status == "completed"
+        && let Some(ref session) = gpu_session_ref
+    {
+        let client = gpu_session::GpuClient::from_session(session)?;
+        let remote_artifacts = client
+            .get_job_artifacts(&session.session_id, job_id)
+            .await?;
+
+        if !remote_artifacts.is_empty() {
+            if !json {
+                println!(
+                    "{} Downloading {} artifact(s) from remote GPU...",
+                    style("→").cyan(),
+                    remote_artifacts.len()
+                );
+            }
+
+            let output_dir = PathBuf::from(&spec.output.output_dir);
+            std::fs::create_dir_all(&output_dir)?;
+
+            artifacts.clear();
+            for ra in &remote_artifacts {
+                let filename = ra.filename();
+                let local_path = output_dir.join(&filename);
+                client
+                    .download_artifact(&ra.download_url, &local_path)
+                    .await
+                    .with_context(|| format!("Failed to download {filename}"))?;
+
+                artifacts.push(GeneratedArtifact {
+                    path: local_path.to_string_lossy().to_string(),
+                    sha256: ra.sha256.clone(),
+                    size_bytes: ra.size_bytes,
+                });
+            }
+
+            if !json {
+                println!(
+                    "  {} Downloaded {} image(s)",
+                    style("✓").green(),
+                    artifacts.len()
+                );
+            }
+        }
+    }
 
     // -------------------------------------------------------------------
     // 5. Print results

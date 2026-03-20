@@ -157,15 +157,46 @@ pub struct SubmitJobResponse {
     pub state: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct JobArtifact {
-    pub path: String,
+    pub r2_key: String,
     pub download_url: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub artifact_type: Option<String>,
     #[serde(default)]
     pub sha256: Option<String>,
     #[serde(default)]
     pub size_bytes: Option<u64>,
+}
+
+impl JobArtifact {
+    /// Extract the filename from the R2 key (last path segment).
+    pub fn filename(&self) -> String {
+        self.r2_key
+            .rsplit('/')
+            .next()
+            .unwrap_or("artifact")
+            .to_string()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct JobArtifactsResponse {
+    #[allow(dead_code)]
+    job_id: String,
+    artifacts: Vec<JobArtifact>,
+}
+
+/// Wrapper for the poll_job_events endpoint response.
+#[derive(Debug, Deserialize)]
+struct PollEventsResponse {
+    #[allow(dead_code)]
+    job_id: String,
+    events: Vec<serde_json::Value>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    job_status: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -370,11 +401,13 @@ impl GpuClient {
             bail!("Failed to poll events (HTTP {}): {}", status.as_u16(), text);
         }
 
-        serde_json::from_str(&text).context("Failed to parse job events")
+        // Server returns {"job_id": ..., "events": [...], "job_status": ...}
+        let wrapper: PollEventsResponse =
+            serde_json::from_str(&text).context("Failed to parse job events response")?;
+        Ok(wrapper.events)
     }
 
     /// GET /gpu/sessions/{id}/jobs/{jid}/artifacts — get download URLs for outputs.
-    #[allow(dead_code)]
     pub async fn get_job_artifacts(
         &self,
         session_id: &str,
@@ -402,7 +435,10 @@ impl GpuClient {
             );
         }
 
-        serde_json::from_str(&text).context("Failed to parse artifacts response")
+        // Server returns {"job_id": ..., "artifacts": [...]}
+        let wrapper: JobArtifactsResponse =
+            serde_json::from_str(&text).context("Failed to parse artifacts response")?;
+        Ok(wrapper.artifacts)
     }
 
     /// POST /gpu/upload/presign — get a presigned R2 URL for uploading assets.
@@ -440,7 +476,6 @@ impl GpuClient {
     }
 
     /// Download a file from a URL to a local path.
-    #[allow(dead_code)]
     pub async fn download_artifact(&self, url: &str, dest: &std::path::Path) -> Result<()> {
         let resp = self
             .client
@@ -534,7 +569,7 @@ pub async fn provision_session(
 async fn wait_for_ready(session: &GpuSession) -> Result<GpuSession> {
     let client = GpuClient::from_session(session)?;
 
-    let max_wait = std::time::Duration::from_secs(600); // 10 minutes
+    let max_wait = std::time::Duration::from_secs(1200); // 20 minutes
     let poll_interval = std::time::Duration::from_secs(5);
     let start = std::time::Instant::now();
 

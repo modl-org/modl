@@ -491,6 +491,17 @@ pub enum GpuCommands {
 
     /// Open a shell to the attached GPU instance
     Ssh,
+
+    /// Run as a GPU agent on a remote instance (hidden — used by Vast.ai entrypoint)
+    #[command(hide = true)]
+    Agent {
+        /// Session token for authenticating with the orchestrator
+        #[arg(long)]
+        session_token: String,
+        /// Orchestrator API base URL
+        #[arg(long, default_value = "https://api.modl.run")]
+        api_base: String,
+    },
 }
 
 // ── Top-level commands ───────────────────────────────────────────────────
@@ -1377,6 +1388,10 @@ pub async fn run(cli: Cli) -> Result<()> {
             GpuCommands::Detach => gpu::detach().await,
             GpuCommands::Status => gpu::status().await,
             GpuCommands::Ssh => gpu::ssh().await,
+            GpuCommands::Agent {
+                session_token,
+                api_base,
+            } => gpu::agent(&session_token, &api_base).await,
         },
 
         // ── Auth ─────────────────────────────────────────────────────

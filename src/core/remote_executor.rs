@@ -36,22 +36,24 @@ impl RemoteExecutor {
         let session = self.session.clone();
         let job_type_owned = job_type.to_string();
 
-        // Submit the job synchronously using a blocking HTTP call.
-        // We need the job_id before we can set up the event channel.
+        // Submit the job via a blocking HTTP call. We use block_in_place
+        // to allow blocking inside the tokio async runtime without panicking.
         let rt = tokio::runtime::Handle::try_current()
             .context("RemoteExecutor requires a tokio runtime")?;
 
-        let submit_result = rt.block_on(async {
-            let client = GpuClient::from_session(&session)?;
-            client
-                .submit_job(
-                    &session.session_id,
-                    &SubmitJobRequest {
-                        job_type: job_type_owned,
-                        spec: spec_value,
-                    },
-                )
-                .await
+        let submit_result = tokio::task::block_in_place(|| {
+            rt.block_on(async {
+                let client = GpuClient::from_session(&session)?;
+                client
+                    .submit_job(
+                        &session.session_id,
+                        &SubmitJobRequest {
+                            job_type: job_type_owned,
+                            spec: spec_value,
+                        },
+                    )
+                    .await
+            })
         })?;
 
         let job_id = submit_result.job_id.clone();
