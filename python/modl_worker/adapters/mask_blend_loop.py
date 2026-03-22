@@ -188,104 +188,75 @@ def run_mask_blend(
     pipe.prepare_latents = patched_prepare_latents
 
     # --- 4. Callback for per-step mask re-blend ---
-    # After each denoising step, lock the preserved area to the re-noised original.
+    # Blend in spatial (B, C, H, W) format regardless of pipeline's internal packing.
+    # On each step: unpack → blend → repack. Simple and format-agnostic.
     is_flow = _is_flow_matching(pipe.scheduler)
 
-    # The callback needs clean_latents, noise, and mask in the pipeline's
-    # internal packed format. We'll transform them on first callback call
-    # when we can see the actual latent shape.
-    blend_state = {"ready": False}
-
-    def _pack_for_callback(ref_tensor, target_shape, pipe_ref):
-        """Pack a (B, C_vae, H, W) tensor to match the pipeline's latent format."""
-        if ref_tensor.shape == target_shape:
-            return ref_tensor
-
-        b, c, h, w = ref_tensor.shape
-        # Spatial fold
-        if h % 2 == 0 and w % 2 == 0:
-            folded = ref_tensor.reshape(b, c, h // 2, 2, w // 2, 2)
-            folded = folded.permute(0, 1, 3, 5, 2, 4).reshape(b, c * 4, h // 2, w // 2)
-        else:
-            folded = ref_tensor
-
-        # Sequence pack
-        if target_shape[-1] != folded.shape[1] and hasattr(pipe_ref, '_pack_latents'):
-            try:
-                packed = pipe_ref._pack_latents(folded, *folded.shape)
-            except TypeError:
-                packed = pipe_ref._pack_latents(folded)
-        else:
-            packed = folded
-
-        # Pad channels if needed (e.g. Klein: target has 128ch, we have 64)
-        if packed.dim() == 3 and packed.shape[-1] < target_shape[-1]:
-            pad = torch.zeros(
-                packed.shape[0], packed.shape[1], target_shape[-1] - packed.shape[-1],
-                device=packed.device, dtype=packed.dtype,
-            )
-            packed = torch.cat([packed, pad], dim=-1)
-        elif packed.dim() == 4 and packed.shape[1] < target_shape[1]:
-            pad = torch.zeros(
-                packed.shape[0], target_shape[1] - packed.shape[1], *packed.shape[2:],
-                device=packed.device, dtype=packed.dtype,
-            )
-            packed = torch.cat([packed, pad], dim=1)
-
-        return packed
+    # Store spatial-format tensors for the callback.
+    # clean_latents, noise, latent_mask are already (B, C_vae, H, W).
+    # The callback will work in this spatial space.
+    spatial_h, spatial_w = latent_h, latent_w  # VAE output spatial dims
+    c_vae = clean_latents.shape[1]
 
     def reblend_callback(pipe_ref, step_index, timestep, callback_kwargs):
         latents = callback_kwargs["latents"]
+        lat_device = latents.device
+        lat_dtype = latents.dtype
 
-        if not blend_state["ready"]:
-            target_shape = latents.shape
-            blend_state["cl"] = _pack_for_callback(clean_latents, target_shape, pipe_ref).to(device=latents.device, dtype=latents.dtype)
-            blend_state["ns"] = _pack_for_callback(noise, target_shape, pipe_ref).to(device=latents.device, dtype=latents.dtype)
+        # --- Unpack to spatial if needed ---
+        if latents.dim() == 3:
+            # Sequence format (B, seq_len, C_packed)
+            b, seq_len, c_packed = latents.shape
+            # Reshape to spatial: (B, C_packed, sqrt(seq), sqrt(seq)) or known dims
+            spatial = latents.permute(0, 2, 1).reshape(b, c_packed, spatial_h // 2, spatial_w // 2)
+            was_packed = True
+        else:
+            spatial = latents
+            was_packed = False
 
-            # Mask: fold spatial, pack to seq, expand to target channels
-            mk = latent_mask  # (1, 1, H, W)
-            mk_h, mk_w = mk.shape[2], mk.shape[3]
-            if target_shape != mk.expand_as(clean_latents).shape:
-                # Fold mask spatial dims
-                if mk_h % 2 == 0 and mk_w % 2 == 0:
-                    mk_folded = mk.reshape(1, 1, mk_h // 2, 2, mk_w // 2, 2).mean(dim=(3, 5))
-                else:
-                    mk_folded = mk.squeeze(0).squeeze(0)  # (H, W)
-                    mk_folded = mk_folded.unsqueeze(0).unsqueeze(0)  # back to (1,1,H,W)
+        # The pipeline's latent channels may exceed VAE channels (Klein: 128 vs 64).
+        # We only blend the VAE channels; leave extra channels untouched.
+        c_lat = spatial.shape[1]
+        c_blend = min(c_vae * 4 if was_packed else c_vae, c_lat)
 
-                # Pack to sequence
-                if latents.dim() == 3:
-                    seq_len = mk_folded.shape[2] * mk_folded.shape[3]
-                    mk_seq = mk_folded.reshape(1, 1, seq_len).permute(0, 2, 1)  # (1, seq, 1)
-                    mk_packed = mk_seq.expand(1, seq_len, target_shape[-1])
-                else:
-                    mk_packed = mk_folded.expand_as(latents)
-            else:
-                mk_packed = mk.expand(target_shape)
+        # Get spatial clean/noise at matching resolution
+        cl = clean_latents.to(device=lat_device, dtype=lat_dtype)
+        ns = noise.to(device=lat_device, dtype=lat_dtype)
+        mk = latent_mask.to(device=lat_device, dtype=lat_dtype)
 
-            blend_state["mk"] = mk_packed.to(device=latents.device, dtype=latents.dtype)
-            blend_state["ready"] = True
+        # If pipeline folded spatially (H/2, W/2 with C*4), fold our references too
+        if was_packed and cl.shape[2] != spatial.shape[2]:
+            b2, c2, h2, w2 = cl.shape
+            cl = cl.reshape(b2, c2, h2 // 2, 2, w2 // 2, 2).permute(0, 1, 3, 5, 2, 4).reshape(b2, c2 * 4, h2 // 2, w2 // 2)
+            ns = ns.reshape(b2, c2, h2 // 2, 2, w2 // 2, 2).permute(0, 1, 3, 5, 2, 4).reshape(b2, c2 * 4, h2 // 2, w2 // 2)
+            mk = torch.nn.functional.interpolate(mk, size=(h2 // 2, w2 // 2), mode="nearest")
 
-        cl_p = blend_state["cl"]
-        ns_p = blend_state["ns"]
-        mk_p = blend_state["mk"]
+        # Expand mask to blend channels
+        mk_blend = mk.expand(1, c_blend, mk.shape[2], mk.shape[3])
 
         # Re-noise original to current noise level
         if is_flow:
             sigmas = pipe_ref.scheduler.sigmas
             next_idx = step_index + 1
             if next_idx < len(sigmas):
-                sigma = sigmas[next_idx].to(device=latents.device, dtype=latents.dtype)
+                sigma = sigmas[next_idx].to(device=lat_device, dtype=lat_dtype)
             else:
-                sigma = torch.tensor(0.0, device=latents.device, dtype=latents.dtype)
-            while sigma.dim() < latents.dim():
-                sigma = sigma.unsqueeze(-1)
-            noised_orig = sigma * ns_p + (1.0 - sigma) * cl_p
+                sigma = torch.tensor(0.0, device=lat_device, dtype=lat_dtype)
+            sigma = sigma.reshape(1, 1, 1, 1)
+            noised_orig = sigma * ns + (1.0 - sigma) * cl
         else:
-            noised_orig = pipe_ref.scheduler.add_noise(cl_p, ns_p, timestep.unsqueeze(0))
+            noised_orig = pipe_ref.scheduler.add_noise(cl, ns, timestep.unsqueeze(0))
 
-        # Blend: mask=1 keeps denoised, mask=0 keeps re-noised original
-        callback_kwargs["latents"] = mk_p * latents + (1.0 - mk_p) * noised_orig
+        # Blend VAE channels only; keep extra channels from model prediction
+        blended = spatial.clone()
+        blended[:, :c_blend] = mk_blend * spatial[:, :c_blend] + (1.0 - mk_blend) * noised_orig[:, :c_blend]
+
+        # --- Repack if needed ---
+        if was_packed:
+            callback_kwargs["latents"] = blended.reshape(b, c_packed, -1).permute(0, 2, 1)
+        else:
+            callback_kwargs["latents"] = blended
+
         return callback_kwargs
 
     # --- 5. Build pipeline kwargs ---
@@ -295,10 +266,8 @@ def run_mask_blend(
     pipe_kwargs["generator"] = generator
     pipe_kwargs["width"] = width
     pipe_kwargs["height"] = height
-    # TODO: Enable per-step re-blending callback once packing format is resolved.
-    # For now, initial latent seeding alone provides reasonable results.
-    # pipe_kwargs["callback_on_step_end"] = reblend_callback
-    # pipe_kwargs["callback_on_step_end_tensor_inputs"] = ["latents"]
+    pipe_kwargs["callback_on_step_end"] = reblend_callback
+    pipe_kwargs["callback_on_step_end_tensor_inputs"] = ["latents"]
 
     # Inject pre-computed prompt embeddings for vision-language models (split routing).
     # For text-only encoders, skip pre-encoding — the encoder doesn't see the image anyway.
