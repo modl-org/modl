@@ -21,6 +21,25 @@ pub async fn run(id: &str, variant: Option<&str>, dry_run: bool, force: bool) ->
     let index = RegistryIndex::load_or_fetch().await?;
     let db = Database::open()?;
 
+    // Resolve family aliases (e.g. "sdxl" → "sdxl-base-1.0") if the ID
+    // isn't found directly in the registry.
+    let resolved_id = if index.find(id).is_none() {
+        if let Some(info) = crate::core::model_family::resolve_model(id) {
+            // Try the family ID as a registry lookup (e.g. "flux-dev" works as-is)
+            // then try common manifest patterns (e.g. "sdxl" → "sdxl-base-1.0")
+            let candidates = [info.id.to_string(), format!("{}-base-1.0", info.id)];
+            candidates
+                .into_iter()
+                .find(|c| index.find(c).is_some())
+                .unwrap_or_else(|| id.to_string())
+        } else {
+            id.to_string()
+        }
+    } else {
+        id.to_string()
+    };
+    let id = resolved_id.as_str();
+
     let (mut plan, vram) = install::resolve_plan(id, variant, &index, &db)?;
 
     // Interactive variant selection for the primary model (if it has multiple variants
