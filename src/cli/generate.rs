@@ -6,10 +6,12 @@ use std::path::PathBuf;
 use crate::core::cloud::{CloudExecutor, CloudProvider};
 use crate::core::db::Database;
 use crate::core::executor::{Executor, LocalExecutor};
+use crate::core::gpu_session;
 use crate::core::job::*;
 use crate::core::model_family;
 use crate::core::outputs::{SidecarMetadata, write_sidecar_yaml};
 use crate::core::preflight;
+use crate::core::remote_executor::RemoteExecutor;
 
 /// Known control type suffixes for auto-detection from filenames.
 const CONTROL_SUFFIXES: &[(&str, &str)] = &[
@@ -224,6 +226,8 @@ pub struct GenerateArgs<'a> {
     pub cloud: bool,
     pub provider: Option<CloudProvider>,
     pub no_worker: bool,
+    pub attach_gpu: bool,
+    pub gpu_type: &'a str,
     pub json: bool,
 }
 
@@ -255,6 +259,8 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
         cloud,
         provider,
         no_worker,
+        attach_gpu,
+        gpu_type,
         json,
     } = args;
 
@@ -266,7 +272,7 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
     // -------------------------------------------------------------------
     // Pre-flight checks (fail fast with actionable hints)
     // -------------------------------------------------------------------
-    if !cloud {
+    if !cloud && !attach_gpu {
         preflight::for_generation(&base_model)?;
     }
 
@@ -518,10 +524,33 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
     };
     let _ = steps_adjusted; // used in JSON output later
 
+    // Resolve family alias to registry manifest ID for the spec (e.g. "sdxl" → "sdxl-base-1.0").
+    // This ensures remote agents and Python workers can resolve the model correctly.
+    // We keep the original effective_model for local model_family lookups above.
+    let spec_model_id = {
+        let index = crate::core::registry::RegistryIndex::load();
+        if let Ok(ref idx) = index {
+            if idx.find(&effective_model).is_some() {
+                effective_model.clone()
+            } else if let Some(info) = model_family::resolve_model(&effective_model) {
+                // Try common patterns: exact id, then {id}-base-1.0
+                let candidates = [info.id.to_string(), format!("{}-base-1.0", info.id)];
+                candidates
+                    .into_iter()
+                    .find(|c| idx.find(c).is_some())
+                    .unwrap_or_else(|| effective_model.clone())
+            } else {
+                effective_model.clone()
+            }
+        } else {
+            effective_model.clone()
+        }
+    };
+
     let spec = GenerateJobSpec {
         prompt: prompt.to_string(),
         model: ModelRef {
-            base_model_id: effective_model.clone(),
+            base_model_id: spec_model_id,
             base_model_path: effective_path,
         },
         lora: lora_ref.clone(),
@@ -545,7 +574,9 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
             profile: "trainer-cu124".to_string(),
             python_version: Some("3.11.11".to_string()),
         },
-        target: if cloud {
+        target: if attach_gpu {
+            ExecutionTarget::Remote
+        } else if cloud {
             ExecutionTarget::Cloud
         } else {
             ExecutionTarget::Local
@@ -636,7 +667,7 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
     // -------------------------------------------------------------------
     // Execute
     // -------------------------------------------------------------------
-    execute_generate(spec, cloud, provider, no_worker, json).await
+    execute_generate(spec, cloud, provider, no_worker, attach_gpu, gpu_type, json).await
 }
 
 async fn execute_generate(
@@ -644,6 +675,8 @@ async fn execute_generate(
     cloud: bool,
     provider: Option<CloudProvider>,
     no_worker: bool,
+    attach_gpu: bool,
+    gpu_type: &str,
     json: bool,
 ) -> Result<()> {
     let db = Database::open()?;
@@ -653,7 +686,34 @@ async fn execute_generate(
     // -------------------------------------------------------------------
     // 1. Bootstrap executor
     // -------------------------------------------------------------------
-    let mut executor: Box<dyn Executor> = if cloud {
+    let gpu_session_ref: Option<gpu_session::GpuSession>;
+
+    let mut executor: Box<dyn Executor> = if attach_gpu {
+        if !json {
+            println!(
+                "{} Connecting to remote GPU ({})...",
+                style("→").cyan(),
+                style(gpu_type).bold()
+            );
+        }
+        let session = gpu_session::ensure_session(
+            gpu_type,
+            "30m",
+            std::slice::from_ref(&spec.model.base_model_id),
+        )
+        .await?;
+        if !json {
+            println!(
+                "  {} Session {} ({})",
+                style("✓").green(),
+                style(&session.session_id).bold(),
+                session.state,
+            );
+        }
+        gpu_session_ref = Some(session.clone());
+        Box::new(RemoteExecutor::new(session))
+    } else if cloud {
+        gpu_session_ref = None;
         let cloud_provider = resolve_cloud_provider(provider);
         if !json {
             println!(
@@ -664,6 +724,7 @@ async fn execute_generate(
         }
         Box::new(CloudExecutor::new(cloud_provider)?)
     } else {
+        gpu_session_ref = None;
         if !json {
             println!("{} Preparing runtime...", style("→").cyan());
         }
@@ -693,6 +754,9 @@ async fn execute_generate(
     // 3. Event loop with progress
     // -------------------------------------------------------------------
     let rx = executor.events(job_id)?;
+    // Drop the executor now — we only need the event receiver from here.
+    // This also avoids holding a non-Send Box<dyn Executor> across .await.
+    drop(executor);
     db.update_job_status(job_id, "running")?;
 
     let pb = if json {
@@ -772,6 +836,56 @@ async fn execute_generate(
     // 4. Update status
     // -------------------------------------------------------------------
     db.update_job_status(job_id, final_status)?;
+
+    // -------------------------------------------------------------------
+    // 4b. Download remote artifacts (--attach-gpu)
+    // -------------------------------------------------------------------
+    if attach_gpu
+        && final_status == "completed"
+        && let Some(ref session) = gpu_session_ref
+    {
+        let client = gpu_session::GpuClient::from_session(session)?;
+        let remote_artifacts = client
+            .get_job_artifacts(&session.session_id, job_id)
+            .await?;
+
+        if !remote_artifacts.is_empty() {
+            if !json {
+                println!(
+                    "{} Downloading {} artifact(s) from remote GPU...",
+                    style("→").cyan(),
+                    remote_artifacts.len()
+                );
+            }
+
+            let output_dir = PathBuf::from(&spec.output.output_dir);
+            std::fs::create_dir_all(&output_dir)?;
+
+            artifacts.clear();
+            for ra in &remote_artifacts {
+                let filename = ra.filename();
+                let local_path = output_dir.join(&filename);
+                client
+                    .download_artifact(&ra.download_url, &local_path)
+                    .await
+                    .with_context(|| format!("Failed to download {filename}"))?;
+
+                artifacts.push(GeneratedArtifact {
+                    path: local_path.to_string_lossy().to_string(),
+                    sha256: ra.sha256.clone(),
+                    size_bytes: ra.size_bytes,
+                });
+            }
+
+            if !json {
+                println!(
+                    "  {} Downloaded {} image(s)",
+                    style("✓").green(),
+                    artifacts.len()
+                );
+            }
+        }
+    }
 
     // -------------------------------------------------------------------
     // 5. Print results

@@ -6,10 +6,12 @@ use std::path::PathBuf;
 use crate::core::cloud::{CloudExecutor, CloudProvider};
 use crate::core::db::Database;
 use crate::core::executor::{Executor, LocalExecutor};
+use crate::core::gpu_session;
 use crate::core::job::*;
 use crate::core::model_family;
 use crate::core::outputs::{SidecarMetadata, write_sidecar_yaml};
 use crate::core::preflight;
+use crate::core::remote_executor::RemoteExecutor;
 
 /// All arguments for `modl edit`, used by both CLI and web UI.
 pub struct EditArgs<'a> {
@@ -24,6 +26,8 @@ pub struct EditArgs<'a> {
     pub cloud: bool,
     pub provider: Option<CloudProvider>,
     pub no_worker: bool,
+    pub attach_gpu: bool,
+    pub gpu_type: &'a str,
     pub json: bool,
 }
 
@@ -131,6 +135,8 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
         cloud,
         provider,
         no_worker,
+        attach_gpu,
+        gpu_type,
         json,
     } = args;
 
@@ -149,7 +155,7 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
     // -------------------------------------------------------------------
     // Pre-flight checks
     // -------------------------------------------------------------------
-    if !cloud {
+    if !cloud && !attach_gpu {
         preflight::for_generation(&base_model)?;
     }
 
@@ -238,7 +244,9 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
             profile: "trainer-cu124".to_string(),
             python_version: Some("3.11.11".to_string()),
         },
-        target: if cloud {
+        target: if attach_gpu {
+            ExecutionTarget::Remote
+        } else if cloud {
             ExecutionTarget::Cloud
         } else {
             ExecutionTarget::Local
@@ -274,7 +282,7 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
     // -------------------------------------------------------------------
     // Execute
     // -------------------------------------------------------------------
-    execute_edit(spec, cloud, provider, no_worker, json).await
+    execute_edit(spec, cloud, provider, no_worker, attach_gpu, gpu_type, json).await
 }
 
 async fn execute_edit(
@@ -282,6 +290,8 @@ async fn execute_edit(
     cloud: bool,
     provider: Option<CloudProvider>,
     no_worker: bool,
+    attach_gpu: bool,
+    gpu_type: &str,
     json: bool,
 ) -> Result<()> {
     let db = Database::open()?;
@@ -289,7 +299,30 @@ async fn execute_edit(
     let target_str = serde_json::to_string(&spec.target)?;
 
     // Bootstrap executor
-    let mut executor: Box<dyn Executor> = if cloud {
+    let mut executor: Box<dyn Executor> = if attach_gpu {
+        if !json {
+            println!(
+                "{} Connecting to remote GPU ({})...",
+                style("→").cyan(),
+                style(gpu_type).bold()
+            );
+        }
+        let session = gpu_session::ensure_session(
+            gpu_type,
+            "30m",
+            std::slice::from_ref(&spec.model.base_model_id),
+        )
+        .await?;
+        if !json {
+            println!(
+                "  {} Session {} ({})",
+                style("✓").green(),
+                style(&session.session_id).bold(),
+                session.state,
+            );
+        }
+        Box::new(RemoteExecutor::new(session))
+    } else if cloud {
         let cloud_provider = resolve_cloud_provider(provider);
         Box::new(CloudExecutor::new(cloud_provider)?)
     } else {

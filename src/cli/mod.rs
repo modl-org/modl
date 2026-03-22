@@ -296,9 +296,12 @@ pub enum VisionCommands {
         /// Detail level: brief, detailed, verbose
         #[arg(long, default_value = "detailed")]
         detail: String,
-        /// VL model: qwen3-vl-2b (fast, 4GB) or qwen3-vl-8b (quality, 16GB)
+        /// VL model: qwen3-vl-8b (default, quality, 16GB) or qwen3-vl-2b (fast, 4GB)
         #[arg(long)]
         model: Option<String>,
+        /// Use smaller/faster VL model (qwen3-vl-2b, 4GB) — less accurate
+        #[arg(long)]
+        fast: bool,
         /// Output result as JSON
         #[arg(long)]
         json: bool,
@@ -340,9 +343,12 @@ pub enum VisionCommands {
         /// Minimum confidence threshold
         #[arg(long)]
         threshold: Option<f64>,
-        /// VL model: qwen3-vl-2b (fast, 4GB) or qwen3-vl-8b (quality, 16GB)
+        /// VL model: qwen3-vl-8b (default, quality, 16GB) or qwen3-vl-2b (fast, 4GB)
         #[arg(long)]
         model: Option<String>,
+        /// Use smaller/faster VL model (qwen3-vl-2b, 4GB) — less accurate
+        #[arg(long)]
+        fast: bool,
         /// Output result as JSON
         #[arg(long)]
         json: bool,
@@ -485,6 +491,17 @@ pub enum GpuCommands {
 
     /// Open a shell to the attached GPU instance
     Ssh,
+
+    /// Run as a GPU agent on a remote instance (hidden — used by Vast.ai entrypoint)
+    #[command(hide = true)]
+    Agent {
+        /// Session token for authenticating with the orchestrator
+        #[arg(long)]
+        session_token: String,
+        /// Orchestrator API base URL
+        #[arg(long, default_value = "https://api.modl.run")]
+        api_base: String,
+    },
 }
 
 // ── Top-level commands ───────────────────────────────────────────────────
@@ -571,6 +588,12 @@ pub enum Commands {
         /// Force one-shot mode (skip persistent worker, cold start every time)
         #[arg(long)]
         no_worker: bool,
+        /// Run on a remote GPU instance (auto-provisions via Vast.ai if no active session)
+        #[arg(long)]
+        attach_gpu: bool,
+        /// GPU type for remote execution (e.g. a100, a10g, h100, rtx4090)
+        #[arg(long, default_value = "a100")]
+        gpu_type: String,
         /// Output result as JSON (suppresses progress output)
         #[arg(long)]
         json: bool,
@@ -621,6 +644,12 @@ pub enum Commands {
         /// Force one-shot mode
         #[arg(long)]
         no_worker: bool,
+        /// Run on a remote GPU instance (auto-provisions via Vast.ai if no active session)
+        #[arg(long)]
+        attach_gpu: bool,
+        /// GPU type for remote execution (e.g. a100, a10g, h100, rtx4090)
+        #[arg(long, default_value = "a100")]
+        gpu_type: String,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -696,6 +725,12 @@ pub enum Commands {
         /// Cloud provider to use (modal, replicate, runpod)
         #[arg(long, value_enum)]
         provider: Option<CloudProvider>,
+        /// Run on a remote GPU instance (auto-provisions via Vast.ai if no active session)
+        #[arg(long)]
+        attach_gpu: bool,
+        /// GPU type for remote execution (e.g. a100, a10g, h100, rtx4090)
+        #[arg(long, default_value = "a100")]
+        gpu_type: String,
     },
 
     /// Enhance prompts with AI quality tags and descriptors for better generation results
@@ -1009,6 +1044,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             cloud,
             provider,
             no_worker,
+            attach_gpu,
+            gpu_type,
             json,
         } => {
             generate::run(generate::GenerateArgs {
@@ -1035,6 +1072,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 cloud,
                 provider,
                 no_worker,
+                attach_gpu,
+                gpu_type: &gpu_type,
                 json,
             })
             .await
@@ -1051,6 +1090,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             cloud,
             provider,
             no_worker,
+            attach_gpu,
+            gpu_type,
             json,
         } => {
             edit::run(edit::EditArgs {
@@ -1065,6 +1106,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 cloud,
                 provider,
                 no_worker,
+                attach_gpu,
+                gpu_type: &gpu_type,
                 json,
             })
             .await
@@ -1092,6 +1135,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             dry_run,
             cloud,
             provider,
+            attach_gpu,
+            gpu_type,
         } => match command {
             Some(TrainSubcommands::Setup { reinstall }) => train_setup::run(reinstall).await,
             Some(TrainSubcommands::Status { name, watch, json }) => {
@@ -1147,6 +1192,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                     dry_run,
                     cloud,
                     provider,
+                    attach_gpu,
+                    &gpu_type,
                 )
                 .await
             }
@@ -1259,8 +1306,16 @@ pub async fn run(cli: Cli) -> Result<()> {
                 paths,
                 detail,
                 model,
+                fast,
                 json,
-            } => describe::run(&paths, &detail, model.as_deref(), json).await,
+            } => {
+                let effective_model = if fast && model.is_none() {
+                    Some("qwen3-vl-2b".to_string())
+                } else {
+                    model
+                };
+                describe::run(&paths, &detail, effective_model.as_deref(), json).await
+            }
             VisionCommands::Score { paths, json } => score::run(&paths, json).await,
             VisionCommands::Detect {
                 paths,
@@ -1273,8 +1328,16 @@ pub async fn run(cli: Cli) -> Result<()> {
                 paths,
                 threshold,
                 model,
+                fast,
                 json,
-            } => ground::run(&query, &paths, threshold, model.as_deref(), json).await,
+            } => {
+                let effective_model = if fast && model.is_none() {
+                    Some("qwen3-vl-2b".to_string())
+                } else {
+                    model
+                };
+                ground::run(&query, &paths, threshold, effective_model.as_deref(), json).await
+            }
             VisionCommands::Compare {
                 paths,
                 reference,
@@ -1325,6 +1388,10 @@ pub async fn run(cli: Cli) -> Result<()> {
             GpuCommands::Detach => gpu::detach().await,
             GpuCommands::Status => gpu::status().await,
             GpuCommands::Ssh => gpu::ssh().await,
+            GpuCommands::Agent {
+                session_token,
+                api_base,
+            } => gpu::agent(&session_token, &api_base).await,
         },
 
         // ── Auth ─────────────────────────────────────────────────────

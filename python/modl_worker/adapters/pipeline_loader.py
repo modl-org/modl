@@ -607,6 +607,8 @@ def load_pipeline(
         emitter.info(f"Loading checkpoint: {filename} (weights={weight_dtype})")
         # full_checkpoint (e.g. SDXL) needs HF Hub access for component config
         # resolution during from_single_file(). Temporarily allow it.
+        # TODO: bundle pipeline configs in modl-registry manifests so we can
+        # load single-file checkpoints fully offline without hitting HF Hub.
         from huggingface_hub import constants as hf_constants
         was_offline = hf_constants.HF_HUB_OFFLINE
         hf_constants.HF_HUB_OFFLINE = False
