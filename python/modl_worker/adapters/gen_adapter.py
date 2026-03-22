@@ -381,14 +381,18 @@ def run_generate_with_pipeline(
     # -------------------------------------------------------------------
     callback_primitives = []
 
-    # Latent mask blend: universal inpainting via per-step callback
+    # Latent mask blend: universal inpainting via per-step callback.
+    # Returns (initial_latents, callback) — we pass initial_latents to the
+    # pipeline and the callback handles per-step re-blending.
     if use_mask_blend and init_img is not None and mask_img is not None:
         from .callbacks import prepare_mask_blend
 
-        mask_blend = prepare_mask_blend(
+        initial_latents, mask_blend_cb = prepare_mask_blend(
             pipe, init_img, mask_img, generator, arch, width, height, emitter,
         )
-        callback_primitives.append(mask_blend)
+        callback_primitives.append(mask_blend_cb)
+        # Pass pre-filled latents (encoded padded image with noise in masked areas)
+        gen_kwargs["latents"] = initial_latents
 
     # Per-step progress for long inference runs
     if steps >= 20:
