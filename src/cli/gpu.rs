@@ -209,14 +209,19 @@ pub async fn agent(session_token: &str, api_base: &str) -> Result<()> {
     // no venv needed. Try the runtime setup first, fall back to system Python.
     println!("[agent] Setting up local executor...");
     let mut executor = match LocalExecutor::from_runtime_setup().await {
-        Ok(e) => e,
+        Ok(mut e) => {
+            e.hf_offline = false; // Agent needs HF access to download models
+            e
+        }
         Err(_) => {
             // Fall back to system Python (vastai/pytorch has torch globally)
             let python = std::path::PathBuf::from("/usr/bin/python3");
             let runtime_root = crate::core::paths::modl_root().join("runtime");
             std::fs::create_dir_all(&runtime_root).ok();
             println!("[agent] Using system Python: {}", python.display());
-            LocalExecutor::new(python, runtime_root)
+            let mut e = LocalExecutor::new(python, runtime_root);
+            e.hf_offline = false;
+            e
         }
     };
 
@@ -327,7 +332,10 @@ pub async fn agent(session_token: &str, api_base: &str) -> Result<()> {
                     .unwrap_or("completed");
 
                 report_job_status(&client, api_base, &auth_header, &job_id, final_status).await;
-                println!("[agent] Job {job_id} finished: {final_status} ({} events)", events.len());
+                println!(
+                    "[agent] Job {job_id} finished: {final_status} ({} events)",
+                    events.len()
+                );
             }
             Err(e) => {
                 eprintln!("[agent] Job {job_id} failed: {e:#}");

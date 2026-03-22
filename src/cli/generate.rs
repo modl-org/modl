@@ -535,7 +535,9 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
             } else if let Some(info) = model_family::resolve_model(&effective_model) {
                 // Try common patterns: exact id, then {id}-base-1.0
                 let candidates = [info.id.to_string(), format!("{}-base-1.0", info.id)];
-                candidates.into_iter().find(|c| idx.find(c).is_some())
+                candidates
+                    .into_iter()
+                    .find(|c| idx.find(c).is_some())
                     .unwrap_or_else(|| effective_model.clone())
             } else {
                 effective_model.clone()
