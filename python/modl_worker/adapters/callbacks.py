@@ -231,44 +231,35 @@ def prepare_mask_blend(
     if hasattr(pipe.vae.config, 'shift_factor'):
         clean_latents = clean_latents - pipe.vae.config.shift_factor
 
-    # Determine if this is a Flux-style DiT (sequence format) or UNet (spatial format).
-    # Flux, Chroma, Z-Image, Qwen all use DiT with sequence-packed latents.
-    is_flux_dit = arch not in ("sdxl", "sd15")
+    # Determine latent format: Flux/Qwen/Chroma pipelines use _pack_latents
+    # (sequence format: B, seq, C*4) while Z-Image/SDXL keep spatial (B, C, H, W).
+    uses_sequence_packing = hasattr(pipe, '_pack_latents')
 
     # Pack latents to match the format used inside the pipeline's denoising loop.
-    if is_flux_dit and packing_factor == 2:
+    latent_h = clean_latents.shape[2]
+    latent_w = clean_latents.shape[3]
+    if uses_sequence_packing:
         # Flux sequence format: (B, H/2*W/2, C*4)
-        latent_h = clean_latents.shape[2] // 2
-        latent_w = clean_latents.shape[3] // 2
         clean_latents = _pack_latents_flux(clean_latents)
-    elif packing_factor == 2:
-        latent_h = clean_latents.shape[2] // 2
-        latent_w = clean_latents.shape[3] // 2
-        clean_latents = _pack_latents_spatial(clean_latents)
-    else:
-        latent_h = clean_latents.shape[2]
-        latent_w = clean_latents.shape[3]
+        latent_h = latent_h // 2
+        latent_w = latent_w // 2
+    # Spatial format: latents stay as (B, C, H, W) — no packing needed
 
     # Prepare mask in latent space
     mask_resized = mask_image.convert("L").resize((width, height), Image.NEAREST)
     mask_np = np.array(mask_resized).astype(np.float32) / 255.0
-    # Ensure binary: white (>0.5) = 1 (regenerate), black = 0 (preserve)
     mask_np = (mask_np > 0.5).astype(np.float32)
     mask_tensor = torch.from_numpy(mask_np).unsqueeze(0).unsqueeze(0)
 
-    # Downsample mask to the pre-packing latent resolution
+    # Downsample mask to latent resolution
     mask_latent = torch.nn.functional.interpolate(
         mask_tensor, size=(latent_h, latent_w), mode="nearest"
     )
 
     # Pack mask to match latent format
-    if is_flux_dit and packing_factor == 2:
-        # Flux sequence format: (B, 1, H, W) → (B, H/2*W/2, 1*4) → broadcast
-        # Simpler: just flatten spatial dims to sequence
-        # mask shape: (B, 1, latent_h, latent_w) where latent_h/w are already halved
-        # We need: (B, latent_h * latent_w, 1) to broadcast against (B, seq, C*4)
+    if uses_sequence_packing:
+        # Sequence format: (B, 1, H, W) → (B, H*W, 1) to broadcast against (B, seq, C*4)
         mask_latent = mask_latent.squeeze(1).reshape(1, latent_h * latent_w, 1)
-    # For spatial format, expand channels normally
     mask_latent = mask_latent.expand_as(clean_latents).to(device=device, dtype=clean_latents.dtype)
 
     # Generate noise — use CPU generator for compatibility (CUDA generators
