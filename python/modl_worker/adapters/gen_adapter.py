@@ -391,8 +391,9 @@ def run_generate_with_pipeline(
             pipe, init_img, mask_img, generator, arch, width, height, emitter,
         )
         callback_primitives.append(mask_blend_cb)
-        # Pass pre-filled latents (encoded padded image with noise in masked areas)
-        gen_kwargs["latents"] = initial_latents
+        # initial_latents may be None (let pipeline generate noise) or pre-filled
+        if initial_latents is not None:
+            gen_kwargs["latents"] = initial_latents
 
     # Per-step progress for long inference runs
     if steps >= 20:

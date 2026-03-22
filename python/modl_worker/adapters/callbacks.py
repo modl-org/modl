@@ -254,51 +254,56 @@ def prepare_mask_blend(
         padded_latents = padded_latents - pipe.vae.config.shift_factor
         clean_latents = clean_latents - pipe.vae.config.shift_factor
 
-    # --- 4. Determine latent format and pack ---
+    # --- 4. Determine latent format ---
+    # The pipeline's prepare_latents will pack the initial latents.
+    # But the callback receives latents in the pipeline's INTERNAL packed format.
+    # So: initial_latents → raw 4D (pipeline packs them)
+    #     callback tensors → packed to match what the callback sees.
     uses_sequence_packing = hasattr(pipe, '_pack_latents')
 
     latent_h = clean_latents.shape[2]
     latent_w = clean_latents.shape[3]
 
+    # Pack clean_latents for the callback (matching pipeline's internal format).
+    # Use our own _pack_latents_flux which matches the standard Flux packing.
     if uses_sequence_packing:
-        padded_latents = _pack_latents_flux(padded_latents)
-        clean_latents = _pack_latents_flux(clean_latents)
-        latent_h = latent_h // 2
-        latent_w = latent_w // 2
+        clean_latents_packed = _pack_latents_flux(clean_latents)
+        packed_h = latent_h // 2
+        packed_w = latent_w // 2
+    else:
+        clean_latents_packed = clean_latents
+        packed_h = latent_h
+        packed_w = latent_w
 
     # --- 5. Prepare mask at latent resolution ---
     mask_tensor = torch.from_numpy(mask_np).unsqueeze(0).unsqueeze(0)
     mask_latent = torch.nn.functional.interpolate(
-        mask_tensor, size=(latent_h, latent_w), mode="bilinear", align_corners=False,
+        mask_tensor, size=(packed_h, packed_w), mode="bilinear", align_corners=False,
     )
 
     if uses_sequence_packing:
-        mask_latent = mask_latent.squeeze(1).reshape(1, latent_h * latent_w, 1)
-    mask_latent = mask_latent.expand_as(clean_latents).to(device=device, dtype=clean_latents.dtype)
+        # Sequence format: (B, 1, H, W) → (B, H*W, 1)
+        mask_latent = mask_latent.squeeze(1).reshape(1, packed_h * packed_w, 1)
+    mask_latent = mask_latent.expand_as(clean_latents_packed).to(device=device, dtype=clean_latents_packed.dtype)
 
-    # --- 6. Generate noise for per-step re-blending ---
+    # --- 6. Generate noise for per-step re-blending (in packed format) ---
     cpu_gen = torch.Generator(device="cpu")
     cpu_gen.manual_seed(generator.initial_seed())
-    noise = torch.randn(
-        clean_latents.shape, generator=cpu_gen, device="cpu", dtype=torch.float32,
-    ).to(device=device, dtype=clean_latents.dtype)
+    noise_packed = torch.randn(
+        clean_latents_packed.shape, generator=cpu_gen, device="cpu", dtype=torch.float32,
+    ).to(device=device, dtype=clean_latents_packed.dtype)
 
-    # --- 7. Create initial latents for the pipeline ---
-    # The txt2img pipeline expects latents at sigma_max noise level.
-    # For flow matching, sigma_max ≈ 1.0 (pure noise at start).
-    # We blend: in masked areas → pure noise, in preserved areas → noised original.
-    # This way the pipeline starts with the right content in each region.
-    #
-    # Don't try to use scheduler.scale_noise here — the scheduler hasn't been
-    # configured with timesteps yet (that happens inside the pipeline call).
-    # Instead, just pass noise — the pipeline's prepare_latents will handle scaling.
-    # The callback will enforce the mask constraint at each step anyway.
-    initial_latents = noise
+    # --- 7. Initial latents ---
+    # Don't pass custom latents — let the pipeline generate its own noise via
+    # prepare_latents (each pipeline has different packing expectations).
+    # The callback handles content preservation by re-blending at each step.
+    initial_latents = None
 
-    emitter.info(f"Mask blend ready: shape={list(clean_latents.shape)}, "
+    emitter.info(f"Mask blend ready: packed={list(clean_latents_packed.shape)}, "
+                 f"raw={list(clean_latents.shape)}, "
                  f"scheduler={'flow-matching' if _is_flow_matching(pipe.scheduler) else 'DDPM'}")
 
-    callback = LatentMaskBlend(clean_latents, mask_latent, noise, pipe.scheduler)
+    callback = LatentMaskBlend(clean_latents_packed, mask_latent, noise_packed, pipe.scheduler)
     return initial_latents, callback
 
 
