@@ -218,7 +218,7 @@ const MODEL_PULL_EXAMPLES: &str = "\
 ";
 
 /// Inpainting method for `modl generate --mask`.
-#[derive(Clone, Debug, ValueEnum)]
+#[derive(Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum InpaintMethod {
     /// Auto-select: LanPaint for supported models, standard for others
     Auto,
@@ -226,6 +226,8 @@ pub enum InpaintMethod {
     Lanpaint,
     /// Standard diffusers inpainting or Flux Fill
     Standard,
+    /// Latent mask blend: universal inpaint via callback (works with any model)
+    MaskBlend,
 }
 
 /// Auth provider for `modl auth` command.
@@ -555,9 +557,16 @@ pub enum Commands {
         /// Denoising strength for img2img (0.0 = identical to input, 1.0 = fully new). Default: 0.75
         #[arg(long)]
         strength: Option<f32>,
-        /// Inpainting method: auto (default), lanpaint (training-free), standard (diffusers/Fill)
+        /// Inpainting method: auto, lanpaint, standard, mask-blend (universal, any model)
         #[arg(long, value_enum, default_value = "auto")]
         inpaint: InpaintMethod,
+        /// Condition image for split routing (sent to text encoder while init-image goes to VAE).
+        /// For outpainting: send clean original here, padded image as --init-image.
+        #[arg(long)]
+        condition_image: Option<String>,
+        /// Outpaint directions and amounts (e.g. "right=256", "right=256,bottom=128,feather=40")
+        #[arg(long)]
+        outpaint: Option<String>,
         /// Control image for ControlNet conditioning (can be repeated up to 2x)
         #[arg(long)]
         controlnet: Vec<String>,
@@ -1013,6 +1022,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             mask,
             strength,
             inpaint,
+            condition_image,
+            outpaint,
             controlnet,
             cn_strength,
             cn_end,
@@ -1040,6 +1051,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 mask: mask.as_deref(),
                 strength,
                 inpaint,
+                condition_image: condition_image.as_deref(),
+                outpaint: outpaint.as_deref(),
                 controlnet: &controlnet,
                 cn_strength: &cn_strength,
                 cn_end: &cn_end,

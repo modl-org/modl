@@ -215,6 +215,8 @@ pub struct GenerateArgs<'a> {
     pub mask: Option<&'a str>,
     pub strength: Option<f32>,
     pub inpaint: InpaintMethod,
+    pub condition_image: Option<&'a str>,
+    pub outpaint: Option<&'a str>,
     pub controlnet: &'a [String],
     pub cn_strength: &'a str,
     pub cn_end: &'a str,
@@ -247,6 +249,8 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
         mask,
         strength,
         inpaint,
+        condition_image,
+        outpaint,
         controlnet,
         cn_strength,
         cn_end,
@@ -276,9 +280,10 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
     let base_model_path = resolve_base_model_path(&base_model, &db);
 
     // -------------------------------------------------------------------
-    // Resolve size: explicit --size wins, otherwise use init-image dims
+    // Resolve size: explicit --size wins, otherwise use init-image dims.
+    // Note: for outpaint, size is re-derived from the padded image below.
     // -------------------------------------------------------------------
-    let (width, height) = if let Some(s) = size {
+    let (mut width, mut height) = if let Some(s) = size {
         resolve_size(s)?
     } else if let Some(path) = init_image {
         image_dimensions(path)?
@@ -337,26 +342,89 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
     };
 
     // -------------------------------------------------------------------
+    // Outpaint: auto-pad image, generate mask, set up split routing
+    // -------------------------------------------------------------------
+    let (effective_init_image, effective_mask, effective_condition_image, effective_outpaint) =
+        if let Some(outpaint_spec) = outpaint {
+            let src = init_image.context("--outpaint requires --init-image")?;
+            if !PathBuf::from(src).exists() {
+                anyhow::bail!("Init image not found: {src}");
+            }
+
+            let parsed = parse_outpaint_spec(outpaint_spec)?;
+
+            // Generate padded image and mask
+            let tmp_dir = crate::core::paths::modl_root().join("tmp");
+            std::fs::create_dir_all(&tmp_dir)?;
+
+            let (padded_path, mask_path) = generate_outpaint_images(src, &parsed, &tmp_dir)?;
+
+            // Update dimensions to match padded image (unless --size was explicit)
+            if size.is_none() {
+                let (pw, ph) = image_dimensions(&padded_path)?;
+                width = pw;
+                height = ph;
+            }
+
+            if !json {
+                println!(
+                    "  {} Outpaint: padded {}px (L={}, R={}, T={}, B={}, feather={})",
+                    style("↳").dim(),
+                    parsed.left + parsed.right + parsed.top + parsed.bottom,
+                    parsed.left,
+                    parsed.right,
+                    parsed.top,
+                    parsed.bottom,
+                    parsed.feather,
+                );
+            }
+
+            // Split routing: clean original → condition_image, padded → init_image
+            let cond = condition_image
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| src.to_string());
+
+            (
+                Some(padded_path),
+                Some(mask_path),
+                Some(cond),
+                Some(outpaint_spec.to_string()),
+            )
+        } else {
+            (
+                init_image.map(|s| s.to_string()),
+                mask.map(|s| s.to_string()),
+                condition_image.map(|s| s.to_string()),
+                None,
+            )
+        };
+
+    // -------------------------------------------------------------------
     // Validate img2img / inpainting paths + model capabilities
     // -------------------------------------------------------------------
-    if let Some(path) = init_image
+    if let Some(ref path) = effective_init_image
         && !PathBuf::from(path).exists()
     {
         anyhow::bail!("Init image not found: {path}");
     }
-    if let Some(path) = mask {
-        if init_image.is_none() {
+    if let Some(ref path) = effective_mask {
+        if effective_init_image.is_none() {
             anyhow::bail!("--mask requires --init-image");
         }
         if !PathBuf::from(path).exists() {
             anyhow::bail!("Mask image not found: {path}");
         }
     }
+    if let Some(ref path) = effective_condition_image
+        && !PathBuf::from(path).exists()
+    {
+        anyhow::bail!("Condition image not found: {path}");
+    }
 
     // Check model supports the requested mode
-    let mode = if mask.is_some() {
+    let mode = if effective_mask.is_some() {
         "inpaint"
-    } else if init_image.is_some() {
+    } else if effective_init_image.is_some() {
         "img2img"
     } else {
         "txt2img"
@@ -380,9 +448,15 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
                 }
                 Some("lanpaint")
             }
+            InpaintMethod::MaskBlend => {
+                // Mask blend works with any model — no capability check needed
+                Some("mask_blend")
+            }
             InpaintMethod::Auto => {
-                if supports_lanpaint && !supports_standard {
-                    // Model only supports LanPaint (e.g. Klein 9b)
+                if effective_outpaint.is_some() {
+                    // Outpaint always uses mask_blend (no dedicated inpaint pipeline)
+                    Some("mask_blend")
+                } else if supports_lanpaint && !supports_standard {
                     Some("lanpaint")
                 } else {
                     // Standard inpainting (with Flux Fill routing)
@@ -394,7 +468,7 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
                     let name = model_info.map_or(&base_model as &str, |m| m.name);
                     anyhow::bail!(
                         "{} does not support standard inpainting. \
-                         Try --inpaint lanpaint instead.",
+                         Try --inpaint lanpaint or --inpaint mask-blend instead.",
                         name
                     );
                 }
@@ -406,7 +480,7 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
     };
 
     // Smart inpaint routing: prefer dedicated fill models over generic Flux inpainting
-    // Skip fill routing when using LanPaint — it uses the base model directly
+    // Skip fill routing when using LanPaint or mask_blend — they use the base model directly
     let (effective_model, effective_path) =
         if mode == "inpaint" && resolved_inpaint_method.is_none() {
             resolve_inpaint_model(&base_model, &db)
@@ -414,7 +488,13 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
             (base_model.clone(), base_model_path)
         };
 
-    if let Err(msg) = model_family::validate_mode(&effective_model, mode) {
+    // mask_blend uses txt2img pipeline with callback — validate as txt2img
+    let validate_mode = if resolved_inpaint_method == Some("mask_blend") {
+        "txt2img"
+    } else {
+        mode
+    };
+    if let Err(msg) = model_family::validate_mode(&effective_model, validate_mode) {
         anyhow::bail!(msg);
     }
 
@@ -583,12 +663,14 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
             guidance,
             seed,
             count,
-            init_image: init_image.map(|s| s.to_string()),
-            mask: mask.map(|s| s.to_string()),
+            init_image: effective_init_image,
+            mask: effective_mask,
             strength,
             controlnet: cn_inputs,
             style_ref: style_inputs,
             inpaint_method: resolved_inpaint_method.map(|s| s.to_string()),
+            condition_image: effective_condition_image,
+            outpaint: effective_outpaint,
         },
         runtime: RuntimeRef {
             profile: "trainer-cu124".to_string(),
@@ -608,9 +690,15 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
     if !json {
         let mode_label = if resolved_inpaint_method == Some("lanpaint") {
             "LanPaint inpainting"
-        } else if mask.is_some() {
+        } else if resolved_inpaint_method == Some("mask_blend") {
+            if spec.params.outpaint.is_some() {
+                "outpaint (mask blend)"
+            } else {
+                "mask blend inpainting"
+            }
+        } else if spec.params.mask.is_some() {
             "inpainting"
-        } else if init_image.is_some() {
+        } else if spec.params.init_image.is_some() {
             "img2img"
         } else {
             "txt2img"
@@ -633,12 +721,15 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
         {
             println!("  LoRA:   {} (strength: {:.2})", lr.name, lr.weight);
         }
-        if let Some(path) = init_image {
+        if let Some(ref path) = spec.params.init_image {
             println!("  Init:   {}", path);
             println!("  Strength: {:.2}", strength.unwrap_or(0.75));
         }
-        if let Some(path) = mask {
+        if let Some(ref path) = spec.params.mask {
             println!("  Mask:   {}", path);
+        }
+        if let Some(ref path) = spec.params.condition_image {
+            println!("  Cond:   {} (split routing)", path);
         }
         for (i, cn) in spec.params.controlnet.iter().enumerate() {
             let label = if spec.params.controlnet.len() > 1 {
@@ -918,6 +1009,168 @@ async fn execute_generate(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Outpaint helpers
+// ---------------------------------------------------------------------------
+
+/// Parsed outpaint specification.
+struct OutpaintSpec {
+    left: u32,
+    right: u32,
+    top: u32,
+    bottom: u32,
+    feather: u32,
+}
+
+/// Parse an outpaint spec string like "right=256,bottom=128,feather=40".
+fn parse_outpaint_spec(spec: &str) -> Result<OutpaintSpec> {
+    let mut result = OutpaintSpec {
+        left: 0,
+        right: 0,
+        top: 0,
+        bottom: 0,
+        feather: 32,
+    };
+
+    for part in spec.split(',') {
+        let part = part.trim();
+        if let Some((key, val)) = part.split_once('=') {
+            let val: u32 = val
+                .trim()
+                .parse()
+                .with_context(|| format!("Invalid outpaint value: {key}={val}"))?;
+            match key.trim() {
+                "left" | "l" => result.left = val,
+                "right" | "r" => result.right = val,
+                "top" | "t" => result.top = val,
+                "bottom" | "b" => result.bottom = val,
+                "feather" | "f" => result.feather = val,
+                "all" | "a" => {
+                    result.left = val;
+                    result.right = val;
+                    result.top = val;
+                    result.bottom = val;
+                }
+                _ => anyhow::bail!(
+                    "Unknown outpaint key: '{key}'. Valid: left, right, top, bottom, feather, all"
+                ),
+            }
+        } else {
+            // Bare number = pad all sides equally
+            let val: u32 = part.parse().with_context(|| {
+                format!("Invalid outpaint spec: '{part}'. Use 'right=256' or '128' for all sides")
+            })?;
+            result.left = val;
+            result.right = val;
+            result.top = val;
+            result.bottom = val;
+        }
+    }
+
+    let total = result.left + result.right + result.top + result.bottom;
+    if total == 0 {
+        anyhow::bail!("Outpaint spec must add padding in at least one direction");
+    }
+
+    Ok(result)
+}
+
+/// Generate a padded image and feathered mask for outpainting.
+///
+/// Returns (padded_image_path, mask_path) as temp files.
+fn generate_outpaint_images(
+    source_path: &str,
+    spec: &OutpaintSpec,
+    tmp_dir: &std::path::Path,
+) -> Result<(String, String)> {
+    use image::{GenericImageView, ImageBuffer, Rgba, RgbaImage};
+
+    let src =
+        image::open(source_path).with_context(|| format!("Cannot open image: {source_path}"))?;
+    let (src_w, src_h) = src.dimensions();
+
+    let new_w = src_w + spec.left + spec.right;
+    let new_h = src_h + spec.top + spec.bottom;
+
+    // Create padded image (black padding)
+    let mut padded: RgbaImage = ImageBuffer::from_pixel(new_w, new_h, Rgba([0, 0, 0, 255]));
+    image::imageops::overlay(
+        &mut padded,
+        &src.to_rgba8(),
+        spec.left as i64,
+        spec.top as i64,
+    );
+
+    // Create mask: white = regenerate (padded area), black = preserve (original area)
+    let mut mask: ImageBuffer<image::Luma<u8>, Vec<u8>> =
+        ImageBuffer::from_pixel(new_w, new_h, image::Luma([255u8]));
+
+    // Fill the original image region with black (preserve)
+    for y in spec.top..(spec.top + src_h) {
+        for x in spec.left..(spec.left + src_w) {
+            mask.put_pixel(x, y, image::Luma([0u8]));
+        }
+    }
+
+    // Apply feathering: gradient at the boundary between original and padded
+    if spec.feather > 0 {
+        let feather = spec.feather as f32;
+        for y in 0..new_h {
+            for x in 0..new_w {
+                // Distance from the original image region (0 = inside, positive = outside)
+                let dx = if x < spec.left {
+                    spec.left - x
+                } else if x >= spec.left + src_w {
+                    x - (spec.left + src_w) + 1
+                } else {
+                    0
+                };
+                let dy = if y < spec.top {
+                    spec.top - y
+                } else if y >= spec.top + src_h {
+                    y - (spec.top + src_h) + 1
+                } else {
+                    0
+                };
+
+                // Inside original region but near the edge: create gradient
+                if dx == 0 && dy == 0 {
+                    let edge_dist_x = (x - spec.left).min(spec.left + src_w - 1 - x);
+                    let edge_dist_y = (y - spec.top).min(spec.top + src_h - 1 - y);
+                    let edge_dist = edge_dist_x.min(edge_dist_y) as f32;
+
+                    if edge_dist < feather {
+                        let t = edge_dist / feather;
+                        // Smooth gradient: 0 at edge → 255 at feather distance inside
+                        // Inverse: mask should be white (regenerate) near edge, black inside
+                        let v = ((1.0 - t) * 255.0) as u8;
+                        mask.put_pixel(x, y, image::Luma([v]));
+                    }
+                }
+            }
+        }
+    }
+
+    // Save to tmp files
+    let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let padded_path = tmp_dir
+        .join(format!("outpaint_padded_{timestamp}.png"))
+        .to_string_lossy()
+        .to_string();
+    let mask_path = tmp_dir
+        .join(format!("outpaint_mask_{timestamp}.png"))
+        .to_string_lossy()
+        .to_string();
+
+    padded
+        .save(&padded_path)
+        .context("Failed to save padded image")?;
+    mask.save(&mask_path)
+        .context("Failed to save outpaint mask")?;
+
+    Ok((padded_path, mask_path))
 }
 
 /// Resolve cloud provider from --provider flag or config default.

@@ -19,9 +19,11 @@ from pathlib import Path
 
 from modl_worker.protocol import EventEmitter
 from modl_worker.adapters.arch_config import (
+    detect_arch,
     resolve_pipeline_class_for_mode,
     resolve_gen_defaults,
 )
+from modl_worker.adapters.callbacks import build_step_callback
 
 # Re-exports for backward compatibility (moved to pipeline_loader)
 from modl_worker.adapters.pipeline_loader import (  # noqa: F401
@@ -85,13 +87,15 @@ def run_generate(config_path: Path, emitter: EventEmitter) -> int:
     base_model_path = model_info.get("base_model_path")
     lora_info = spec.get("lora")
 
-    # Detect generation mode for cold-start pipeline selection
+    # Detect generation mode for cold-start pipeline selection.
+    # mask_blend uses txt2img pipeline with a callback — not the inpaint pipeline.
     params = spec.get("params", {})
     init_image_path = params.get("init_image")
     mask_path = params.get("mask")
-    if mask_path and init_image_path:
+    use_mask_blend_cold = params.get("inpaint_method") == "mask_blend"
+    if mask_path and init_image_path and not use_mask_blend_cold:
         cold_mode = "inpaint"
-    elif init_image_path:
+    elif init_image_path and not use_mask_blend_cold:
         cold_mode = "img2img"
     else:
         cold_mode = "txt2img"
@@ -187,25 +191,31 @@ def run_generate_with_pipeline(
     init_image_path = params.get("init_image")
     mask_path = params.get("mask")
     strength = params.get("strength", 0.75)
+    inpaint_method = params.get("inpaint_method")
+    condition_image_path = params.get("condition_image")
 
     # Determine generation mode
-    if mask_path and init_image_path:
+    # mask_blend uses txt2img pipeline + callback, not the inpaint pipeline
+    use_mask_blend = inpaint_method == "mask_blend"
+    if mask_path and init_image_path and not use_mask_blend:
         mode = "inpaint"
-    elif init_image_path:
+    elif init_image_path and not use_mask_blend:
         mode = "img2img"
     else:
         mode = "txt2img"
 
-    # Load init image and mask if needed
+    # Load init image, mask, and condition image
     init_img = None
     mask_img = None
+    condition_img = None
     if init_image_path:
         init_img = load_image(init_image_path)
     if mask_path:
         mask_img = load_image(mask_path)
+    if condition_image_path:
+        condition_img = load_image(condition_image_path)
 
     # Detect architecture early (needed for ControlNet/style-ref loading)
-    from .arch_config import detect_arch
     arch = detect_arch(base_model_id)
 
     # ControlNet params
@@ -365,6 +375,46 @@ def run_generate_with_pipeline(
                             device=ctrl_latent.device, dtype=ctrl_latent.dtype),
             ], dim=1)
         _cn_wrapper.set_control(list(ctrl_latent.unbind(dim=0)), scale=pending["scale"])
+
+    # -------------------------------------------------------------------
+    # Step callback infrastructure (latent-space primitives)
+    # -------------------------------------------------------------------
+    callback_primitives = []
+
+    # Latent mask blend: universal inpainting via per-step callback.
+    # Returns (initial_latents, callback) — we pass initial_latents to the
+    # pipeline and the callback handles per-step re-blending.
+    if use_mask_blend and init_img is not None and mask_img is not None:
+        from .callbacks import prepare_mask_blend
+
+        initial_latents, mask_blend_cb = prepare_mask_blend(
+            pipe, init_img, mask_img, generator, arch, width, height, emitter,
+        )
+        callback_primitives.append(mask_blend_cb)
+        # initial_latents may be None (let pipeline generate noise) or pre-filled
+        if initial_latents is not None:
+            gen_kwargs["latents"] = initial_latents
+
+    # Per-step progress for long inference runs
+    if steps >= 20:
+        from .callbacks import StepProgress
+        callback_primitives.append(StepProgress(emitter, steps, 0, count))
+
+    callback_fn, callback_inputs = build_step_callback(callback_primitives)
+    if callback_fn is not None:
+        gen_kwargs["callback_on_step_end"] = callback_fn
+        gen_kwargs["callback_on_step_end_tensor_inputs"] = callback_inputs
+
+    # -------------------------------------------------------------------
+    # Split image routing: condition_image → text encoder, init_image → VAE
+    # -------------------------------------------------------------------
+    if condition_img is not None and use_mask_blend:
+        # For vision-conditioned models (Qwen-Image-Edit, Klein), the
+        # condition_image goes to the pipeline's `image` param (vision encoder)
+        # while init_image is already VAE-encoded in the mask_blend primitive.
+        if arch in ("qwen_image", "qwen_image_edit", "flux2_klein", "flux2_klein_9b"):
+            gen_kwargs["image"] = condition_img
+            emitter.info("Split routing: condition_image → vision encoder, init_image → VAE (mask blend)")
 
     artifact_paths = []
 

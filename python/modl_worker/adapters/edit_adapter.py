@@ -74,6 +74,7 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
     seed = params.get("seed")
     count = params.get("count", 1)
     image_paths = params.get("image_paths", [])
+    condition_image_path = params.get("condition_image")
 
     if not image_paths:
         emitter.error("NO_IMAGES", "No input images provided", recoverable=False)
@@ -98,6 +99,15 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
     if seed is not None:
         generator.manual_seed(seed)
 
+    # Load condition image for split routing (if provided)
+    condition_img = None
+    if condition_image_path:
+        try:
+            condition_img = load_image(condition_image_path)
+            emitter.info(f"Loaded condition image: {condition_image_path} ({condition_img.size[0]}x{condition_img.size[1]})")
+        except Exception as exc:
+            emitter.warning("CONDITION_IMAGE_FAILED", f"Failed to load condition image: {exc}")
+
     # Build inference kwargs — different pipelines need different params
     from .arch_config import detect_arch
     arch = detect_arch(base_model_id)
@@ -106,24 +116,38 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
         # Klein: native image editing via the `image` parameter.
         # Supports multiple input images (e.g. source + reference).
         # No guidance (distilled), no negative prompt.
+        #
+        # Split routing: if condition_image is set, it goes to `image` (vision encoder)
+        # while the original source_images are used elsewhere.
+        vision_input = condition_img if condition_img is not None else (
+            source_images if len(source_images) > 1 else source_images[0]
+        )
         gen_kwargs = {
-            "image": source_images if len(source_images) > 1 else source_images[0],
+            "image": vision_input,
             "prompt": prompt,
             "num_inference_steps": steps,
             "height": source_images[0].size[1],
             "width": source_images[0].size[0],
             "generator": generator,
         }
+        if condition_img is not None:
+            emitter.info("Split routing: condition_image → vision encoder")
     else:
         # Qwen-Image-Edit: instruction-based editing with true CFG.
+        # Split routing: condition_image → `image` (vision encoder)
+        vision_input = condition_img if condition_img is not None else (
+            source_images if len(source_images) > 1 else source_images[0]
+        )
         gen_kwargs = {
-            "image": source_images if len(source_images) > 1 else source_images[0],
+            "image": vision_input,
             "prompt": prompt,
             "true_cfg_scale": guidance,
             "negative_prompt": " ",
             "num_inference_steps": steps,
             "generator": generator,
         }
+        if condition_img is not None:
+            emitter.info("Split routing: condition_image → vision encoder")
 
     artifact_paths = []
 

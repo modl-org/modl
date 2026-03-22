@@ -400,9 +400,16 @@ pub struct GenerateParams {
     /// Style reference inputs (IP-Adapter or native multi-ref)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub style_ref: Vec<StyleRefInput>,
-    /// Inpainting method: "standard" (diffusers/Flux Fill) or "lanpaint" (training-free)
+    /// Inpainting method: "standard" (diffusers/Flux Fill), "lanpaint", or "mask_blend"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inpaint_method: Option<String>,
+    /// Condition image for split routing: sent to text encoder / vision encoder
+    /// while init_image goes to VAE. Used for outpainting with vision-conditioned models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition_image: Option<String>,
+    /// Outpaint spec: directions and feather (e.g. "right=256,bottom=128,feather=40")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outpaint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
