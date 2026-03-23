@@ -277,7 +277,7 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
     execute_edit(spec, cloud, provider, no_worker, json).await
 }
 
-async fn execute_edit(
+pub async fn execute_edit(
     spec: EditJobSpec,
     cloud: bool,
     provider: Option<CloudProvider>,
