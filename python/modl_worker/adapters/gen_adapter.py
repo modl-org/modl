@@ -371,6 +371,14 @@ def run_generate_with_pipeline(
     for i in range(count):
         t0 = time.time()
 
+        def _step_callback(pipe_self, step_idx, timestep, callback_kwargs):
+            emitter.progress(stage="step", step=step_idx + 1, total_steps=steps)
+            return callback_kwargs
+
+        import inspect
+        if "callback_on_step_end" in inspect.signature(pipe.__call__).parameters:
+            gen_kwargs["callback_on_step_end"] = _step_callback
+
         try:
             result = pipe(**gen_kwargs)
             image = result.images[0]

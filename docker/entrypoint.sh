@@ -19,4 +19,4 @@ if [ -n "$MODEL" ]; then
     fi
 fi
 
-exec modl serve --foreground --port "${PORT:-3333}"
+exec modl serve --foreground --port "${PORT:-3939}"

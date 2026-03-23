@@ -14,9 +14,9 @@ pub async fn run(comfyui: Option<&str>, a1111: Option<&str>) -> Result<()> {
     if comfyui.is_none() && a1111.is_none() {
         anyhow::bail!(
             "Specify a tool to link:\n\n  \
-             modl link ~/ComfyUI\n  \
-             modl link --comfyui ~/ComfyUI\n  \
-             modl link --a1111 ~/stable-diffusion-webui\n\n\
+             modl system link ~/ComfyUI\n  \
+             modl system link --comfyui ~/ComfyUI\n  \
+             modl system link --a1111 ~/stable-diffusion-webui\n\n\
              This scans the tool's model folders and adopts recognized files into the modl store."
         );
     }

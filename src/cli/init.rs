@@ -273,11 +273,11 @@ fn detect_tool_targets() -> Result<Vec<TargetConfig>> {
         println!("  Can't find your install? Add it manually with:");
         println!(
             "    {}",
-            style("modl link --comfyui /path/to/ComfyUI").cyan()
+            style("modl system link --comfyui /path/to/ComfyUI").cyan()
         );
         println!(
             "    {}",
-            style("modl link --a1111 /path/to/stable-diffusion-webui").cyan()
+            style("modl system link --a1111 /path/to/stable-diffusion-webui").cyan()
         );
     } else {
         let labels: Vec<String> = detected
@@ -458,7 +458,7 @@ async fn offer_service_install() -> Result<()> {
         return Ok(());
     }
 
-    super::serve::install_service(3333).await?;
+    super::serve::install_service(3939).await?;
     Ok(())
 }
 

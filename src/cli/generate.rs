@@ -118,6 +118,28 @@ fn resolve_lora(name: &str, weight: f32, db: &Database) -> Result<Option<LoraRef
     );
 }
 
+/// Pick the best installed generation model, falling back to "flux-schnell".
+fn default_generation_model(db: &Database) -> String {
+    let gen_types = ["checkpoint", "diffusion_model"];
+    if let Ok(installed) = db.list_installed(None) {
+        let gen_models: Vec<_> = installed
+            .iter()
+            .filter(|m| gen_types.contains(&m.asset_type.as_str()))
+            .collect();
+        if gen_models.len() == 1 {
+            return gen_models[0].id.clone();
+        }
+        // Multiple installed: prefer flux-schnell if present, else first
+        if !gen_models.is_empty() {
+            if let Some(m) = gen_models.iter().find(|m| m.id == "flux-schnell") {
+                return m.id.clone();
+            }
+            return gen_models[0].id.clone();
+        }
+    }
+    "flux-schnell".to_string()
+}
+
 /// Default inference steps based on model type.
 fn default_steps(base_model: &str) -> u32 {
     model_family::model_defaults(base_model).0
@@ -265,7 +287,10 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
     // -------------------------------------------------------------------
     // Resolve base model
     // -------------------------------------------------------------------
-    let base_model = base.unwrap_or("flux-schnell").to_string();
+    let base_model = match base {
+        Some(b) => b.to_string(),
+        None => default_generation_model(&db),
+    };
 
     // -------------------------------------------------------------------
     // Pre-flight checks (fail fast with actionable hints)
@@ -750,10 +775,10 @@ async fn execute_generate(
     let pb = if json {
         ProgressBar::hidden()
     } else {
-        let pb = ProgressBar::new(spec.params.count as u64);
+        let pb = ProgressBar::new(spec.params.steps as u64);
         pb.set_style(
             ProgressStyle::with_template(
-                "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} images {msg}",
+                "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} steps {msg}",
             )?
             .progress_chars("█▓░"),
         );
@@ -772,10 +797,21 @@ async fn execute_generate(
     for event in rx {
         match &event.event {
             EventPayload::Progress {
-                step, total_steps, ..
+                stage,
+                step,
+                total_steps,
+                ..
             } => {
-                pb.set_length(*total_steps as u64);
-                pb.set_position(*step as u64);
+                if stage == "step" {
+                    pb.set_length(*total_steps as u64);
+                    pb.set_position(*step as u64);
+                } else if stage == "generate" {
+                    // Image completed — reset bar for next image
+                    if *step < *total_steps {
+                        pb.set_position(0);
+                        pb.set_message(format!("(image {}/{})", step + 1, total_steps));
+                    }
+                }
             }
             EventPayload::Artifact {
                 path,

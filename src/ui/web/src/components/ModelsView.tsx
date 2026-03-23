@@ -396,7 +396,7 @@ export function ModelsView() {
           <>
             This will uninstall the model and remove its symlinks.
             {deleteTarget?.model_type !== 'lora' && (
-              <> The store file is kept until you run <code>modl gc</code>.</>
+              <> The store file is kept until you run <code>modl system gc</code>.</>
             )}
             {deleteTarget?.model_type === 'lora' && deleteTarget?.id.startsWith('train:') && (
               <> This will also delete training output (samples, logs, config).</>

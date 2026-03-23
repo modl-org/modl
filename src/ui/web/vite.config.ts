@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { fileURLToPath, URL } from 'node:url'
 
-const proxyTarget = process.env.MODL_DEV_PROXY ?? 'http://localhost:3333'
+const proxyTarget = process.env.MODL_DEV_PROXY ?? 'http://localhost:3939'
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],

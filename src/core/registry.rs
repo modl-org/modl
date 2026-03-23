@@ -27,7 +27,7 @@ impl RegistryIndex {
     pub fn load() -> Result<Self> {
         let path = Self::local_path();
         if !path.exists() {
-            anyhow::bail!("Registry index not found. Run `modl update` to fetch it.");
+            anyhow::bail!("Registry index not found. Run `modl system update` to fetch it.");
         }
         let contents = std::fs::read_to_string(&path).context("Failed to read registry index")?;
         let index: RegistryIndex =

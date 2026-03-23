@@ -62,7 +62,7 @@ pub async fn run(id: &str, force: bool) -> Result<()> {
         println!(
             "  {} Store file kept — run {} to reclaim space",
             style("i").dim(),
-            style("modl gc").cyan()
+            style("modl system gc").cyan()
         );
     }
 

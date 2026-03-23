@@ -17,6 +17,6 @@ RUN modl runtime bootstrap
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-EXPOSE 3333
+EXPOSE 3939
 
 ENTRYPOINT ["/entrypoint.sh"]

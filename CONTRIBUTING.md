@@ -86,14 +86,14 @@ The web UI lives in `src/ui/web/` (React + Vite + Tailwind). Assets are embedded
 ./scripts/dev.sh
 ```
 
-This single script builds the CLI, starts the persistent GPU worker (model caching), the backend API on `:3333`, and the Vite dev server on `:5173`. Open **http://localhost:5173**. Ctrl+C stops everything.
+This single script builds the CLI, starts the persistent GPU worker (model caching), the backend API on `:3939`, and the Vite dev server on `:5173`. Open **http://localhost:5173**. Ctrl+C stops everything.
 
 Use `./scripts/dev.sh --no-worker` if you don't have a GPU or don't need generation.
 
 ### Manual setup (if you prefer separate terminals)
 
 ```bash
-# Terminal 1: run the Rust backend (API + file server on :3333)
+# Terminal 1: run the Rust backend (API + file server on :3939)
 modl serve
 
 # Terminal 2: run Vite dev server with hot-reload on :5173
@@ -115,7 +115,7 @@ modl worker stop               # graceful shutdown, frees VRAM
 
 When the worker is running, `modl gen` and the web UI automatically use it. Use `modl gen --no-worker` to force a cold start.
 
-Open **http://localhost:5173** (not :3333). Vite proxies `/api` and `/files` requests to the backend automatically.
+Open **http://localhost:5173** (not :3939). Vite proxies `/api` and `/files` requests to the backend automatically.
 
 When you're ready to commit, build the production bundle and recompile:
 

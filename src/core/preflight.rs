@@ -26,38 +26,6 @@ pub fn check_runtime() -> Result<()> {
     Ok(())
 }
 
-/// Check that a generation-capable runtime is available.
-///
-/// Accepts either the lightweight generator profile or the full trainer
-/// profile (which is a superset). If neither is bootstrapped but the
-/// runtime lock exists, we pass — `setup_generation()` will finish it.
-pub fn check_generation_runtime() -> Result<()> {
-    // Either profile is sufficient for generation
-    if runtime::is_profile_ready("generator").unwrap_or(false) {
-        return Ok(());
-    }
-    if runtime::is_profile_ready("trainer-cu124").unwrap_or(false) {
-        return Ok(());
-    }
-
-    // Lock file exists with a compatible profile — setup_generation will
-    // complete the bootstrap
-    let status = runtime::status()?;
-    if status.installed {
-        let lock_profile = status.profile.as_deref().unwrap_or("");
-        if lock_profile == "generator" || lock_profile == "trainer-cu124" {
-            return Ok(());
-        }
-    }
-
-    bail!(
-        "Python runtime is not installed.\n\n\
-         Run this first:\n\n  \
-         modl runtime install\n\n\
-         This installs a managed Python environment with PyTorch and diffusers."
-    );
-}
-
 /// Check that a base model is installed locally.
 ///
 /// Skips the check if the model ID looks like a local path (contains `/`).
@@ -224,7 +192,7 @@ pub fn for_training(base_model_id: &str) -> Result<()> {
 /// Uses the lightweight generation runtime check — does not require
 /// ai-toolkit, only Python + PyTorch + diffusers.
 pub fn for_generation(base_model_id: &str) -> Result<()> {
-    check_generation_runtime()?;
+    // Runtime check removed — setup_generation() auto-installs + bootstraps
     check_base_model(base_model_id)?;
     check_dependencies(base_model_id)?;
     check_auth_if_gated(base_model_id)?;

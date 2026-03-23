@@ -881,7 +881,7 @@ pub enum Commands {
     /// Launch the web UI
     Serve {
         /// Port to bind the preview server on
-        #[arg(long, default_value = "3333")]
+        #[arg(long, default_value = "3939")]
         port: u16,
         /// Don't auto-open the browser
         #[arg(long)]

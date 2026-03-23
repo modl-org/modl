@@ -197,6 +197,41 @@ def _prepare_fp8_model(model):
 
 
 
+def _strip_comfy_prefix(checkpoint, **kwargs):
+    """Strip 'model.diffusion_model.' prefix from ComfyUI checkpoint keys.
+
+    Generic fallback for models whose ComfyUI key names match diffusers
+    exactly after removing the prefix (e.g. QwenImage).
+    """
+    PREFIX = "model.diffusion_model."
+    return {
+        (k[len(PREFIX):] if k.startswith(PREFIX) else k): v
+        for k, v in checkpoint.items()
+    }
+
+
+def _get_checkpoint_converter(model_class_name: str):
+    """Get the right ComfyUI→diffusers key converter for a transformer class.
+
+    Models with complex key remapping (Flux, Chroma, Z-Image) have dedicated
+    converters in diffusers.  Models whose ComfyUI keys match diffusers after
+    prefix stripping (QwenImage) use the generic ``_strip_comfy_prefix``.
+    """
+    _CONVERTER_MAP = {
+        "FluxTransformer2DModel": "convert_flux_transformer_checkpoint_to_diffusers",
+        "Flux2Transformer2DModel": "convert_flux2_transformer_checkpoint_to_diffusers",
+        "ChromaTransformer2DModel": "convert_chroma_transformer_checkpoint_to_diffusers",
+        "ZImageTransformer2DModel": "convert_z_image_transformer_checkpoint_to_diffusers",
+    }
+    fn_name = _CONVERTER_MAP.get(model_class_name)
+    if fn_name is not None:
+        import importlib
+        sfu = importlib.import_module("diffusers.loaders.single_file_utils")
+        return getattr(sfu, fn_name)
+    # Fallback: generic prefix strip
+    return _strip_comfy_prefix
+
+
 def _detect_weight_dtype(filepath: str) -> str:
     """Detect the dominant weight dtype from a safetensors file header.
 
@@ -369,17 +404,7 @@ def assemble_pipeline(
                     # Layerwise casting (fp8 storage, bf16 compute) is applied
                     # AFTER enable_model_cpu_offload so hooks fire in the
                     # right order: move-to-GPU → cast-fp8→bf16 → forward.
-                    # Pick the right key converter for the model architecture.
-                    if model_class_name == "FluxTransformer2DModel":
-                        from diffusers.loaders.single_file_utils import (
-                            convert_flux_transformer_checkpoint_to_diffusers,
-                        )
-                        convert_fn = convert_flux_transformer_checkpoint_to_diffusers
-                    else:
-                        from diffusers.loaders.single_file_utils import (
-                            convert_flux2_transformer_checkpoint_to_diffusers,
-                        )
-                        convert_fn = convert_flux2_transformer_checkpoint_to_diffusers
+                    convert_fn = _get_checkpoint_converter(model_class_name)
                     config_dict = ModelClass.load_config(str(config_dir))
                     with init_empty_weights():
                         model = ModelClass.from_config(config_dict)
@@ -402,16 +427,7 @@ def assemble_pipeline(
                     # from_single_file (it would re-read the raw fp8 file
                     # and choke on scale tensors). Use from_config +
                     # load_state_dict with the dequantized checkpoint.
-                    if model_class_name == "FluxTransformer2DModel":
-                        from diffusers.loaders.single_file_utils import (
-                            convert_flux_transformer_checkpoint_to_diffusers,
-                        )
-                        convert_fn = convert_flux_transformer_checkpoint_to_diffusers
-                    else:
-                        from diffusers.loaders.single_file_utils import (
-                            convert_flux2_transformer_checkpoint_to_diffusers,
-                        )
-                        convert_fn = convert_flux2_transformer_checkpoint_to_diffusers
+                    convert_fn = _get_checkpoint_converter(model_class_name)
                     config_dict = ModelClass.load_config(str(config_dir))
                     with init_empty_weights():
                         model = ModelClass.from_config(config_dict)
@@ -426,13 +442,22 @@ def assemble_pipeline(
                         f"  → Loaded dequantized fp8 → {dtype} via from_config"
                     )
                 else:
+                    # Clean bf16/fp16 safetensors — convert keys and load
+                    # via from_config (avoids diffusers from_single_file
+                    # bugs where the checkpoint_mapping_fn is identity).
+                    convert_fn = _get_checkpoint_converter(model_class_name)
+                    config_dict = ModelClass.load_config(str(config_dir))
+                    with init_empty_weights():
+                        model = ModelClass.from_config(config_dict)
+                    converted = convert_fn(checkpoint)
+                    del checkpoint
+                    model.load_state_dict(converted, strict=False, assign=True)
+                    del converted
+                    _materialize_meta_tensors(model)
                     dtype = get_inference_dtype()
-                    model = ModelClass.from_single_file(
-                        base_model_path, config=str(config_dir),
-                        torch_dtype=dtype,
-                    )
+                    model = model.to(dtype)
                     emitter.info(
-                        f"  → Loaded via from_single_file ({dtype})"
+                        f"  → Loaded via from_config + convert ({dtype})"
                     )
 
             # Apply fp8 layerwise casting to reduce VRAM: weights stored in

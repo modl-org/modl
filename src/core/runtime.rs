@@ -514,13 +514,13 @@ fn write_profile_requirements_if_missing(root: &Path, profile: &str) -> Result<(
 
     let content = match profile {
         "trainer-cu124" => {
-            "# Additional trainer-cu124 requirements (base torch + ai-toolkit are installed by bootstrap logic)\naccelerate>=0.33\nsafetensors>=0.5\ntransformers>=4.51\ndiffusers>=0.37.0\npillow>=10.0\nspandrel>=0.4\n"
+            "# Additional trainer-cu124 requirements (base torch + ai-toolkit are installed by bootstrap logic)\naccelerate>=0.33\nsafetensors>=0.5\ntransformers>=4.51\ndiffusers>=0.37.0\npillow>=10.0\nspandrel>=0.4\ngguf>=0.10.0\n"
         }
         "inference-cu124" => {
             "# Runtime profile requirements for inference-cu124\nspandrel>=0.4\ninsightface>=0.7\n"
         }
         "generator" => {
-            "# Lightweight generation profile (no ai-toolkit, MPS-compatible on macOS)\naccelerate>=0.33\nsafetensors>=0.5\ntransformers>=4.51\ndiffusers>=0.37.0\npillow>=10.0\nspandrel>=0.4\nsentencepiece>=0.2\nprotobuf>=5.0\n"
+            "# Lightweight generation profile (no ai-toolkit, MPS-compatible on macOS)\naccelerate>=0.33\nsafetensors>=0.5\ntransformers>=4.51\ndiffusers>=0.37.0\npillow>=10.0\nspandrel>=0.4\nsentencepiece>=0.2\nprotobuf>=5.0\ngguf>=0.10.0\n"
         }
         _ => "# Runtime profile requirements\n\n",
     };
@@ -870,7 +870,16 @@ async fn install_managed_python(root: &Path, profile: &str) -> Result<()> {
         return Ok(());
     }
 
-    // Neither worked — surface the download error
+    // Neither worked — surface the download error or report missing binary
+    if download_result.is_ok() {
+        bail!(
+            "Managed Python download succeeded but binary not found at {}. \
+             No suitable system Python (>=3.11) found as fallback. \
+             Install Python 3.11+ or set {} to a valid CPython artifact URL.",
+            managed_python.display(),
+            PYTHON_ARTIFACT_URL_ENV,
+        );
+    }
     download_result.with_context(
         || "Failed to install managed Python and no suitable system Python (>=3.11) found",
     )?;
@@ -917,7 +926,12 @@ async fn download_managed_python(root: &Path, profile: &str) -> Result<()> {
     // python-build-standalone extracts to python/ — rename to PYTHON_VERSION/
     let extracted_dir = python_dir.join("python");
     let target_dir = python_dir.join(PYTHON_VERSION);
-    if extracted_dir.exists() && !target_dir.exists() {
+    if extracted_dir.exists() {
+        // ensure_layout may have pre-created an empty target dir — remove it so rename works
+        if target_dir.exists() {
+            fs::remove_dir_all(&target_dir)
+                .with_context(|| format!("Failed to remove {}", target_dir.display()))?;
+        }
         fs::rename(&extracted_dir, &target_dir).with_context(|| {
             format!(
                 "Failed to rename {} -> {}",
@@ -953,7 +967,10 @@ async fn download_managed_python(root: &Path, profile: &str) -> Result<()> {
 fn find_system_python() -> Option<PathBuf> {
     // Try python3.12, python3.11, then python3
     for candidate in &["python3.12", "python3.11", "python3"] {
-        let output = Command::new(candidate).arg("--version").output().ok()?;
+        let output = match Command::new(candidate).arg("--version").output() {
+            Ok(o) => o,
+            Err(_) => continue,
+        };
         if !output.status.success() {
             continue;
         }

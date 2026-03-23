@@ -19,7 +19,7 @@ pub fn create(link: &Path, target: &Path) -> Result<()> {
     } else if link.exists() {
         // Real file exists — don't overwrite
         anyhow::bail!(
-            "File already exists at {} (not a symlink). Use `modl link` to register it.",
+            "File already exists at {} (not a symlink). Use `modl system link` to register it.",
             link.display()
         );
     }

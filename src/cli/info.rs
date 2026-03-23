@@ -180,7 +180,7 @@ fn show_registry_model(
 fn show_trained_artifact(db: &Database, query: &str) -> Result<()> {
     let artifact = db.find_artifact(query)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "'{}' not found in registry or trained outputs. Run `modl update` first?",
+            "'{}' not found in registry or trained outputs. Run `modl system update` first?",
             query
         )
     })?;

@@ -53,7 +53,7 @@ This installs modl, pulls a starter model, and launches the web UI.
 modl serve
 ```
 
-Generate, train, browse outputs, and manage models from the browser at `http://localhost:3333`. Same engine as the CLI.
+Generate, train, browse outputs, and manage models from the browser at `http://localhost:3939`. Same engine as the CLI.
 
 ![modl web UI — generate tab](https://modl.run/ui-generate-lora.webp)
 
@@ -162,7 +162,7 @@ modl scans your model folders, hashes files, and moves recognized models into th
 ## Docker
 
 ```bash
-docker run --gpus all -p 3333:3333 -v modl-data:/workspace ghcr.io/modl-org/modl:latest
+docker run --gpus all -p 3939:3939 -v modl-data:/workspace ghcr.io/modl-org/modl:latest
 ```
 
 Set `MODEL=flux-schnell` to auto-pull a model on first boot. Models persist on the volume across restarts.
