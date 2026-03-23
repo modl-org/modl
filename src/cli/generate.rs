@@ -299,8 +299,12 @@ fn parse_outpaint(spec: &str) -> Result<OutpaintSpec> {
     })
 }
 
-/// Pad an image for outpainting using mirror-reflection at edges.
-/// Returns the path to the saved padded image.
+/// Pad an image for outpainting by extending edge pixels with a gradient blur.
+///
+/// Strategy: fill padded areas by repeating the nearest edge pixel, then
+/// apply a progressive gaussian blur so content fades smoothly away from
+/// the original edges. This avoids the mirror-symmetry artifacts that
+/// reflected padding can produce.
 fn pad_image_for_outpaint(
     init_image_path: &str,
     spec: &OutpaintSpec,
@@ -322,31 +326,25 @@ fn pad_image_for_outpaint(
         }
     }
 
-    // Mirror-reflect into padded areas
+    // Fill padded areas with nearest edge pixel (edge-extend / clamp)
     for y in 0..new_h {
         for x in 0..new_w {
-            // Skip the original image region
             if x >= spec.left && x < spec.left + orig_w && y >= spec.top && y < spec.top + orig_h {
                 continue;
             }
 
-            // Map to source coordinates via reflection
             let src_x = if x < spec.left {
-                // Left padding: reflect
-                (spec.left - 1 - x).min(orig_w - 1)
+                0
             } else if x >= spec.left + orig_w {
-                // Right padding: reflect
-                let dist = x - (spec.left + orig_w - 1);
-                orig_w.saturating_sub(1 + dist.min(orig_w - 1))
+                orig_w - 1
             } else {
                 x - spec.left
             };
 
             let src_y = if y < spec.top {
-                (spec.top - 1 - y).min(orig_h - 1)
+                0
             } else if y >= spec.top + orig_h {
-                let dist = y - (spec.top + orig_h - 1);
-                orig_h.saturating_sub(1 + dist.min(orig_h - 1))
+                orig_h - 1
             } else {
                 y - spec.top
             };
@@ -355,12 +353,27 @@ fn pad_image_for_outpaint(
         }
     }
 
+    // Apply gaussian blur to the padded image, then paste original back on top.
+    // This creates a smooth, blurry transition in the padded areas while keeping
+    // the original pixel-perfect.
+    let max_pad = spec.left.max(spec.right).max(spec.top).max(spec.bottom);
+    let blur_sigma = (max_pad as f32 / 4.0).max(8.0);
+    let blurred = image::DynamicImage::ImageRgb8(padded).blur(blur_sigma);
+    let mut result = blurred.to_rgb8();
+
+    // Paste original back (sharp, untouched)
+    for y in 0..orig_h {
+        for x in 0..orig_w {
+            result.put_pixel(x + spec.left, y + spec.top, *rgb.get_pixel(x, y));
+        }
+    }
+
     // Save to tmp
     let tmp_dir = crate::core::paths::modl_root().join("tmp");
     std::fs::create_dir_all(&tmp_dir)?;
     let filename = format!("outpaint_{}.png", chrono::Utc::now().timestamp_millis());
     let dest = tmp_dir.join(&filename);
-    padded
+    result
         .save(&dest)
         .with_context(|| format!("Failed to save padded image to {}", dest.display()))?;
 
