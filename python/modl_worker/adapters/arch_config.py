@@ -502,7 +502,7 @@ ARCH_CONFIGS: dict[str, dict] = {
             },
             "scheduler": {
                 "model_class": "FlowMatchEulerDiscreteScheduler",
-                "config_dir": "qwen-image-scheduler",
+                "config_dir": "qwen-image-edit-scheduler",
             },
         },
         "model_flags": {

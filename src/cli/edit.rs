@@ -21,6 +21,7 @@ pub struct EditArgs<'a> {
     pub steps: Option<u32>,
     pub guidance: Option<f32>,
     pub count: u32,
+    pub size: Option<&'a str>,
     pub fast: bool,
     pub cloud: bool,
     pub provider: Option<CloudProvider>,
@@ -117,6 +118,30 @@ fn resolve_lora(name: &str, weight: f32, db: &Database) -> Result<Option<LoraRef
     Ok(None)
 }
 
+const SIZE_PRESETS: &[(&str, u32, u32)] = &[
+    ("1:1", 1024, 1024),
+    ("16:9", 1344, 768),
+    ("9:16", 768, 1344),
+    ("4:3", 1152, 896),
+    ("3:4", 896, 1152),
+];
+
+fn resolve_edit_size(size: &str) -> Result<(u32, u32)> {
+    for &(name, w, h) in SIZE_PRESETS {
+        if size == name {
+            return Ok((w, h));
+        }
+    }
+    if let Some((w, h)) = size.split_once('x') {
+        let w: u32 = w.parse().context("Invalid width in size")?;
+        let h: u32 = h.parse().context("Invalid height in size")?;
+        return Ok((w, h));
+    }
+    anyhow::bail!(
+        "Unknown size: {size}. Use a preset (1:1, 16:9, 9:16, 4:3, 3:4) or WxH (e.g. 1820x1024)"
+    );
+}
+
 pub async fn run(args: EditArgs<'_>) -> Result<()> {
     let db = Database::open()?;
 
@@ -128,6 +153,7 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
         steps,
         guidance,
         count,
+        size,
         fast,
         cloud,
         provider,
@@ -216,6 +242,15 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
     let guidance = guidance.or(fast_guidance).unwrap_or(default_guidance);
 
     // -------------------------------------------------------------------
+    // Resolve output size (for outpainting)
+    // -------------------------------------------------------------------
+    let output_size: Option<(u32, u32)> = if let Some(s) = size {
+        Some(resolve_edit_size(s)?)
+    } else {
+        None
+    };
+
+    // -------------------------------------------------------------------
     // Build spec
     // -------------------------------------------------------------------
     let spec = EditJobSpec {
@@ -234,6 +269,8 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
             guidance,
             seed,
             count,
+            width: output_size.map(|(w, _)| w),
+            height: output_size.map(|(_, h)| h),
         },
         runtime: RuntimeRef {
             profile: runtime::resolved_generation_profile().to_string(),

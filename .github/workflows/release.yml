@@ -76,16 +76,22 @@ jobs:
       - name: Package (Unix)
         if: matrix.archive == 'tar.gz'
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../modl-${{ github.ref_name }}-${{ matrix.target }}.tar.gz modl
-          cd ../../..
+          mkdir -p staging/python
+          cp target/${{ matrix.target }}/release/modl staging/
+          rsync -a --exclude='__pycache__' python/modl_worker/ staging/python/modl_worker/
+          cd staging
+          tar czf ../modl-${{ github.ref_name }}-${{ matrix.target }}.tar.gz modl python/
+          cd ..
 
       # Package — Windows
       - name: Package (Windows)
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          Compress-Archive -Path "target/${{ matrix.target }}/release/modl.exe" -DestinationPath "modl-${{ github.ref_name }}-${{ matrix.target }}.zip"
+          New-Item -ItemType Directory -Force -Path staging/python
+          Copy-Item "target/${{ matrix.target }}/release/modl.exe" staging/
+          Copy-Item -Recurse python/modl_worker staging/python/modl_worker
+          Compress-Archive -Path "staging/*" -DestinationPath "modl-${{ github.ref_name }}-${{ matrix.target }}.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

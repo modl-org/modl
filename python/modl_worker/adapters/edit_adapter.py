@@ -123,6 +123,11 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
             "num_inference_steps": steps,
             "generator": generator,
         }
+        # Optional output dimensions (for outpainting — larger than source)
+        if params.get("width"):
+            gen_kwargs["width"] = params["width"]
+        if params.get("height"):
+            gen_kwargs["height"] = params["height"]
 
     artifact_paths = []
 

@@ -111,7 +111,7 @@ fi
 
 tar xzf "$TMPDIR/${ASSET}" -C "$TMPDIR"
 
-# Install
+# Install binary
 if [ -w "$INSTALL_DIR" ]; then
     mv "$TMPDIR/modl" "$INSTALL_DIR/modl"
 else
@@ -120,6 +120,18 @@ else
 fi
 
 chmod +x "$INSTALL_DIR/modl"
+
+# Install Python worker (next to binary, where the CLI expects it)
+if [ -d "$TMPDIR/python" ]; then
+    PYTHON_DIR="$INSTALL_DIR/python"
+    if [ -w "$INSTALL_DIR" ]; then
+        rm -rf "$PYTHON_DIR"
+        mv "$TMPDIR/python" "$PYTHON_DIR"
+    else
+        sudo rm -rf "$PYTHON_DIR"
+        sudo mv "$TMPDIR/python" "$PYTHON_DIR"
+    fi
+fi
 
 echo ""
 echo "modl ${LATEST} installed to ${INSTALL_DIR}/modl"

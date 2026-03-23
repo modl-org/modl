@@ -10,8 +10,11 @@ use super::training_status;
 
 /// Resolve the path to the Python worker package root.
 ///
-/// Checks `MODL_WORKER_PYTHON_ROOT` env var first, then falls back to
-/// `CARGO_MANIFEST_DIR/python`.
+/// Search order:
+///   1. `MODL_WORKER_PYTHON_ROOT` env var (explicit override)
+///   2. `<binary_dir>/python` (next to the installed binary)
+///   3. `<binary_dir>/../python` (symlink → repo: target/release/../python)
+///   4. `CARGO_MANIFEST_DIR/python` (dev builds)
 pub fn resolve_worker_python_root() -> Result<PathBuf> {
     if let Ok(custom) = env::var("MODL_WORKER_PYTHON_ROOT") {
         let path = PathBuf::from(custom);
@@ -24,14 +27,31 @@ pub fn resolve_worker_python_root() -> Result<PathBuf> {
         );
     }
 
+    // Resolve relative to the actual binary (following symlinks)
+    if let Ok(exe) = env::current_exe() {
+        let exe = exe.canonicalize().unwrap_or(exe);
+        if let Some(bin_dir) = exe.parent() {
+            // <bin>/python (installed layout)
+            let candidate = bin_dir.join("python");
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+            // <bin>/../python (symlink into repo: target/release/../python)
+            if let Some(parent) = bin_dir.parent() {
+                let candidate = parent.join("python");
+                if candidate.exists() {
+                    return Ok(candidate);
+                }
+            }
+        }
+    }
+
+    // Compile-time fallback (dev builds only)
     let default_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
     if default_path.exists() {
         Ok(default_path)
     } else {
-        bail!(
-            "Worker python package not found at {}. Set MODL_WORKER_PYTHON_ROOT to a valid path.",
-            default_path.display()
-        )
+        bail!("Worker python package not found. Set MODL_WORKER_PYTHON_ROOT to a valid path.")
     }
 }
 

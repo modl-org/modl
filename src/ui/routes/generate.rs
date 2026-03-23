@@ -237,6 +237,7 @@ async fn run_single_edit(sender: &broadcast::Sender<String>, req: EditRequest) {
         steps: Some(req.steps),
         guidance: Some(req.guidance),
         count: req.num_images,
+        size: None,
         fast: req.fast,
         cloud: false,
         provider: None,

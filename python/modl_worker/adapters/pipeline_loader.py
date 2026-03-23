@@ -74,16 +74,15 @@ def detect_model_format(model_source: str) -> str:
                 header = _json.loads(header_bytes)
 
             keys = set(header.keys()) - {"__metadata__"}
-            # Sample a few keys to determine format
-            sample_keys = list(keys)[:50]
-            key_str = " ".join(sample_keys)
+            key_prefixes = {k.split(".")[0] for k in keys}
 
-            # Full checkpoint indicators (SD/SDXL format)
-            full_ckpt_prefixes = [
-                "conditioner.", "first_stage_model.", "model.diffusion_model.",
-                "cond_stage_model.",
-            ]
-            if any(p in key_str for p in full_ckpt_prefixes):
+            # Full checkpoint = has VAE/TE alongside the diffusion model.
+            # "model.diffusion_model.*" alone is just ComfyUI-format
+            # transformer weights (e.g. Qwen-Image fp8), NOT a full ckpt.
+            has_vae_or_te = key_prefixes & {
+                "conditioner", "first_stage_model", "cond_stage_model",
+            }
+            if has_vae_or_te:
                 return "full_checkpoint"
 
             # If we got here with safetensors keys, it's transformer-only

@@ -623,6 +623,9 @@ pub enum Commands {
         /// Number of output images
         #[arg(long, default_value = "1")]
         count: u32,
+        /// Output size (e.g. "16:9", "1820x1024") — larger than source for outpainting
+        #[arg(long)]
+        size: Option<String>,
         /// Use Lightning distillation LoRA for fast editing (fewer steps)
         #[arg(long)]
         fast: bool,
@@ -1069,6 +1072,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             steps,
             guidance,
             count,
+            size,
             fast,
             cloud,
             provider,
@@ -1083,6 +1087,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 steps,
                 guidance,
                 count,
+                size: size.as_deref(),
                 fast,
                 cloud,
                 provider,

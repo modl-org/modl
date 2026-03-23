@@ -357,6 +357,11 @@ pub struct EditParams {
     #[serde(default)]
     pub seed: Option<u64>,
     pub count: u32,
+    /// Optional output dimensions (for outpainting — larger than source image)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
