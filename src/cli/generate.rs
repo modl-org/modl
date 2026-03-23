@@ -11,6 +11,7 @@ use crate::core::job::*;
 use crate::core::model_family;
 use crate::core::outputs::{SidecarMetadata, write_sidecar_yaml};
 use crate::core::preflight;
+use crate::core::runtime;
 
 /// Known control type suffixes for auto-detection from filenames.
 const CONTROL_SUFFIXES: &[(&str, &str)] = &[
@@ -591,8 +592,8 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
             inpaint_method: resolved_inpaint_method.map(|s| s.to_string()),
         },
         runtime: RuntimeRef {
-            profile: "trainer-cu124".to_string(),
-            python_version: Some("3.11.11".to_string()),
+            profile: runtime::resolved_generation_profile().to_string(),
+            python_version: Some("3.11.12".to_string()),
         },
         target: if cloud {
             ExecutionTarget::Cloud
@@ -718,7 +719,7 @@ async fn execute_generate(
         if !json {
             println!("{} Preparing runtime...", style("→").cyan());
         }
-        let mut executor = LocalExecutor::from_runtime_setup().await?;
+        let mut executor = LocalExecutor::for_generation().await?;
         if no_worker {
             executor.use_worker = false;
         }

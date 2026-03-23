@@ -78,6 +78,16 @@ impl LocalExecutor {
 
         Ok(Self::new(setup.python_path, runtime_root))
     }
+
+    /// Bootstrap a generation-capable runtime (no ai-toolkit required).
+    ///
+    /// Prefers the lightweight generator profile. Falls back to the trainer
+    /// profile if it's already bootstrapped (avoids a redundant venv).
+    pub async fn for_generation() -> Result<Self> {
+        let setup = runtime::setup_generation().await?;
+        let runtime_root = crate::core::paths::modl_root().join("runtime");
+        Ok(Self::new(setup.python_path, runtime_root))
+    }
 }
 
 impl Executor for LocalExecutor {
