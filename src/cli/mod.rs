@@ -579,6 +579,10 @@ pub enum Commands {
         /// Style type: style, face, content (SDXL IP-Adapter variants only)
         #[arg(long)]
         style_type: Option<String>,
+        /// Outpaint: extend the image canvas. Format: "right=256", "left=128,right=128",
+        /// "all=256", or "right=256,feather=40". Requires --init-image and an edit-capable model.
+        #[arg(long)]
+        outpaint: Option<String>,
         /// Use Lightning distillation LoRA for faster generation (fewer steps)
         #[arg(long)]
         fast: bool,
@@ -1026,6 +1030,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             style_ref,
             style_strength,
             style_type,
+            outpaint,
             fast,
             cloud,
             provider,
@@ -1053,6 +1058,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 style_ref: &style_ref,
                 style_strength,
                 style_type: style_type.as_deref(),
+                outpaint: outpaint.as_deref(),
                 fast,
                 cloud,
                 provider,
