@@ -10,6 +10,7 @@ use crate::core::job::*;
 use crate::core::model_family;
 use crate::core::outputs::{SidecarMetadata, write_sidecar_yaml};
 use crate::core::preflight;
+use crate::core::runtime;
 
 /// All arguments for `modl edit`, used by both CLI and web UI.
 pub struct EditArgs<'a> {
@@ -235,8 +236,8 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
             count,
         },
         runtime: RuntimeRef {
-            profile: "trainer-cu124".to_string(),
-            python_version: Some("3.11.11".to_string()),
+            profile: runtime::resolved_generation_profile().to_string(),
+            python_version: Some("3.11.12".to_string()),
         },
         target: if cloud {
             ExecutionTarget::Cloud
@@ -296,7 +297,7 @@ async fn execute_edit(
         if !json {
             println!("{} Preparing runtime...", style("→").cyan());
         }
-        let mut executor = LocalExecutor::from_runtime_setup().await?;
+        let mut executor = LocalExecutor::for_generation().await?;
         if no_worker {
             executor.use_worker = false;
         }

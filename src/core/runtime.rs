@@ -14,15 +14,20 @@ use crate::core::download;
 use crate::core::store::Store;
 
 const DEFAULT_PROFILE: &str = "trainer-cu124";
+const GENERATOR_PROFILE: &str = "generator";
 const DEFAULT_CHANNEL: &str = "stable";
 const PYTHON_VERSION: &str = "3.11.12";
 const TRAINER_CU126_INDEX_URL: &str = "https://download.pytorch.org/whl/cu126";
 const TRAINER_TORCH_VERSION: &str = "2.7.0";
 const TRAINER_TORCHVISION_VERSION: &str = "0.22.0";
 const TRAINER_TORCHAUDIO_VERSION: &str = "2.7.0";
+const GENERATOR_TORCH_VERSION: &str = "2.7.0";
+const GENERATOR_TORCHVISION_VERSION: &str = "0.22.0";
 const AITOOLKIT_REPO_URL: &str = "https://github.com/ostris/ai-toolkit.git";
 const AITOOLKIT_CLONE_DIR: &str = "ai-toolkit";
 const DEFAULT_PYTHON_ARTIFACT_URL: &str = "https://github.com/indygreg/python-build-standalone/releases/download/20250409/cpython-3.11.12+20250409-x86_64-unknown-linux-gnu-install_only.tar.gz";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const MACOS_AARCH64_PYTHON_ARTIFACT_URL: &str = "https://github.com/indygreg/python-build-standalone/releases/download/20250409/cpython-3.11.12+20250409-aarch64-apple-darwin-install_only.tar.gz";
 const PYTHON_ARTIFACT_URL_ENV: &str = "MODL_PYTHON_ARTIFACT_URL";
 const MIN_SYSTEM_PYTHON_MINOR: u32 = 11;
 
@@ -66,6 +71,13 @@ pub struct TrainingSetupResult {
     pub python_path: PathBuf,
     pub train_command_template: Option<String>,
     pub ready: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct GenerationSetupResult {
+    #[allow(dead_code)]
+    pub profile: String,
+    pub python_path: PathBuf,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -143,6 +155,20 @@ pub fn status() -> Result<RuntimeStatus> {
     })
 }
 
+/// Check if a specific profile's runtime environment is bootstrapped.
+///
+/// This checks for the venv python binary, not just the lock file,
+/// so it accurately reflects whether the profile is ready to use.
+pub fn is_profile_ready(profile: &str) -> Result<bool> {
+    let root = runtime_root()?;
+    let python_path = root.join("envs").join(profile).join("bin").join("python");
+    let marker = root
+        .join("envs")
+        .join(profile)
+        .join(".modl-bootstrap-complete");
+    Ok(python_path.exists() && marker.exists())
+}
+
 pub fn train_command_template() -> Result<Option<String>> {
     let runtime_root = runtime_root()?;
     let lock_path = lock_path(runtime_root.as_path());
@@ -175,6 +201,52 @@ pub async fn setup_training(reinstall: bool) -> Result<TrainingSetupResult> {
         ready: template.is_some(),
         train_command_template: template,
     })
+}
+
+/// Set up the runtime for generation (no ai-toolkit required).
+///
+/// Prefers the lightweight `generator` profile (no ai-toolkit). If the full
+/// trainer profile is already bootstrapped, reuses it to avoid a redundant venv.
+pub async fn setup_generation() -> Result<GenerationSetupResult> {
+    // If the full trainer profile is already bootstrapped, reuse it (superset)
+    if is_profile_ready(DEFAULT_PROFILE).unwrap_or(false) {
+        let root = runtime_root()?;
+        let python_path = root
+            .join("envs")
+            .join(DEFAULT_PROFILE)
+            .join("bin")
+            .join("python");
+        return Ok(GenerationSetupResult {
+            profile: DEFAULT_PROFILE.to_string(),
+            python_path,
+        });
+    }
+
+    // Otherwise bootstrap the lightweight generator profile
+    install(Some(GENERATOR_PROFILE), None)?;
+    let boot = bootstrap(Some(GENERATOR_PROFILE), None).await?;
+
+    Ok(GenerationSetupResult {
+        profile: boot.profile,
+        python_path: boot.python_path,
+    })
+}
+
+/// Returns the generation profile name, accounting for trainer fallback.
+///
+/// If the trainer profile is already bootstrapped, returns that (superset).
+/// Otherwise returns the lightweight generator profile.
+pub fn resolved_generation_profile() -> &'static str {
+    if is_profile_ready(DEFAULT_PROFILE).unwrap_or(false) {
+        DEFAULT_PROFILE
+    } else {
+        GENERATOR_PROFILE
+    }
+}
+
+/// Returns true if running on macOS.
+fn is_macos() -> bool {
+    cfg!(target_os = "macos")
 }
 
 pub fn doctor() -> Result<RuntimeDoctorReport> {
@@ -360,6 +432,12 @@ fn write_manifest_index_if_missing(root: &Path, channel: &str) -> Result<()> {
                 "version": "2026.02.1",
                 "manifest_uri": "https://github.com/modl/modl-runtime-manifests/releases/download/v2026.02.1/trainer-cu124.json",
                 "sha256": ""
+            },
+            {
+                "id": GENERATOR_PROFILE,
+                "version": "2026.02.1",
+                "manifest_uri": "",
+                "sha256": ""
             }
         ]
     });
@@ -378,9 +456,11 @@ fn write_manifest_index_if_missing(root: &Path, channel: &str) -> Result<()> {
 fn ensure_profile_seed_files(root: &Path) -> Result<()> {
     write_profile_manifest_if_missing(root, DEFAULT_PROFILE)?;
     write_profile_manifest_if_missing(root, "inference-cu124")?;
+    write_profile_manifest_if_missing(root, GENERATOR_PROFILE)?;
 
     write_profile_requirements_if_missing(root, DEFAULT_PROFILE)?;
     write_profile_requirements_if_missing(root, "inference-cu124")?;
+    write_profile_requirements_if_missing(root, GENERATOR_PROFILE)?;
 
     Ok(())
 }
@@ -422,6 +502,9 @@ fn write_profile_requirements_if_missing(root: &Path, profile: &str) -> Result<(
         }
         "inference-cu124" => {
             "# Runtime profile requirements for inference-cu124\nspandrel>=0.4\ninsightface>=0.7\n"
+        }
+        "generator" => {
+            "# Lightweight generation profile (no ai-toolkit, MPS-compatible on macOS)\naccelerate>=0.33\nsafetensors>=0.5\ntransformers>=4.51\ndiffusers>=0.37.0\npillow>=10.0\nspandrel>=0.4\nsentencepiece>=0.2\nprotobuf>=5.0\n"
         }
         _ => "# Runtime profile requirements\n\n",
     };
@@ -479,10 +562,9 @@ fn read_lock(path: &Path) -> Result<RuntimeLock> {
 
 fn validate_profile(profile: &str) -> Result<()> {
     match profile {
-        "trainer-cu124" => Ok(()),
-        "inference-cu124" => Ok(()),
+        "trainer-cu124" | "inference-cu124" | "generator" => Ok(()),
         _ => bail!(
-            "Unsupported runtime profile '{}'. Supported: trainer-cu124, inference-cu124",
+            "Unsupported runtime profile '{}'. Supported: trainer-cu124, inference-cu124, generator",
             profile
         ),
     }
@@ -625,6 +707,28 @@ fn ensure_profile_dependencies(
                 "Failed to install ai-toolkit requirements",
             )?;
         }
+    } else if profile == "generator" {
+        // Lightweight profile: PyTorch without ai-toolkit
+        println!(
+            "  {} Installing PyTorch {} …",
+            style("→").dim(),
+            style(GENERATOR_TORCH_VERSION).dim()
+        );
+        let mut cmd = Command::new(python_path);
+        cmd.arg("-m")
+            .arg("pip")
+            .arg("install")
+            .arg("--no-cache-dir");
+
+        // On Linux, use CUDA-optimized wheels; on macOS, default PyPI includes MPS
+        if !is_macos() {
+            cmd.arg("--index-url").arg(TRAINER_CU126_INDEX_URL);
+        }
+
+        cmd.arg(format!("torch=={}", GENERATOR_TORCH_VERSION))
+            .arg(format!("torchvision=={}", GENERATOR_TORCHVISION_VERSION));
+
+        run_command(&mut cmd, "Failed to install PyTorch for generator profile")?;
     }
 
     if requirements_path.exists() {
@@ -640,9 +744,15 @@ fn ensure_profile_dependencies(
         )?;
     }
 
-    let marker_contents = format!(
-        "profile={profile}\ntorch={TRAINER_TORCH_VERSION}\ntorchvision={TRAINER_TORCHVISION_VERSION}\ntorchaudio={TRAINER_TORCHAUDIO_VERSION}\n"
-    );
+    let marker_contents = if profile == "generator" {
+        format!(
+            "profile={profile}\ntorch={GENERATOR_TORCH_VERSION}\ntorchvision={GENERATOR_TORCHVISION_VERSION}\n"
+        )
+    } else {
+        format!(
+            "profile={profile}\ntorch={TRAINER_TORCH_VERSION}\ntorchvision={TRAINER_TORCHVISION_VERSION}\ntorchaudio={TRAINER_TORCHAUDIO_VERSION}\n"
+        )
+    };
     fs::write(&marker_path, marker_contents)
         .with_context(|| format!("Failed to write {}", marker_path.display()))?;
 
@@ -857,8 +967,17 @@ fn find_system_python() -> Option<PathBuf> {
 }
 
 fn python_artifact_url() -> String {
-    std::env::var(PYTHON_ARTIFACT_URL_ENV)
-        .unwrap_or_else(|_| DEFAULT_PYTHON_ARTIFACT_URL.to_string())
+    if let Ok(url) = std::env::var(PYTHON_ARTIFACT_URL_ENV) {
+        return url;
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        return MACOS_AARCH64_PYTHON_ARTIFACT_URL.to_string();
+    }
+
+    #[allow(unreachable_code)]
+    DEFAULT_PYTHON_ARTIFACT_URL.to_string()
 }
 
 fn read_profile_manifest(root: &Path, profile: &str) -> Result<RuntimeProfileManifest> {

@@ -780,6 +780,9 @@ pub enum Commands {
         /// Show disk usage summary grouped by type
         #[arg(long)]
         summary: bool,
+        /// Show all items including internal dependencies (VAEs, text encoders, etc.)
+        #[arg(long, short = 'a')]
+        all: bool,
     },
 
     /// Remove an installed model
@@ -822,6 +825,9 @@ pub enum Commands {
         /// Output result as JSON
         #[arg(long)]
         json: bool,
+        /// Show all items including internal dependencies (VAEs, text encoders, etc.)
+        #[arg(long, short = 'a')]
+        all: bool,
     },
 
     /// Show model details
@@ -1223,11 +1229,15 @@ pub async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
-        Commands::Ls { r#type, summary } => {
+        Commands::Ls {
+            r#type,
+            summary,
+            all,
+        } => {
             if summary {
-                space::run().await
+                space::run(all).await
             } else {
-                list::run(r#type).await
+                list::run(r#type, all).await
             }
         }
         Commands::Rm { id, force } => uninstall::run(&id, force).await,
@@ -1242,6 +1252,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             base_model,
             sort,
             json,
+            all,
         } => {
             if civitai_flag {
                 let q = query.as_deref().unwrap_or("");
@@ -1263,6 +1274,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     tag.as_deref(),
                     min_rating,
                     json,
+                    all,
                 )
                 .await
             }

@@ -295,7 +295,6 @@ fn looks_like_models_dir(path: &Path) -> bool {
         "clip",
         "clip_vision",
         "controlnet",
-        "embeddings",
         "upscale_models",
         "diffusion_models",
         "text_encoders",

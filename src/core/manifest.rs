@@ -99,6 +99,14 @@ pub struct Manifest {
     pub added: Option<String>,
     #[serde(default)]
     pub updated: Option<String>,
+
+    // Visibility: "user" (shown by default) or "internal" (hidden unless --all)
+    #[serde(default = "default_user")]
+    pub visibility: String,
+}
+
+fn default_user() -> String {
+    "user".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, clap::ValueEnum)]
@@ -113,7 +121,6 @@ pub enum AssetType {
     TextEncoder,
     Controlnet,
     Upscaler,
-    Embedding,
     Ipadapter,
     Segmentation,
     #[value(name = "vision_language")]
@@ -132,7 +139,6 @@ impl std::fmt::Display for AssetType {
             Self::TextEncoder => write!(f, "text_encoder"),
             Self::Controlnet => write!(f, "controlnet"),
             Self::Upscaler => write!(f, "upscaler"),
-            Self::Embedding => write!(f, "embedding"),
             Self::Ipadapter => write!(f, "ipadapter"),
             Self::Segmentation => write!(f, "segmentation"),
             Self::VisionLanguage => write!(f, "vision_language"),
@@ -154,7 +160,6 @@ impl std::str::FromStr for AssetType {
             "text_encoder" => Ok(Self::TextEncoder),
             "controlnet" => Ok(Self::Controlnet),
             "upscaler" => Ok(Self::Upscaler),
-            "embedding" => Ok(Self::Embedding),
             "ipadapter" => Ok(Self::Ipadapter),
             "segmentation" => Ok(Self::Segmentation),
             "vision_language" => Ok(Self::VisionLanguage),
@@ -202,6 +207,8 @@ pub struct Dependency {
     pub reason: Option<String>,
     #[serde(default)]
     pub optional_variant: Option<String>,
+    #[serde(default)]
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

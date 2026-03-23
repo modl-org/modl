@@ -9,7 +9,7 @@ mod training_queue;
 pub use artifacts::ArtifactRecord;
 pub use jobs::JobRecord;
 pub use lora_library::LibraryLoraRecord;
-pub use models::InstalledModelRecord;
+pub use models::{InstalledModel, InstalledModelRecord};
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
