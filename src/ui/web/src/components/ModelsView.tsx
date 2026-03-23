@@ -24,8 +24,7 @@ const TYPE_ORDER: Record<string, number> = {
   upscaler: 5,
   controlnet: 6,
   ipadapter: 7,
-  embedding: 8,
-  llm: 9,
+  llm: 8,
 }
 
 const TYPE_LABELS: Record<string, string> = {
@@ -37,7 +36,6 @@ const TYPE_LABELS: Record<string, string> = {
   upscaler: 'Upscalers',
   controlnet: 'ControlNets',
   ipadapter: 'IP Adapters',
-  embedding: 'Embeddings',
   llm: 'LLMs',
 }
 

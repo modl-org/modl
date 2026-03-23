@@ -17,10 +17,16 @@ pub async fn run(
     tag: Option<&str>,
     min_rating: Option<f32>,
     json: bool,
+    show_all: bool,
 ) -> Result<()> {
     let index = RegistryIndex::load_or_fetch().await?;
 
     let mut results = index.search(query);
+
+    // Filter to user-visible items by default (unless --all)
+    if !show_all {
+        results.retain(|m| m.visibility == "user");
+    }
 
     // Apply filters
     if let Some(ref t) = type_filter {

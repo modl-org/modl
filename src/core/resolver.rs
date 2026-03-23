@@ -68,6 +68,11 @@ fn resolve_recursive(
 
     // Resolve dependencies first (depth-first)
     for dep in &manifest.requires {
+        // Skip optional deps (pulled lazily on first use, not on `modl pull`)
+        if dep.optional {
+            continue;
+        }
+
         // `optional_variant` is an alternative model ID (e.g. "t5-xxl-fp8" as
         // a lighter substitute for "t5-xxl-fp16"), NOT a variant within the dep.
         // If the alternative model is already installed, skip this dep.
@@ -135,6 +140,7 @@ mod tests {
                     dep_type,
                     reason: None,
                     optional_variant: None,
+                    optional: false,
                 })
                 .collect(),
             auth: None,
@@ -161,6 +167,7 @@ mod tests {
             downloads: None,
             added: None,
             updated: None,
+            visibility: "user".to_string(),
         }
     }
 
@@ -224,6 +231,7 @@ mod tests {
                 dep_type: AssetType::TextEncoder,
                 reason: Some("Text encoder".to_string()),
                 optional_variant: Some("t5-xxl-fp8".to_string()),
+                optional: false,
             }],
             ..simple_manifest("flux-dev", vec![])
         };
@@ -262,6 +270,7 @@ mod tests {
                 dep_type: AssetType::TextEncoder,
                 reason: Some("Text encoder".to_string()),
                 optional_variant: Some("t5-xxl-fp8".to_string()),
+                optional: false,
             }],
             ..simple_manifest("flux-dev", vec![])
         };

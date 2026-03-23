@@ -284,6 +284,8 @@ pub struct SearchQuery {
     q: String,
     #[serde(rename = "type")]
     type_filter: Option<String>,
+    #[serde(default)]
+    all: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -320,6 +322,11 @@ pub async fn api_search_registry(Query(params): Query<SearchQuery>) -> impl Into
             .unwrap_or_default();
 
         let mut results: Vec<&crate::core::manifest::Manifest> = index.search(&params.q);
+
+        // Filter to user-visible items by default
+        if !params.all.unwrap_or(false) {
+            results.retain(|m| m.visibility == "user");
+        }
 
         // Filter by type if specified
         if let Some(ref type_filter) = params.type_filter {
