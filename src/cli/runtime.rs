@@ -50,7 +50,10 @@ pub enum RuntimeCommands {
 pub async fn run(command: RuntimeCommands) -> Result<()> {
     match command {
         RuntimeCommands::Install { profile, channel } => {
-            crate::core::preflight::check_device_for_training()?;
+            // Only check for training capability if explicitly requesting a trainer profile
+            if profile.as_deref() == Some("trainer-cu124") {
+                crate::core::preflight::check_device_for_training()?;
+            }
             let result = runtime::install(profile.as_deref(), channel.as_deref())?;
 
             println!("{} Runtime installed", style("✓").green().bold());

@@ -257,7 +257,8 @@ def _load_controlnet(
             tokenizer=pipeline.tokenizer,
             scheduler=pipeline.scheduler,
         )
-        cn_pipe.enable_model_cpu_offload()
+        from modl_worker.device import move_pipe_to_device
+        move_pipe_to_device(cn_pipe)
         emitter.info(f"ControlNet loaded ({cn_model_size_gb:.1f}GB, CPU offload via wrapper)")
     else:
         # Standard approach: construct the ControlNet pipeline directly.
@@ -284,8 +285,8 @@ def _load_controlnet(
         # no shared modules — safe to keep resident).
         base_was_offloaded = bool(getattr(pipeline, "_all_hooks", None))
         if base_was_offloaded:
-            cn_pipe.enable_model_cpu_offload()
-            from modl_worker.device import get_device
+            from modl_worker.device import move_pipe_to_device, get_device
+            move_pipe_to_device(cn_pipe)
             cn_pipe.controlnet.to(get_device())
             emitter.info(f"ControlNet loaded ({cn_model_size_gb:.1f}GB, CPU offload)")
         else:

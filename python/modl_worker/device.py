@@ -41,6 +41,36 @@ def get_generator_device() -> str:
     return dev
 
 
+def get_inference_dtype():
+    """Return the best inference dtype for the active device.
+
+    MPS has limited bfloat16 support — use float16 for reliability.
+    CUDA uses bfloat16 for best quality.
+    """
+    if get_device() == "mps":
+        return torch.float16
+    return torch.bfloat16
+
+
+def is_mps() -> bool:
+    """Return True if running on MPS (Apple Silicon)."""
+    return get_device() == "mps"
+
+
+def move_pipe_to_device(pipe):
+    """Move a pipeline to the active device, using the right strategy.
+
+    On CUDA: use enable_model_cpu_offload() for memory efficiency.
+    On MPS: use pipe.to("mps") since cpu_offload is CUDA-only.
+    On CPU: use pipe.to("cpu").
+    """
+    dev = get_device()
+    if dev == "cuda":
+        pipe.enable_model_cpu_offload()
+    else:
+        pipe.to(dev)
+
+
 def empty_cache():
     """Free GPU cache for the active device."""
     dev = get_device()

@@ -112,7 +112,9 @@ fn detect_mps() -> Option<GpuInfo> {
         .trim()
         .parse()
         .ok()?;
-    let vram_mb = mem_bytes / (1024 * 1024);
+    // Unified memory is shared with the OS. Report ~75% as effective VRAM
+    // to avoid selecting variants that would leave no room for the system.
+    let vram_mb = (mem_bytes / (1024 * 1024)) * 3 / 4;
 
     Some(GpuInfo {
         name,

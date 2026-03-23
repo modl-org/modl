@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::compat::{check_windows_dev_mode, detect_tools};
 use crate::core::config::{Config, GpuOverride, StorageConfig, TargetConfig, ToolType};
 use crate::core::gpu;
+use crate::core::runtime;
 
 /// Starter models offered during interactive setup.
 /// Hardcoded top picks — sorted by VRAM fit at display time.
@@ -21,9 +22,23 @@ struct StarterModel {
 
 const STARTER_MODELS: &[StarterModel] = &[
     StarterModel {
+        id: "flux2-klein-4b",
+        label: "flux2-klein-4b",
+        description: "4-step, small & fast, Apache 2.0",
+        size_bytes: 4_200_000_000,
+        vram_min: 8_000,
+    },
+    StarterModel {
+        id: "z-image-turbo",
+        label: "z-image-turbo",
+        description: "1-step real-time, Apache 2.0",
+        size_bytes: 8_500_000_000,
+        vram_min: 12_000,
+    },
+    StarterModel {
         id: "flux-schnell",
         label: "flux-schnell",
-        description: "4-step, fastest",
+        description: "4-step, fast",
         size_bytes: 4_600_000_000,
         vram_min: 8_000,
     },
@@ -32,13 +47,6 @@ const STARTER_MODELS: &[StarterModel] = &[
         label: "flux-dev",
         description: "28-step, highest quality",
         size_bytes: 12_000_000_000,
-        vram_min: 12_000,
-    },
-    StarterModel {
-        id: "z-image-turbo",
-        label: "z-image-turbo",
-        description: "1-step, real-time",
-        size_bytes: 8_500_000_000,
         vram_min: 12_000,
     },
     StarterModel {
@@ -172,6 +180,13 @@ pub async fn run(defaults: bool, root_override: Option<&str>) -> Result<()> {
         Config::default_path().display()
     );
 
+    // Runtime install — auto-install on defaults, prompt otherwise
+    let runtime_installed = if defaults {
+        install_runtime(&gpu_info).await.unwrap_or(false)
+    } else {
+        offer_runtime_install(&gpu_info).await?
+    };
+
     // Model download offer
     let mut model_installed = false;
     if !defaults {
@@ -185,6 +200,9 @@ pub async fn run(defaults: bool, root_override: Option<&str>) -> Result<()> {
 
     println!();
     println!("Next steps:");
+    if !runtime_installed {
+        println!("  {} Install runtime", style("modl runtime install").cyan());
+    }
     if model_installed {
         println!(
             "  {} Generate an image",
@@ -199,7 +217,7 @@ pub async fn run(defaults: bool, root_override: Option<&str>) -> Result<()> {
         );
         println!(
             "  {} Install a model",
-            style("modl pull flux-schnell").cyan()
+            style("modl pull flux2-klein-4b").cyan()
         );
         println!("  {} Launch the web UI", style("modl serve").cyan());
     }
@@ -442,4 +460,56 @@ async fn offer_service_install() -> Result<()> {
 
     super::serve::install_service(3333).await?;
     Ok(())
+}
+
+/// Install runtime without prompting (used for --defaults mode).
+async fn install_runtime(gpu_info: &Option<gpu::GpuInfo>) -> Result<bool> {
+    let profile = runtime::default_profile();
+    println!();
+    println!(
+        "{} Installing runtime (profile: {})...",
+        style("→").cyan(),
+        style(profile).bold()
+    );
+    runtime::install(Some(profile), None)?;
+    runtime::bootstrap(Some(profile), None).await?;
+
+    println!("  {} Runtime installed ({})", style("✓").green(), profile);
+
+    if gpu_info.as_ref().map(|g| g.device) == Some(gpu::DeviceType::Mps) {
+        println!(
+            "  {} Generation works on MPS. Training requires {} (cloud GPU).",
+            style("i").dim(),
+            style("modl train --cloud").cyan(),
+        );
+    }
+
+    Ok(true)
+}
+
+/// Prompt user to install the Python runtime during init.
+async fn offer_runtime_install(gpu_info: &Option<gpu::GpuInfo>) -> Result<bool> {
+    let profile = runtime::default_profile();
+    let profile_desc = if profile == "generator" {
+        "generation-only (MPS)"
+    } else {
+        "generation + training (CUDA)"
+    };
+
+    println!();
+    let install = Confirm::new()
+        .with_prompt(format!("Install the Python runtime? ({profile_desc})"))
+        .default(true)
+        .interact()?;
+
+    if !install {
+        println!(
+            "  {} You can install later with {}",
+            style("i").dim(),
+            style("modl runtime install").cyan(),
+        );
+        return Ok(false);
+    }
+
+    install_runtime(gpu_info).await
 }

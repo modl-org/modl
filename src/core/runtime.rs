@@ -13,8 +13,21 @@ use console::style;
 use crate::core::download;
 use crate::core::store::Store;
 
-const DEFAULT_PROFILE: &str = "trainer-cu124";
+const DEFAULT_PROFILE_CUDA: &str = "trainer-cu124";
 const GENERATOR_PROFILE: &str = "generator";
+
+/// Returns the default runtime profile for the current device.
+///
+/// On MPS (Apple Silicon), defaults to the lightweight `generator` profile
+/// since training requires CUDA. On CUDA/CPU, defaults to `trainer-cu124`.
+pub fn default_profile() -> &'static str {
+    if let Some(info) = crate::core::gpu::detect()
+        && info.device == crate::core::gpu::DeviceType::Mps
+    {
+        return GENERATOR_PROFILE;
+    }
+    DEFAULT_PROFILE_CUDA
+}
 const DEFAULT_CHANNEL: &str = "stable";
 const PYTHON_VERSION: &str = "3.11.12";
 const TRAINER_CU126_INDEX_URL: &str = "https://download.pytorch.org/whl/cu126";
@@ -108,7 +121,7 @@ struct PythonArtifact {
 }
 
 pub fn install(profile: Option<&str>, channel: Option<&str>) -> Result<RuntimeInstallResult> {
-    let profile = profile.unwrap_or(DEFAULT_PROFILE);
+    let profile = profile.unwrap_or_else(|| default_profile());
     validate_profile(profile)?;
 
     let channel = channel.unwrap_or(DEFAULT_CHANNEL);
@@ -181,8 +194,8 @@ pub fn train_command_template() -> Result<Option<String>> {
 }
 
 pub async fn setup_training(reinstall: bool) -> Result<TrainingSetupResult> {
-    let install = install(Some(DEFAULT_PROFILE), None)?;
-    let env_dir = install.runtime_root.join("envs").join(DEFAULT_PROFILE);
+    let install = install(Some(DEFAULT_PROFILE_CUDA), None)?;
+    let env_dir = install.runtime_root.join("envs").join(DEFAULT_PROFILE_CUDA);
 
     if reinstall {
         let marker = bootstrap_marker_path(env_dir.as_path());
@@ -192,7 +205,7 @@ pub async fn setup_training(reinstall: bool) -> Result<TrainingSetupResult> {
         }
     }
 
-    let boot = bootstrap(Some(DEFAULT_PROFILE), None).await?;
+    let boot = bootstrap(Some(DEFAULT_PROFILE_CUDA), None).await?;
     let template = train_command_template()?;
 
     Ok(TrainingSetupResult {
@@ -209,15 +222,15 @@ pub async fn setup_training(reinstall: bool) -> Result<TrainingSetupResult> {
 /// trainer profile is already bootstrapped, reuses it to avoid a redundant venv.
 pub async fn setup_generation() -> Result<GenerationSetupResult> {
     // If the full trainer profile is already bootstrapped, reuse it (superset)
-    if is_profile_ready(DEFAULT_PROFILE).unwrap_or(false) {
+    if is_profile_ready(DEFAULT_PROFILE_CUDA).unwrap_or(false) {
         let root = runtime_root()?;
         let python_path = root
             .join("envs")
-            .join(DEFAULT_PROFILE)
+            .join(DEFAULT_PROFILE_CUDA)
             .join("bin")
             .join("python");
         return Ok(GenerationSetupResult {
-            profile: DEFAULT_PROFILE.to_string(),
+            profile: DEFAULT_PROFILE_CUDA.to_string(),
             python_path,
         });
     }
@@ -237,8 +250,8 @@ pub async fn setup_generation() -> Result<GenerationSetupResult> {
 /// If the trainer profile is already bootstrapped, returns that (superset).
 /// Otherwise returns the lightweight generator profile.
 pub fn resolved_generation_profile() -> &'static str {
-    if is_profile_ready(DEFAULT_PROFILE).unwrap_or(false) {
-        DEFAULT_PROFILE
+    if is_profile_ready(DEFAULT_PROFILE_CUDA).unwrap_or(false) {
+        DEFAULT_PROFILE_CUDA
     } else {
         GENERATOR_PROFILE
     }
@@ -286,7 +299,10 @@ pub fn doctor() -> Result<RuntimeDoctorReport> {
 
 pub fn upgrade(channel: Option<&str>) -> Result<RuntimeInstallResult> {
     let current = status()?;
-    let profile = current.profile.as_deref().unwrap_or(DEFAULT_PROFILE);
+    let profile = current
+        .profile
+        .as_deref()
+        .unwrap_or_else(|| default_profile());
     install(Some(profile), channel)
 }
 
@@ -428,7 +444,7 @@ fn write_manifest_index_if_missing(root: &Path, channel: &str) -> Result<()> {
         "generated_at": chrono::Utc::now().to_rfc3339(),
         "profiles": [
             {
-                "id": DEFAULT_PROFILE,
+                "id": DEFAULT_PROFILE_CUDA,
                 "version": "2026.02.1",
                 "manifest_uri": "https://github.com/modl/modl-runtime-manifests/releases/download/v2026.02.1/trainer-cu124.json",
                 "sha256": ""
@@ -454,11 +470,11 @@ fn write_manifest_index_if_missing(root: &Path, channel: &str) -> Result<()> {
 }
 
 fn ensure_profile_seed_files(root: &Path) -> Result<()> {
-    write_profile_manifest_if_missing(root, DEFAULT_PROFILE)?;
+    write_profile_manifest_if_missing(root, DEFAULT_PROFILE_CUDA)?;
     write_profile_manifest_if_missing(root, "inference-cu124")?;
     write_profile_manifest_if_missing(root, GENERATOR_PROFILE)?;
 
-    write_profile_requirements_if_missing(root, DEFAULT_PROFILE)?;
+    write_profile_requirements_if_missing(root, DEFAULT_PROFILE_CUDA)?;
     write_profile_requirements_if_missing(root, "inference-cu124")?;
     write_profile_requirements_if_missing(root, GENERATOR_PROFILE)?;
 

@@ -203,7 +203,7 @@ pub fn check_device_for_training() -> Result<()> {
             "Training requires a CUDA GPU and is not supported on Apple Silicon (MPS).\n\n\
              Use cloud training instead:\n\n  \
              modl train --cloud\n\n\
-             This runs training on a remote A100 GPU." // TODO: point to `modl train --attach-gpu` when cloud GPU orchestrator lands
+             This runs training on a cloud GPU."
         );
     }
     Ok(())

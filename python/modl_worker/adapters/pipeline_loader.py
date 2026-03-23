@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from modl_worker.protocol import EventEmitter
+from modl_worker.device import get_inference_dtype, is_mps
 from modl_worker.adapters.arch_config import (
     resolve_model_path,
     resolve_pipeline_class,
@@ -303,14 +304,15 @@ def assemble_pipeline(
                 # GGUF files: load directly via from_single_file with
                 # GGUFQuantizationConfig. Weights stay quantized on GPU.
                 from diffusers import GGUFQuantizationConfig
+                dtype = get_inference_dtype()
                 quantization_config = GGUFQuantizationConfig(
-                    compute_dtype=torch.bfloat16,
+                    compute_dtype=dtype,
                 )
                 model = ModelClass.from_single_file(
                     base_model_path,
                     config=str(config_dir),
                     quantization_config=quantization_config,
-                    torch_dtype=torch.bfloat16,
+                    torch_dtype=dtype,
                 )
                 emitter.info(f"  → GGUF quantized model loaded")
             else:
@@ -323,11 +325,12 @@ def assemble_pipeline(
                 ]
                 has_comfy_fp8_scales = len(weight_scale_keys) > 0
 
-                # For small models (≤5B params / ≤8GB fp8), dequantize to bf16
+                # For small models (≤5B params / ≤8GB fp8), dequantize to inference dtype
                 # for maximum quality. For larger models, keep fp8 and use
                 # layerwise casting to avoid OOM during loading.
+                # MPS does not support float8 — always dequantize.
                 file_size_gb = Path(base_model_path).stat().st_size / (1024**3)
-                use_fp8_inference = is_fp8 and file_size_gb > 8.0
+                use_fp8_inference = is_fp8 and file_size_gb > 8.0 and not is_mps()
 
                 dequant_count = 0
                 if has_comfy_fp8_scales:
@@ -340,8 +343,8 @@ def assemble_pipeline(
                                 # Peak memory: one tensor at a time (not whole model).
                                 checkpoint[wk] = actual.to(torch.float8_e4m3fn)
                             else:
-                                # Small model: keep as bf16 for best quality.
-                                checkpoint[wk] = actual.to(torch.bfloat16)
+                                # Small model / MPS: dequant to inference dtype.
+                                checkpoint[wk] = actual.to(get_inference_dtype())
                             dequant_count += 1
 
                 # Strip all scale/quant tensors (not needed after dequant,
@@ -417,23 +420,26 @@ def assemble_pipeline(
                     model.load_state_dict(converted, strict=False, assign=True)
                     del converted
                     _materialize_meta_tensors(model)
-                    model = model.to(torch.bfloat16)
+                    dtype = get_inference_dtype()
+                    model = model.to(dtype)
                     emitter.info(
-                        f"  → Loaded dequantized fp8 → bf16 via from_config"
+                        f"  → Loaded dequantized fp8 → {dtype} via from_config"
                     )
                 else:
+                    dtype = get_inference_dtype()
                     model = ModelClass.from_single_file(
                         base_model_path, config=str(config_dir),
-                        torch_dtype=torch.bfloat16,
+                        torch_dtype=dtype,
                     )
                     emitter.info(
-                        f"  → Loaded via from_single_file (bf16)"
+                        f"  → Loaded via from_single_file ({dtype})"
                     )
 
             # Apply fp8 layerwise casting to reduce VRAM: weights stored in
             # fp8, compute in bf16. Auto for large models (>15GB), or forced
             # when ControlNet is active (need room for CN weights on GPU).
-            if not is_fp8 and not is_gguf:
+            # MPS does not support float8 — skip layerwise casting.
+            if not is_fp8 and not is_gguf and not is_mps():
                 file_size_gb = Path(base_model_path).stat().st_size / (1024**3)
                 if file_size_gb > 15.0 or (force_fp8 and file_size_gb > 5.0):
                     model.enable_layerwise_casting(
@@ -497,7 +503,7 @@ def assemble_pipeline(
                     components[param_name] = ModelClass.from_single_file(
                         resolved_path,
                         config=str(config_dir),
-                        torch_dtype=torch.bfloat16,
+                        torch_dtype=get_inference_dtype(),
                     )
                 except (ValueError, NotImplementedError):
                     # Fall back: load config → create model → load weights
@@ -516,12 +522,12 @@ def assemble_pipeline(
                             f"Re-install with `modl pull` to get compatible weights."
                         )
                     model.load_state_dict(state_dict, strict=False)
-                    model = model.to(torch.bfloat16)
+                    model = model.to(get_inference_dtype())
                     components[param_name] = model
             elif use_hf_dir:
                 # HF directory layout — use from_pretrained with optional
                 # NF4 quantization (e.g. Flux2's 24B Mistral3 text encoder)
-                load_kwargs = {"torch_dtype": torch.bfloat16}
+                load_kwargs = {"torch_dtype": get_inference_dtype()}
                 if quantize_nf4:
                     try:
                         from transformers import BitsAndBytesConfig
@@ -544,9 +550,9 @@ def assemble_pipeline(
                 state_dict = safetensors.torch.load_file(resolved_path)
                 model.load_state_dict(state_dict, strict=False, assign=True)
                 _materialize_meta_tensors(model)
-                # Always cast text encoders to bf16 for numerical stability.
+                # Always cast text encoders to inference dtype for numerical stability.
                 # fp8 text encoders produce unreliable embeddings.
-                model = model.to(torch.bfloat16)
+                model = model.to(get_inference_dtype())
                 components[param_name] = model
         else:
             emitter.info(f"Skipping {param_name} (no weights found)")
@@ -557,7 +563,8 @@ def assemble_pipeline(
     pipeline_kwargs = ARCH_CONFIGS.get(arch_name, {}).get("pipeline_kwargs", {})
     pipe = PipelineClass(**components, **pipeline_kwargs)
     if not no_offload:
-        pipe.enable_model_cpu_offload()
+        from modl_worker.device import move_pipe_to_device
+        move_pipe_to_device(pipe)
     # Attach loaded file info for downstream metadata embedding
     pipe._modl_loaded_files = loaded_files
     return pipe
@@ -589,6 +596,7 @@ def load_pipeline(
     """
     import torch
 
+    dtype = get_inference_dtype()
     PipelineClass = _get_pipeline(cls_name)
     model_source = base_model_path or resolve_model_path(base_model_id)
     fmt = detect_model_format(model_source)
@@ -598,7 +606,7 @@ def load_pipeline(
     if fmt == "hf_directory":
         pipe = PipelineClass.from_pretrained(
             model_source,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=dtype,
         )
         emitter.info(f"Loaded from directory: {model_source}")
     elif fmt == "full_checkpoint":
@@ -613,7 +621,7 @@ def load_pipeline(
         try:
             pipe = PipelineClass.from_single_file(
                 model_source,
-                torch_dtype=torch.bfloat16,
+                torch_dtype=dtype,
             )
         finally:
             hf_constants.HF_HUB_OFFLINE = was_offline
@@ -631,7 +639,7 @@ def load_pipeline(
             emitter.info(f"No assembly spec, falling back to HF: {hf_repo}")
             pipe = PipelineClass.from_pretrained(
                 hf_repo,
-                torch_dtype=torch.bfloat16,
+                torch_dtype=dtype,
             )
     elif fmt == "gguf":
         # GGUF models need assembly with quantization config
@@ -646,14 +654,15 @@ def load_pipeline(
         # HF repo identifier
         pipe = PipelineClass.from_pretrained(
             model_source,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=dtype,
         )
 
     if force_fp8:
-        # When fp8 is forced (ControlNet mode), use model_cpu_offload
-        # instead of .to("cuda") so that text encoder and transformer
-        # don't both occupy GPU simultaneously during inference.
-        pipe.enable_model_cpu_offload()
+        # When fp8 is forced (ControlNet mode), use cpu_offload
+        # so that text encoder and transformer don't both occupy GPU
+        # simultaneously during inference.
+        from modl_worker.device import move_pipe_to_device
+        move_pipe_to_device(pipe)
         return pipe
     from modl_worker.device import get_device
     return pipe.to(get_device())

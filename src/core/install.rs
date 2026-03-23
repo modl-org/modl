@@ -54,9 +54,23 @@ pub fn select_variant<'a>(
     }
 
     if let Some(vram_mb) = vram {
+        // On MPS (Apple Silicon), exclude fp8 and GGUF variants — they require
+        // CUDA-specific kernels (float8 dtype, ggml quantization).
+        let is_mps = gpu::detect()
+            .map(|g| g.device == gpu::DeviceType::Mps)
+            .unwrap_or(false);
+
         let variant_info: Vec<(String, u64)> = manifest
             .variants
             .iter()
+            .filter(|v| {
+                if is_mps {
+                    let id = v.id.to_lowercase();
+                    !id.contains("fp8") && !id.contains("gguf")
+                } else {
+                    true
+                }
+            })
             .map(|v| (v.id.clone(), v.vram_required.unwrap_or(0)))
             .collect();
         if let Some(selected_id) = gpu::select_variant(vram_mb, &variant_info) {
