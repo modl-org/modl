@@ -775,10 +775,10 @@ async fn execute_generate(
     let pb = if json {
         ProgressBar::hidden()
     } else {
-        let pb = ProgressBar::new(spec.params.count as u64);
+        let pb = ProgressBar::new(spec.params.steps as u64);
         pb.set_style(
             ProgressStyle::with_template(
-                "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} images {msg}",
+                "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} steps {msg}",
             )?
             .progress_chars("█▓░"),
         );
@@ -797,10 +797,21 @@ async fn execute_generate(
     for event in rx {
         match &event.event {
             EventPayload::Progress {
-                step, total_steps, ..
+                stage,
+                step,
+                total_steps,
+                ..
             } => {
-                pb.set_length(*total_steps as u64);
-                pb.set_position(*step as u64);
+                if stage == "step" {
+                    pb.set_length(*total_steps as u64);
+                    pb.set_position(*step as u64);
+                } else if stage == "generate" {
+                    // Image completed — reset bar for next image
+                    if *step < *total_steps {
+                        pb.set_position(0);
+                        pb.set_message(format!("(image {}/{})", step + 1, total_steps));
+                    }
+                }
             }
             EventPayload::Artifact {
                 path,
