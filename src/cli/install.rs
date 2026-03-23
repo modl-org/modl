@@ -263,7 +263,12 @@ fn prompt_variant_selection(manifest: &Manifest, vram: Option<u64>) -> Result<St
         .filter(|v| {
             if is_mps {
                 let id = v.id.to_lowercase();
-                !id.contains("fp8") && !id.contains("gguf")
+                let fmt = v.format.as_deref().unwrap_or("").to_lowercase();
+                let prec = v.precision.as_deref().unwrap_or("").to_lowercase();
+                !id.contains("fp8")
+                    && !id.contains("gguf")
+                    && fmt != "gguf"
+                    && !prec.contains("fp8")
             } else {
                 true
             }
