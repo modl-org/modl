@@ -305,20 +305,11 @@ class ModelCache:
 
     def _apply_lora(self, cached: CachedPipeline, spec: dict, emitter: EventEmitter) -> None:
         """Load and fuse a LoRA onto a cached pipeline."""
+        from modl_worker.adapters.lora_utils import apply_lora_from_spec
         lora_info = spec.get("lora")
-        if not lora_info:
-            return
-
-        lora_path = lora_info.get("path")
-        lora_weight = lora_info.get("weight", 1.0)
-        lora_name = lora_info.get("name", "unnamed")
-
-        if lora_path and os.path.exists(lora_path):
-            emitter.info(f"Loading LoRA: {lora_name} (weight={lora_weight})")
-            from modl_worker.adapters.lora_utils import load_lora_with_conversion
-            if load_lora_with_conversion(cached.pipeline, lora_path, lora_weight, emitter):
-                cached.lora_id = lora_path
-                cached.lora_weight = lora_weight
+        if apply_lora_from_spec(cached.pipeline, spec, emitter):
+            cached.lora_id = lora_info.get("path") if lora_info else None
+            cached.lora_weight = lora_info.get("weight", 1.0) if lora_info else 0.0
 
     def _evict_lru(self, emitter: EventEmitter) -> None:
         """Remove the least-recently-used model from the cache."""

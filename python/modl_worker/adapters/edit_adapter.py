@@ -4,13 +4,12 @@ Handles instruction-based image editing: takes one or more source images
 plus a text prompt describing the edit, produces an output image.
 """
 
-import hashlib
-import json
 import os
 import time
 from pathlib import Path
 
 from modl_worker.protocol import EventEmitter
+from modl_worker.image_util import save_and_emit_artifact
 
 
 def run_edit(config_path: Path, emitter: EventEmitter) -> int:
@@ -148,59 +147,29 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
 
         image_seed = seed + i if seed is not None else None
 
-        # Save image
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        filename = f"{timestamp}_{i:03d}.png" if count > 1 else f"{timestamp}.png"
-        filepath = os.path.join(output_dir, filename)
+        lora_info = spec.get("lora")
+        embedded_meta = {
+            "generated_with": "modl.run",
+            "mode": "edit",
+            "prompt": prompt,
+            "base_model_id": base_model_id,
+            "input_images": image_paths,
+            "steps": steps,
+            "guidance": guidance,
+            "seed": image_seed,
+            "lora_name": lora_info.get("name") if lora_info else None,
+            "lora_strength": lora_info.get("weight") if lora_info else None,
+            "image_index": i,
+            "count": count,
+        }
 
-        # Embed provenance metadata
-        save_kwargs = {}
-        if filepath.lower().endswith(".png"):
-            try:
-                from PIL.PngImagePlugin import PngInfo
-
-                lora_info = spec.get("lora")
-                embedded_meta = {
-                    "generated_with": "modl.run",
-                    "mode": "edit",
-                    "prompt": prompt,
-                    "base_model_id": base_model_id,
-                    "input_images": image_paths,
-                    "steps": steps,
-                    "guidance": guidance,
-                    "seed": image_seed,
-                    "lora_name": lora_info.get("name") if lora_info else None,
-                    "lora_strength": lora_info.get("weight") if lora_info else None,
-                    "image_index": i,
-                    "count": count,
-                    "timestamp": timestamp,
-                }
-                pnginfo = PngInfo()
-                pnginfo.add_text("Software", "modl.run")
-                pnginfo.add_text("Comment", "edited with modl.run")
-                pnginfo.add_text("modl_metadata", json.dumps(embedded_meta, separators=(",", ":")))
-                save_kwargs["pnginfo"] = pnginfo
-            except Exception:
-                pass
-
-        image.save(filepath, **save_kwargs)
-
-        sha256 = hashlib.sha256()
-        with open(filepath, "rb") as f:
-            for chunk in iter(lambda: f.read(8192), b""):
-                sha256.update(chunk)
-
-        size_bytes = os.path.getsize(filepath)
-
-        emitter.artifact(path=filepath, sha256=sha256.hexdigest(), size_bytes=size_bytes)
-        emitter.progress(
-            stage="edit",
-            step=i + 1,
-            total_steps=count,
-            eta_seconds=elapsed * (count - i - 1) if count > 1 else None,
+        filepath = save_and_emit_artifact(
+            image, output_dir, emitter,
+            index=i, count=count, metadata=embedded_meta,
+            stage="edit", elapsed=elapsed,
         )
-        artifact_paths.append(filepath)
-        emitter.info(f"Image {i + 1}/{count}: {filepath} ({elapsed:.1f}s)")
+        if filepath:
+            artifact_paths.append(filepath)
 
     if artifact_paths:
         emitter.completed(f"Edited {len(artifact_paths)} image(s)")
@@ -212,38 +181,8 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
 
 def _apply_lora(pipeline, spec: dict, emitter: EventEmitter) -> None:
     """Load and fuse a LoRA onto the edit pipeline if specified in the spec."""
-    lora_info = spec.get("lora")
-    if not lora_info:
-        return
-
-    lora_path = lora_info.get("path")
-    lora_weight = lora_info.get("weight", 1.0)
-    lora_name = lora_info.get("name", "unnamed")
-
-    # GGUF models: PEFT uses weight.shape (packed/quantized) for dimension matching,
-    # but GGUFLinear stores [out, packed] instead of [out, in]. This causes a mismatch
-    # with LoRA weights trained for the logical dimensions (in_features/out_features).
-    # TODO: Implement ComfyUI-style forward patching — load LoRA safetensors manually,
-    # wrap each target layer's forward to add the LoRA delta (lora_up @ lora_down * scale)
-    # using the logical dimensions. This bypasses PEFT entirely and is the proven approach
-    # for GGUF + LoRA in the ecosystem.
-    model_info = spec.get("model", {})
-    base_path = model_info.get("base_model_path", "")
-    if base_path and base_path.endswith(".gguf"):
-        raise RuntimeError(
-            f"Cannot apply LoRA '{lora_name}' to a GGUF model (not yet supported). "
-            f"Install a bf16 or fp8 variant: modl pull qwen-image-edit --variant fp8"
-        )
-
-    if lora_path and os.path.exists(lora_path):
-        emitter.info(f"Loading LoRA: {lora_name} (weight={lora_weight})")
-        lora_dir = os.path.dirname(lora_path)
-        lora_file = os.path.basename(lora_path)
-        pipeline.load_lora_weights(lora_dir, weight_name=lora_file)
-        pipeline.fuse_lora(lora_scale=lora_weight)
-        emitter.info(f"LoRA applied and fused")
-    elif lora_path:
-        emitter.warning("LORA_NOT_FOUND", f"LoRA file not found: {lora_path}")
+    from .lora_utils import apply_lora_from_spec
+    apply_lora_from_spec(pipeline, spec, emitter)
 
 
 def _load_edit_pipeline(base_model_id: str, base_model_path: str | None, emitter: EventEmitter):

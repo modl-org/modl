@@ -107,6 +107,47 @@ def load_lora_with_conversion(
                 pass
 
 
+def apply_lora_from_spec(pipeline, spec: dict, emitter) -> bool:
+    """Load and fuse a LoRA based on the job spec's ``lora`` block.
+
+    Handles:
+      - Skipping when no LoRA is specified
+      - GGUF incompatibility guard (raises RuntimeError)
+      - Missing file warning
+      - Key conversion fallback via ``load_lora_with_conversion``
+
+    Returns True if LoRA was applied, False otherwise.
+    """
+    lora_info = spec.get("lora")
+    if not lora_info:
+        return False
+
+    lora_path = lora_info.get("path")
+    lora_weight = lora_info.get("weight", 1.0)
+    lora_name = lora_info.get("name", "unnamed")
+
+    # GGUF models can't use PEFT-based LoRA (weight shape mismatch)
+    model_info = spec.get("model", {})
+    base_path = model_info.get("base_model_path", "")
+    if base_path and base_path.endswith(".gguf"):
+        raise RuntimeError(
+            f"Cannot apply LoRA '{lora_name}' to a GGUF model (not yet supported). "
+            f"Install a bf16 or fp8 variant: modl pull <model> --variant fp8"
+        )
+
+    if not lora_path:
+        return False
+
+    if not os.path.exists(lora_path):
+        if emitter:
+            emitter.warning("LORA_NOT_FOUND", f"LoRA file not found: {lora_path}")
+        return False
+
+    if emitter:
+        emitter.info(f"Loading LoRA: {lora_name} (weight={lora_weight})")
+    return load_lora_with_conversion(pipeline, lora_path, lora_weight, emitter)
+
+
 def _warn_lora_failed(emitter, message: str) -> None:
     """Emit a warning about LoRA loading failure."""
     if emitter:

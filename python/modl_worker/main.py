@@ -13,85 +13,38 @@ from modl_worker.adapters import (
 from modl_worker.protocol import EventEmitter, fatal
 
 
+# All commands that take --config + --job-id and dispatch to a run_* function
+_CONFIG_COMMANDS: dict[str, tuple[callable, str]] = {
+    "train":        (run_train,        "Run training adapter"),
+    "generate":     (run_generate,     "Run inference/generation adapter"),
+    "edit":         (run_edit,         "Run image editing adapter"),
+    "caption":      (run_caption,      "Run auto-captioning adapter"),
+    "resize":       (run_resize,       "Run batch image resize"),
+    "tag":          (run_tag,          "Run auto-tagging adapter"),
+    "score":        (run_score,        "Run aesthetic scoring adapter"),
+    "detect":       (run_detect,       "Run face detection adapter"),
+    "compare":      (run_compare,      "Run image comparison adapter"),
+    "segment":      (run_segment,      "Run image segmentation adapter"),
+    "face-restore": (run_face_restore, "Run face restoration adapter"),
+    "upscale":      (run_upscale,      "Run image upscaling adapter"),
+    "remove-bg":    (run_remove_bg,    "Run background removal adapter"),
+    "face-crop":    (run_face_crop,    "Detect faces and create close-up crops"),
+    "ground":       (run_ground,       "Run text-grounded object detection"),
+    "describe":     (run_describe,     "Run image captioning/description"),
+    "vl-tag":       (run_vl_tag,       "Run VL-based image tagging"),
+    "preprocess":   (run_preprocess,   "Run control image preprocessing"),
+    "lanpaint":     (run_lanpaint,     "Run LanPaint training-free inpainting"),
+}
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="modl_worker")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    train = sub.add_parser("train", help="Run training adapter")
-    train.add_argument("--config", required=True, help="Path to training config/spec yaml")
-    train.add_argument("--job-id", default="", help="Job ID for event envelope")
-
-    gen = sub.add_parser("generate", help="Run inference/generation adapter")
-    gen.add_argument("--config", required=True, help="Path to generate spec yaml")
-    gen.add_argument("--job-id", default="", help="Job ID for event envelope")
-
-    edt = sub.add_parser("edit", help="Run image editing adapter")
-    edt.add_argument("--config", required=True, help="Path to edit spec yaml")
-    edt.add_argument("--job-id", default="", help="Job ID for event envelope")
-
-    cap = sub.add_parser("caption", help="Run auto-captioning adapter")
-    cap.add_argument("--config", required=True, help="Path to caption spec yaml")
-    cap.add_argument("--job-id", default="", help="Job ID for event envelope")
-
-    rsz = sub.add_parser("resize", help="Run batch image resize")
-    rsz.add_argument("--config", required=True, help="Path to resize spec yaml")
-    rsz.add_argument("--job-id", default="", help="Job ID for event envelope")
-
-    tg = sub.add_parser("tag", help="Run auto-tagging adapter")
-    tg.add_argument("--config", required=True, help="Path to tag spec yaml")
-    tg.add_argument("--job-id", default="", help="Job ID for event envelope")
-
-    sc = sub.add_parser("score", help="Run aesthetic scoring adapter")
-    sc.add_argument("--config", required=True, help="Path to score spec yaml")
-    sc.add_argument("--job-id", default="", help="Job ID for event envelope")
-
-    det = sub.add_parser("detect", help="Run face detection adapter")
-    det.add_argument("--config", required=True, help="Path to detect spec yaml")
-    det.add_argument("--job-id", default="", help="Job ID for event envelope")
-
-    cmp = sub.add_parser("compare", help="Run image comparison adapter")
-    cmp.add_argument("--config", required=True, help="Path to compare spec yaml")
-    cmp.add_argument("--job-id", default="", help="Job ID for event envelope")
-
-    seg = sub.add_parser("segment", help="Run image segmentation adapter")
-    seg.add_argument("--config", required=True, help="Path to segment spec yaml")
-    seg.add_argument("--job-id", default="", help="Job ID for event envelope")
-
-    fr = sub.add_parser("face-restore", help="Run face restoration adapter")
-    fr.add_argument("--config", required=True, help="Path to face restore spec yaml")
-    fr.add_argument("--job-id", default="", help="Job ID for event envelope")
-
-    ups = sub.add_parser("upscale", help="Run image upscaling adapter")
-    ups.add_argument("--config", required=True, help="Path to upscale spec yaml")
-    ups.add_argument("--job-id", default="", help="Job ID for event envelope")
-
-    rbg = sub.add_parser("remove-bg", help="Run background removal adapter")
-    rbg.add_argument("--config", required=True, help="Path to remove-bg spec yaml")
-    rbg.add_argument("--job-id", default="", help="Job ID for event envelope")
-
-    fc = sub.add_parser("face-crop", help="Detect faces and create close-up crops")
-    fc.add_argument("--config", required=True, help="Path to face-crop spec yaml")
-    fc.add_argument("--job-id", default="", help="Job ID for event envelope")
-
-    gnd = sub.add_parser("ground", help="Run text-grounded object detection")
-    gnd.add_argument("--config", required=True, help="Path to ground spec yaml")
-    gnd.add_argument("--job-id", default="", help="Job ID for event envelope")
-
-    desc = sub.add_parser("describe", help="Run image captioning/description")
-    desc.add_argument("--config", required=True, help="Path to describe spec yaml")
-    desc.add_argument("--job-id", default="", help="Job ID for event envelope")
-
-    vlt = sub.add_parser("vl-tag", help="Run VL-based image tagging")
-    vlt.add_argument("--config", required=True, help="Path to vl-tag spec yaml")
-    vlt.add_argument("--job-id", default="", help="Job ID for event envelope")
-
-    pre = sub.add_parser("preprocess", help="Run control image preprocessing")
-    pre.add_argument("--config", required=True, help="Path to preprocess spec yaml")
-    pre.add_argument("--job-id", default="", help="Job ID for event envelope")
-
-    lp = sub.add_parser("lanpaint", help="Run LanPaint training-free inpainting")
-    lp.add_argument("--config", required=True, help="Path to generate spec yaml")
-    lp.add_argument("--job-id", default="", help="Job ID for event envelope")
+    for cmd_name, (_fn, help_text) in _CONFIG_COMMANDS.items():
+        p = sub.add_parser(cmd_name, help=help_text)
+        p.add_argument("--config", required=True, help=f"Path to {cmd_name} spec yaml")
+        p.add_argument("--job-id", default="", help="Job ID for event envelope")
 
     srv = sub.add_parser("serve", help="Start persistent worker daemon")
     srv.add_argument("--timeout", type=int, default=600, help="Idle timeout in seconds (default: 600)")
@@ -106,110 +59,19 @@ def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
 
-    job_id = getattr(args, "job_id", "") or ""
-    emitter = EventEmitter(source="modl_worker", job_id=job_id)
-
-    if args.command == "train":
-        config_path = Path(args.config)
-        emitter.job_accepted(worker_pid=os.getpid())
-        return run_train(config_path, emitter)
-
-    if args.command == "generate":
-        config_path = Path(args.config)
-        emitter.job_accepted(worker_pid=os.getpid())
-        return run_generate(config_path, emitter)
-
-    if args.command == "edit":
-        config_path = Path(args.config)
-        emitter.job_accepted(worker_pid=os.getpid())
-        return run_edit(config_path, emitter)
-
-    if args.command == "caption":
-        config_path = Path(args.config)
-        emitter.job_accepted(worker_pid=os.getpid())
-        return run_caption(config_path, emitter)
-
-    if args.command == "resize":
-        config_path = Path(args.config)
-        emitter.job_accepted(worker_pid=os.getpid())
-        return run_resize(config_path, emitter)
-
-    if args.command == "tag":
-        config_path = Path(args.config)
-        emitter.job_accepted(worker_pid=os.getpid())
-        return run_tag(config_path, emitter)
-
-    if args.command == "score":
-        config_path = Path(args.config)
-        emitter.job_accepted(worker_pid=os.getpid())
-        return run_score(config_path, emitter)
-
-    if args.command == "detect":
-        config_path = Path(args.config)
-        emitter.job_accepted(worker_pid=os.getpid())
-        return run_detect(config_path, emitter)
-
-    if args.command == "compare":
-        config_path = Path(args.config)
-        emitter.job_accepted(worker_pid=os.getpid())
-        return run_compare(config_path, emitter)
-
-    if args.command == "segment":
-        config_path = Path(args.config)
-        emitter.job_accepted(worker_pid=os.getpid())
-        return run_segment(config_path, emitter)
-
-    if args.command == "face-restore":
-        config_path = Path(args.config)
-        emitter.job_accepted(worker_pid=os.getpid())
-        return run_face_restore(config_path, emitter)
-
-    if args.command == "upscale":
-        config_path = Path(args.config)
-        emitter.job_accepted(worker_pid=os.getpid())
-        return run_upscale(config_path, emitter)
-
-    if args.command == "remove-bg":
-        config_path = Path(args.config)
-        emitter.job_accepted(worker_pid=os.getpid())
-        return run_remove_bg(config_path, emitter)
-
-    if args.command == "face-crop":
-        config_path = Path(args.config)
-        emitter.job_accepted(worker_pid=os.getpid())
-        return run_face_crop(config_path, emitter)
-
-    if args.command == "ground":
-        config_path = Path(args.config)
-        emitter.job_accepted(worker_pid=os.getpid())
-        return run_ground(config_path, emitter)
-
-    if args.command == "describe":
-        config_path = Path(args.config)
-        emitter.job_accepted(worker_pid=os.getpid())
-        return run_describe(config_path, emitter)
-
-    if args.command == "vl-tag":
-        config_path = Path(args.config)
-        emitter.job_accepted(worker_pid=os.getpid())
-        return run_vl_tag(config_path, emitter)
-
-    if args.command == "preprocess":
-        config_path = Path(args.config)
-        emitter.job_accepted(worker_pid=os.getpid())
-        return run_preprocess(config_path, emitter)
-
-    if args.command == "lanpaint":
-        config_path = Path(args.config)
-        emitter.job_accepted(worker_pid=os.getpid())
-        return run_lanpaint(config_path, emitter)
-
     if args.command == "serve":
         from modl_worker.serve import run_serve
         return run_serve(timeout=args.timeout, max_models=args.max_models)
 
-    fatal(f"Unsupported command: {args.command}")
-    return 1
+    fn = _CONFIG_COMMANDS.get(args.command)
+    if fn is None:
+        fatal(f"Unsupported command: {args.command}")
+        return 1
+
+    job_id = getattr(args, "job_id", "") or ""
+    emitter = EventEmitter(source="modl_worker", job_id=job_id)
+    emitter.job_accepted(worker_pid=os.getpid())
+    return fn[0](Path(args.config), emitter)
 
 
 if __name__ == "__main__":

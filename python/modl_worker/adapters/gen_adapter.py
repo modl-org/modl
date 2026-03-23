@@ -11,13 +11,12 @@ and the one-shot entry point.
 Outputs are saved as PNG and emitted as artifact events.
 """
 
-import hashlib
-import json
 import os
 import time
 from pathlib import Path
 
 from modl_worker.protocol import EventEmitter
+from modl_worker.image_util import save_and_emit_artifact
 from modl_worker.adapters.arch_config import (
     resolve_pipeline_class_for_mode,
     resolve_gen_defaults,
@@ -115,13 +114,8 @@ def run_generate(config_path: Path, emitter: EventEmitter) -> int:
         )
 
         # Load LoRA if specified
-        if lora_info:
-            lora_path = lora_info.get("path")
-            lora_weight = lora_info.get("weight", 1.0)
-            if lora_path and os.path.exists(lora_path):
-                emitter.info(f"Loading LoRA: {lora_info.get('name', 'unnamed')} (weight={lora_weight})")
-                from modl_worker.adapters.lora_utils import load_lora_with_conversion
-                load_lora_with_conversion(pipe, lora_path, lora_weight, emitter)
+        from modl_worker.adapters.lora_utils import apply_lora_from_spec
+        apply_lora_from_spec(pipe, spec, emitter)
 
         emitter.job_started(config=str(config_path))
 
@@ -398,90 +392,48 @@ def run_generate_with_pipeline(
 
         image_seed = seed + i if seed is not None else None
 
-        # Save image
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        filename = f"{timestamp}_{i:03d}.png" if count > 1 else f"{timestamp}.png"
-        filepath = os.path.join(output_dir, filename)
+        # Build provenance metadata for PNG text chunks
+        model_files = {}
+        if hasattr(pipe, "_modl_loaded_files"):
+            for comp, info in pipe._modl_loaded_files.items():
+                model_files[comp] = {"file": info["file"], "dtype": info["weight_dtype"]}
 
-        # Persist provenance in PNG text chunks for portability across tools.
-        save_kwargs = {}
-        if filepath.lower().endswith(".png"):
-            try:
-                from PIL.PngImagePlugin import PngInfo
-
-                # Collect model file info if available (from assemble_pipeline)
-                model_files = {}
-                if hasattr(pipe, "_modl_loaded_files"):
-                    for comp, info in pipe._modl_loaded_files.items():
-                        model_files[comp] = {
-                            "file": info["file"],
-                            "dtype": info["weight_dtype"],
-                        }
-
-                # ControlNet metadata
-                cn_meta = None
-                if cn_inputs:
-                    cn_meta = [
-                        {
-                            "image": Path(inp["image"]).name,
-                            "type": inp.get("control_type", "canny"),
-                            "strength": inp.get("strength", 0.75),
-                            "end": inp.get("control_end", 0.8),
-                        }
-                        for inp in cn_inputs
-                    ]
-
-                embedded_meta = {
-                    "generated_with": "modl.run",
-                    "prompt": prompt,
-                    "base_model_id": base_model_id,
-                    "lora_name": lora_info.get("name") if lora_info else None,
-                    "lora_strength": lora_info.get("weight") if lora_info else None,
-                    "width": width,
-                    "height": height,
-                    "steps": steps,
-                    "guidance": guidance,
-                    "seed": image_seed,
-                    "image_index": i,
-                    "count": count,
-                    "timestamp": timestamp,
-                    "model_files": model_files or None,
-                    "controlnet": cn_meta,
+        cn_meta = None
+        if cn_inputs:
+            cn_meta = [
+                {
+                    "image": Path(inp["image"]).name,
+                    "type": inp.get("control_type", "canny"),
+                    "strength": inp.get("strength", 0.75),
+                    "end": inp.get("control_end", 0.8),
                 }
-                pnginfo = PngInfo()
-                pnginfo.add_text("Software", "modl.run")
-                pnginfo.add_text("Comment", "generated with modl.run")
-                pnginfo.add_text("modl_metadata", json.dumps(embedded_meta, separators=(",", ":")))
-                save_kwargs["pnginfo"] = pnginfo
-            except Exception:
-                # Non-fatal: save image even if metadata embedding fails.
-                pass
+                for inp in cn_inputs
+            ]
 
-        image.save(filepath, **save_kwargs)
+        embedded_meta = {
+            "generated_with": "modl.run",
+            "prompt": prompt,
+            "base_model_id": base_model_id,
+            "lora_name": lora_info.get("name") if lora_info else None,
+            "lora_strength": lora_info.get("weight") if lora_info else None,
+            "width": width,
+            "height": height,
+            "steps": steps,
+            "guidance": guidance,
+            "seed": image_seed,
+            "image_index": i,
+            "count": count,
+            "model_files": model_files or None,
+            "controlnet": cn_meta,
+        }
 
-        # Hash the output
-        sha256 = hashlib.sha256()
-        with open(filepath, "rb") as f:
-            for chunk in iter(lambda: f.read(8192), b""):
-                sha256.update(chunk)
-
-        size_bytes = os.path.getsize(filepath)
-
-        emitter.artifact(
-            path=filepath,
-            sha256=sha256.hexdigest(),
-            size_bytes=size_bytes,
+        filepath = save_and_emit_artifact(
+            image, output_dir, emitter,
+            index=i, count=count, metadata=embedded_meta,
+            stage="generate", elapsed=elapsed,
         )
-
-        emitter.progress(
-            stage="generate",
-            step=i + 1,
-            total_steps=count,
-            eta_seconds=elapsed * (count - i - 1) if count > 1 else None,
-        )
-
-        artifact_paths.append(filepath)
-        emitter.info(f"Image {i + 1}/{count}: {filepath} ({elapsed:.1f}s)")
+        if filepath:
+            artifact_paths.append(filepath)
 
     # Clean up control wrapper state
     if _cn_wrapper is not None:
