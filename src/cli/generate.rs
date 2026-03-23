@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use console::style;
+use image::GenericImageView;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 
@@ -200,6 +201,162 @@ fn resolve_inpaint_model(base_model: &str, db: &Database) -> (String, Option<Str
     )
 }
 
+/// Parsed outpaint specification.
+#[derive(Debug, Clone)]
+struct OutpaintSpec {
+    left: u32,
+    right: u32,
+    top: u32,
+    bottom: u32,
+    #[allow(dead_code)] // reserved for future feathering support
+    feather: u32,
+}
+
+/// Parse an outpaint string like "right=256", "left=128,right=128,feather=40", or "all=256".
+fn parse_outpaint(spec: &str) -> Result<OutpaintSpec> {
+    let mut left = 0u32;
+    let mut right = 0u32;
+    let mut top = 0u32;
+    let mut bottom = 0u32;
+    let mut feather = 32u32;
+
+    for part in spec.split(',') {
+        let part = part.trim();
+        if let Some((key, val)) = part.split_once('=') {
+            let val: u32 = val
+                .trim()
+                .parse()
+                .with_context(|| format!("Invalid outpaint value: {part}"))?;
+            match key.trim() {
+                "left" | "l" => left = val,
+                "right" | "r" => right = val,
+                "top" | "t" => top = val,
+                "bottom" | "b" => bottom = val,
+                "all" | "a" => {
+                    left = val;
+                    right = val;
+                    top = val;
+                    bottom = val;
+                }
+                "feather" | "f" => feather = val,
+                _ => anyhow::bail!(
+                    "Unknown outpaint key: {key}. Use left, right, top, bottom, all, or feather."
+                ),
+            }
+        } else {
+            // Bare number = all sides
+            let val: u32 = part.parse().with_context(|| {
+                format!("Invalid outpaint spec: {part}. Use 'right=256' or '256' for all sides.")
+            })?;
+            left = val;
+            right = val;
+            top = val;
+            bottom = val;
+        }
+    }
+
+    if left == 0 && right == 0 && top == 0 && bottom == 0 {
+        anyhow::bail!(
+            "Outpaint spec must extend at least one direction. Example: --outpaint 'right=256'"
+        );
+    }
+
+    // Round to multiples of 8 (VAE requirement)
+    left = left.div_ceil(8) * 8;
+    right = right.div_ceil(8) * 8;
+    top = top.div_ceil(8) * 8;
+    bottom = bottom.div_ceil(8) * 8;
+
+    Ok(OutpaintSpec {
+        left,
+        right,
+        top,
+        bottom,
+        feather,
+    })
+}
+
+/// Pad an image for outpainting by extending edge pixels with a gradient blur.
+///
+/// Strategy: fill padded areas by repeating the nearest edge pixel, then
+/// apply a progressive gaussian blur so content fades smoothly away from
+/// the original edges. This avoids the mirror-symmetry artifacts that
+/// reflected padding can produce.
+fn pad_image_for_outpaint(
+    init_image_path: &str,
+    spec: &OutpaintSpec,
+) -> Result<(String, u32, u32)> {
+    let img = image::open(init_image_path)
+        .with_context(|| format!("Cannot open init-image: {init_image_path}"))?;
+    let (orig_w, orig_h) = img.dimensions();
+
+    let new_w = orig_w + spec.left + spec.right;
+    let new_h = orig_h + spec.top + spec.bottom;
+
+    let mut padded = image::RgbImage::new(new_w, new_h);
+    let rgb = img.to_rgb8();
+
+    // Place original image
+    for y in 0..orig_h {
+        for x in 0..orig_w {
+            padded.put_pixel(x + spec.left, y + spec.top, *rgb.get_pixel(x, y));
+        }
+    }
+
+    // Fill padded areas with nearest edge pixel (edge-extend / clamp)
+    for y in 0..new_h {
+        for x in 0..new_w {
+            if x >= spec.left && x < spec.left + orig_w && y >= spec.top && y < spec.top + orig_h {
+                continue;
+            }
+
+            let src_x = if x < spec.left {
+                0
+            } else if x >= spec.left + orig_w {
+                orig_w - 1
+            } else {
+                x - spec.left
+            };
+
+            let src_y = if y < spec.top {
+                0
+            } else if y >= spec.top + orig_h {
+                orig_h - 1
+            } else {
+                y - spec.top
+            };
+
+            padded.put_pixel(x, y, *rgb.get_pixel(src_x, src_y));
+        }
+    }
+
+    // Apply gaussian blur to the padded image, then paste original back on top.
+    // This creates a smooth, blurry transition in the padded areas while keeping
+    // the original pixel-perfect.
+    let max_pad = spec.left.max(spec.right).max(spec.top).max(spec.bottom);
+    let blur_sigma = (max_pad as f32 / 4.0).max(8.0);
+    let blurred = image::DynamicImage::ImageRgb8(padded).blur(blur_sigma);
+    let mut result = blurred.to_rgb8();
+
+    // Paste original back (sharp, untouched)
+    for y in 0..orig_h {
+        for x in 0..orig_w {
+            result.put_pixel(x + spec.left, y + spec.top, *rgb.get_pixel(x, y));
+        }
+    }
+
+    // Save to tmp
+    let tmp_dir = crate::core::paths::modl_root().join("tmp");
+    std::fs::create_dir_all(&tmp_dir)?;
+    let filename = format!("outpaint_{}.png", chrono::Utc::now().timestamp_millis());
+    let dest = tmp_dir.join(&filename);
+    result
+        .save(&dest)
+        .with_context(|| format!("Failed to save padded image to {}", dest.display()))?;
+
+    Ok((dest.to_string_lossy().to_string(), new_w, new_h))
+}
+
 /// All arguments for `modl generate`, used by both CLI and web UI.
 pub struct GenerateArgs<'a> {
     pub prompt: &'a str,
@@ -222,6 +379,7 @@ pub struct GenerateArgs<'a> {
     pub style_ref: &'a [String],
     pub style_strength: f32,
     pub style_type: Option<&'a str>,
+    pub outpaint: Option<&'a str>,
     pub fast: bool,
     pub cloud: bool,
     pub provider: Option<CloudProvider>,
@@ -254,6 +412,7 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
         style_ref,
         style_strength,
         style_type,
+        outpaint,
         fast,
         cloud,
         provider,
@@ -351,6 +510,119 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
         if !PathBuf::from(path).exists() {
             anyhow::bail!("Mask image not found: {path}");
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Outpaint: pad image and route to edit pipeline
+    // -------------------------------------------------------------------
+    if let Some(outpaint_spec) = outpaint {
+        let init_path =
+            init_image.ok_or_else(|| anyhow::anyhow!("--outpaint requires --init-image"))?;
+
+        // Check model supports edit mode
+        let model_info = model_family::resolve_model(&base_model);
+        let supports_edit = model_info.is_some_and(|m| m.capabilities.edit);
+        if !supports_edit {
+            let name = model_info.map_or(&base_model as &str, |m| m.name);
+            anyhow::bail!(
+                "{} does not support outpainting (no edit capability). \
+                 Models with outpaint support: flux2-klein-9b, flux2-klein-4b, qwen-image-edit",
+                name
+            );
+        }
+
+        let outpaint = parse_outpaint(outpaint_spec)?;
+
+        // Pad the image
+        let (padded_path, new_w, new_h) = pad_image_for_outpaint(init_path, &outpaint)?;
+
+        // Resolve defaults
+        let (default_steps, default_guidance) = model_family::model_defaults(&base_model);
+        let steps = steps.or(fast_steps).unwrap_or(default_steps);
+        let guidance = guidance.or(fast_guidance).unwrap_or(default_guidance);
+
+        if !json {
+            let dirs: Vec<String> = [
+                (outpaint.left, "left"),
+                (outpaint.right, "right"),
+                (outpaint.top, "top"),
+                (outpaint.bottom, "bottom"),
+            ]
+            .iter()
+            .filter(|(v, _)| *v > 0)
+            .map(|(v, d)| format!("{d}={v}"))
+            .collect();
+            println!(
+                "{} Outpainting via edit pipeline [{}]...",
+                style("→").cyan(),
+                dirs.join(", ")
+            );
+            println!("  Prompt: {}", style(prompt).italic());
+            println!("  Model:  {}", base_model);
+            if fast {
+                println!(
+                    "  Mode:   {}",
+                    style("fast (Lightning LoRA)").green().bold()
+                );
+            }
+            if let Some(ref lr) = lora_ref
+                && !fast
+            {
+                println!("  LoRA:   {} (strength: {:.2})", lr.name, lr.weight);
+            }
+            println!(
+                "  Source:  {} ({}×{})",
+                init_path,
+                new_w - outpaint.left - outpaint.right,
+                new_h - outpaint.top - outpaint.bottom
+            );
+            println!("  Output:  {}×{}", new_w, new_h);
+            println!("  Steps:  {}", steps);
+            if let Some(s) = seed {
+                println!("  Seed:   {}", s);
+            }
+            if count > 1 {
+                println!("  Count:  {}", count);
+            }
+        }
+
+        // Build an EditJobSpec and route to the edit pipeline
+        let date = chrono::Local::now().format("%Y-%m-%d");
+        let output_dir = crate::core::paths::modl_root()
+            .join("outputs")
+            .join(date.to_string());
+        std::fs::create_dir_all(&output_dir)?;
+
+        let spec = EditJobSpec {
+            prompt: prompt.to_string(),
+            model: ModelRef {
+                base_model_id: base_model.clone(),
+                base_model_path: base_model_path.clone(),
+            },
+            lora: lora_ref,
+            output: GenerateOutputRef {
+                output_dir: output_dir.to_string_lossy().to_string(),
+            },
+            params: EditParams {
+                image_paths: vec![padded_path],
+                steps,
+                guidance,
+                seed,
+                count,
+            },
+            runtime: RuntimeRef {
+                profile: "trainer-cu124".to_string(),
+                python_version: Some("3.11.11".to_string()),
+            },
+            target: if cloud {
+                ExecutionTarget::Cloud
+            } else {
+                ExecutionTarget::Local
+            },
+            labels: std::collections::HashMap::new(),
+        };
+
+        return crate::cli::edit::execute_edit(spec, cloud, provider, no_worker, json).await;
     }
 
     // Check model supports the requested mode

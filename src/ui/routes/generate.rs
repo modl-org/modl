@@ -180,6 +180,7 @@ async fn run_single_generate(sender: &broadcast::Sender<String>, req: GenerateRe
         style_ref: &[],
         style_strength: 0.6,
         style_type: None,
+        outpaint: None,
         fast: req.fast,
         cloud: false,
         provider: None,
