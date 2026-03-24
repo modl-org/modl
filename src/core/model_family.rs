@@ -383,7 +383,7 @@ pub static FAMILIES: &[ModelFamily] = &[
                     lanpaint_inpaint: true,
                 },
                 default_steps: 8,
-                default_guidance: 1.0,
+                default_guidance: 0.0,
                 default_resolution: 1024,
                 quality: 3,
                 speed: 4,

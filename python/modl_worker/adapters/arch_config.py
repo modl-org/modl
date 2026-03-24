@@ -333,7 +333,7 @@ ARCH_CONFIGS: dict[str, dict] = {
             },
             "scheduler": {
                 "model_class": "FlowMatchEulerDiscreteScheduler",
-                "config_dir": "zimage-scheduler",
+                "config_dir": "zimage-turbo-scheduler",
             },
         },
         "model_flags": {
@@ -353,7 +353,7 @@ ARCH_CONFIGS: dict[str, dict] = {
             # linear_timesteps2 (high-noise bias) set per lora_type in config_builder
             "cache_text_embeddings": True,
         },
-        "sample": {"sampler": "flowmatch", "steps": 8, "guidance": 1.0, "neg": ""},
+        "sample": {"sampler": "flowmatch", "steps": 8, "guidance": 0.0, "neg": ""},
     },
     "zimage": {
         "pipeline_class": "ZImagePipeline",
