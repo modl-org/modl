@@ -167,14 +167,8 @@ def apply_lora_from_spec(pipeline, spec: dict, emitter) -> bool:
     lora_weight = lora_info.get("weight", 1.0)
     lora_name = lora_info.get("name", "unnamed")
 
-    # GGUF models can't use PEFT-based LoRA (weight shape mismatch)
-    model_info = spec.get("model", {})
-    base_path = model_info.get("base_model_path", "")
-    if base_path and base_path.endswith(".gguf"):
-        raise RuntimeError(
-            f"Cannot apply LoRA '{lora_name}' to a GGUF model (not yet supported). "
-            f"Install a bf16 or fp8 variant: modl pull <model> --variant fp8"
-        )
+    # GGUF models support PEFT LoRA via diffusers' GGUFQuantizationConfig.
+    # The LoRA adapters compute in bf16 on top of the quantized base weights.
 
     if not lora_path:
         _apply_deferred_fp8_casting(pipeline, emitter)
