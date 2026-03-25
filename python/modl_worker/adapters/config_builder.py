@@ -164,8 +164,10 @@ def build_train_block(arch_key: str, params: dict, lora_type: str, resume_step: 
     lr = params.get("learning_rate", 1e-4)
     is_klein = arch_key.startswith("flux2_klein")
 
-    # Z-Image: LR must not exceed 1e-4 — higher values break the distillation
-    if is_zimage and lr > 1e-4:
+    # Z-Image: LR must not exceed 1e-4 for adamw — higher values break distillation.
+    # Community consensus: prodigy optimizer is far better for ZIB character training.
+    # adamw often fails to converge on ZIB; prodigy with lr=1.0 auto-adapts.
+    if is_zimage and lr > 1e-4 and params.get("optimizer", "adamw8bit") not in ("prodigy",):
         print(f"[modl] WARNING: Clamping LR from {lr} to 1e-4 for Z-Image (higher LR breaks distillation)")
         lr = 1e-4
 
@@ -199,15 +201,37 @@ def build_train_block(arch_key: str, params: dict, lora_type: str, resume_step: 
             # uint6 needs ~30GB; int4 has severe degradation.
             # No LR bump needed — 1e-4 with rank 16 is the tested recipe.
 
+    # Z-Image Base: prodigy optimizer is significantly better for character training.
+    # Community consensus: adamw8bit often fails to converge on ZIB, prodigy auto-adapts.
+    # prodigy needs lr=1.0 (it auto-tunes the actual LR internally).
+    default_optimizer = "adamw8bit"
+    if is_zimage and arch_key == "zimage":
+        user_optimizer = params.get("optimizer")
+        if not user_optimizer or user_optimizer == "adamw8bit":
+            default_optimizer = "prodigy"
+            lr = 1.0
+            print("[modl] Z-Image Base: using prodigy optimizer (better convergence than adamw)")
+
     train = {
         "batch_size": bs,
         "steps": steps,
         "gradient_accumulation_steps": 1,
         "train_unet": True,
         "gradient_checkpointing": True,
-        "optimizer": params.get("optimizer", "adamw8bit"),
+        "optimizer": params.get("optimizer", default_optimizer),
         "lr": lr,
     }
+
+    # Prodigy-specific settings
+    if train["optimizer"] == "prodigy":
+        train["lr"] = 1.0
+        train["optimizer_params"] = {
+            "weight_decay": 0.01,
+            "decouple": True,
+            "use_bias_correction": True,
+            "safeguard_warmup": False,
+        }
+        train["stochastic_rounding"] = True
 
     if is_style:
         train["content_or_style"] = "style"
@@ -216,9 +240,8 @@ def build_train_block(arch_key: str, params: dict, lora_type: str, resume_step: 
     train["noise_scheduler"] = arch["noise_scheduler"]
     train["dtype"] = arch["dtype"]
 
-    # EMA for most architectures
-    if arch_key not in ("sd15",):
-        train["ema_config"] = {"use_ema": True, "ema_decay": 0.99}
+    # EMA: disabled for LoRA — minimal benefit, slows training significantly.
+    # Community consensus from extensive Z-Image/Klein testing.
 
     # SDXL-specific noise_offset
     if arch_key == "sdxl":
@@ -228,13 +251,11 @@ def build_train_block(arch_key: str, params: dict, lora_type: str, resume_step: 
     extra = arch.get("extra_train", {})
     train.update(extra)
 
-    # Z-Image Turbo style-specific settings (per Ostris):
-    # - Differential guidance (scale=3): overshoots training target to converge faster.
-    # - linear_timesteps2 (high-noise bias) is a two-phase technique — NOT from step 0.
-    #   TODO: support mid-training phase switching for advanced users.
-    if is_zimage and is_style:
+    # Z-Image: differential guidance helps both style and character training.
+    # Community tested: scale 3-4 for style, 3 for character.
+    if is_zimage:
         train["do_differential_guidance"] = True
-        train["differential_guidance_scale"] = 3.0
+        train["differential_guidance_scale"] = 4.0 if is_style else 3.0
 
     # Resume: tell ai-toolkit to start counting from the checkpoint step
     if resume_step is not None:

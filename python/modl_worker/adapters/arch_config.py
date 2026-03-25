@@ -395,7 +395,7 @@ ARCH_CONFIGS: dict[str, dict] = {
         "resolutions": [512, 768, 1024],
         "default_resolution": 1024,
         "extra_train": {"timestep_type": "weighted"},
-        "sample": {"sampler": "flowmatch", "steps": 30, "guidance": 4.0, "neg": ""},
+        "sample": {"sampler": "flowmatch", "steps": 30, "guidance": 6.0, "neg": ""},
     },
     "chroma": {
         "pipeline_class": "ChromaPipeline",
