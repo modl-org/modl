@@ -98,8 +98,12 @@ def build_sample_prompts(
     # this is the new normal."
     no_trigger_style = arch_key in ("qwen_image", "zimage_turbo") and lora_type == "style"
 
-    # Build the subject token: "OHWX man" or just "OHWX" if no class word
+    # Build subject tokens for sample prompts.
+    # Use trigger+class for the training default_caption (ai-toolkit injects this).
+    # For sample prompts, use class_word only when available — avoids text-capable
+    # models (Z-Image, Klein, Flux) rendering the trigger word as literal text.
     subject = f"{trigger_word} {class_word}" if class_word else trigger_word
+    sample_subject = class_word if class_word else trigger_word
 
     if lora_type == "style":
         if no_trigger_style:
@@ -116,19 +120,20 @@ def build_sample_prompts(
             f"a still life of fruit and flowers, {trigger_word} style",
         ]
     elif lora_type == "character":
+        # Use trigger in first prompt (identity test) and class_word for the rest
+        # to avoid text-capable models rendering trigger as literal text.
         return [
             # Identity prompts — does the LoRA capture likeness?
             f"a photo of {subject}",
-            f"a portrait of {subject} smiling",
-            f"{subject} standing in a park, natural daylight",
-            f"a close-up photo of {subject}, dramatic lighting",
+            f"a portrait of {sample_subject} smiling",
+            f"a {sample_subject} standing in a park, natural daylight",
+            f"a close-up photo of {sample_subject}, dramatic lighting",
             # Generalization — does it work in novel settings?
-            f"{subject} wearing a red jacket, city street background",
-            f"{subject} at the beach, sunset lighting",
+            f"a {sample_subject} wearing a red jacket, city street background",
+            f"a {sample_subject} at the beach, sunset lighting",
             # Style diversity — does the LoRA overfit to photorealism?
-            f"a watercolor painting of {subject}",
-            f"a pencil sketch of {subject}",
-            f"an illustration of {subject} in a cartoon style",
+            f"a watercolor painting of a {sample_subject}",
+            f"a pencil sketch of a {sample_subject}",
             # Bleed/overfit check — does the LoRA contaminate non-trigger prompts?
             "a portrait of a woman smiling",
             "a golden retriever in a garden",
@@ -136,11 +141,10 @@ def build_sample_prompts(
     else:  # object
         return [
             f"a photo of {subject}",
-            f"a {subject} on a table",
-            f"a {subject} in a natural setting",
-            # Style diversity — detect overfitting to photorealism
-            f"a watercolor painting of a {subject}",
-            f"an illustration of a {subject}",
+            f"a {sample_subject} on a table",
+            f"a {sample_subject} in a natural setting",
+            f"a watercolor painting of a {sample_subject}",
+            f"an illustration of a {sample_subject}",
         ]
 
 
