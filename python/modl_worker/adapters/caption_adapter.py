@@ -227,10 +227,12 @@ def run_caption(config_path: Path, emitter: EventEmitter) -> int:
             from modl_worker.adapters.vl_common import load_qwen_vl, run_vl_inference
             model, processor = load_qwen_vl(emitter)
             if style_mode:
-                _qwen_prompt = "Describe what is depicted in this image without mentioning the art style, medium, or drawing technique. Be concise."
+                _qwen_prompt = "You are captioning training data. Describe ONLY the content: subjects, objects, actions, and setting. Never use words like: drawing, painting, sketch, illustration, hand-drawn, childlike, child's, artwork, artistic, cartoon, doodle, depicted, rendered. Treat every image as a photograph of a real scene. Write one sentence."
+                _max_tokens = 80
             else:
-                _qwen_prompt = "Describe this image in detail, including all objects, people, and the setting."
-            caption_fn = lambda m, p, img: run_vl_inference(m, p, str(img), _qwen_prompt, max_tokens=256)
+                _qwen_prompt = "Write a concise caption for this image in one or two sentences. Describe the subject, their pose or action, and the setting. Do not start with 'This is' or 'The image shows'."
+                _max_tokens = 100
+            caption_fn = lambda m, p, img: run_vl_inference(m, p, str(img), _qwen_prompt, max_tokens=_max_tokens)
         else:
             emitter.error(
                 "UNKNOWN_MODEL",
