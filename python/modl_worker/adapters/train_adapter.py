@@ -256,6 +256,22 @@ def _write_phase_config(
     if resume_from:
         phase_spec["params"]["resume_from"] = resume_from
         resume_step = _step_from_checkpoint_path(resume_from) or 0
+
+        # Final checkpoints (e.g. maxi-zimage.safetensors) have no step suffix.
+        # Infer the step from the highest numbered checkpoint in the same dir.
+        if resume_step == 0:
+            from pathlib import Path as _P
+            ckpt_dir = _P(resume_from).parent
+            if ckpt_dir.exists():
+                max_step = 0
+                for f in ckpt_dir.glob("*.safetensors"):
+                    s = _step_from_checkpoint_path(str(f))
+                    if s and s > max_step:
+                        max_step = s
+                if max_step > 0:
+                    resume_step = max_step
+                    print(f"[modl] Inferred resume step {resume_step} from directory checkpoints")
+
         phase_spec["params"]["steps"] = resume_step + phase_steps
         if resume_step:
             print(f"[modl] Phase target: step {resume_step} + {phase_steps} = {resume_step + phase_steps}")
@@ -329,6 +345,25 @@ def run_train(config_path: Path, emitter: EventEmitter) -> int:
 
     from .arch_config import detect_arch
     arch_key = detect_arch(base_model_id)
+
+    # Klein models need the Qwen tokenizer cached for ai-toolkit.
+    # modl pull only installs the safetensors weights; the tokenizer
+    # (config.json, tokenizer.json, etc.) must come from HuggingFace.
+    _klein_tokenizer_repos = {
+        "flux2_klein": "Qwen/Qwen3-4B",
+        "flux2_klein_base": "Qwen/Qwen3-4B",
+        "flux2_klein_9b": "Qwen/Qwen3-8B",
+        "flux2_klein_base_9b": "Qwen/Qwen3-8B",
+    }
+    if arch_key in _klein_tokenizer_repos:
+        _tok_repo = _klein_tokenizer_repos[arch_key]
+        try:
+            from transformers import AutoTokenizer
+            emitter.info(f"Ensuring {_tok_repo} tokenizer is cached...")
+            AutoTokenizer.from_pretrained(_tok_repo, trust_remote_code=True)
+        except Exception as e:
+            emitter.warning("TOKENIZER_CACHE", f"Failed to cache {_tok_repo} tokenizer: {e}")
+
     strategy = resolve_strategy(arch_key, lora_type)
 
     if strategy.is_multiphase:
