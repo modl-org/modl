@@ -300,7 +300,7 @@ ARCH_CONFIGS: dict[str, dict] = {
                 "config_dir": "flux2-klein-scheduler",
             },
         },
-        "model_flags": {"arch": "flux2_klein_9b"},
+        "model_flags": {"arch": "flux2_klein_9b", "quantize": True},
         "noise_scheduler": "flowmatch",
         "dtype": "bf16",
         "train_text_encoder": False,
