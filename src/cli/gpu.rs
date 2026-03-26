@@ -91,25 +91,22 @@ pub async fn agent(session_token: &str, api_base: &str) -> Result<()> {
     let session_id = std::env::var("MODL_SESSION_ID")
         .context("MODL_SESSION_ID env var required for agent mode")?;
 
-    // Write hub credentials to config so `modl hub push` works on this instance
-    if let Ok(hub_key) = std::env::var("MODL_HUB_API_KEY")
-        && !hub_key.is_empty()
-    {
-        write_hub_config(api_base, &hub_key)?;
-    }
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(300))
+        .build()?;
+
+    let auth_header = format!("Bearer {session_token}");
+
+    // Exchange session token for a scoped hub API key
+    let hub_key = exchange_for_hub_key(&client, api_base, &auth_header).await?;
+    write_hub_config(api_base, &hub_key)?;
 
     eprintln!(
         "{} GPU agent started (session {})",
         style("→").cyan(),
         &session_id[..8.min(session_id.len())]
     );
-
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(15))
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
-
-    let auth_header = format!("Bearer {session_token}");
 
     // Agent loop: poll for jobs, execute, repeat
     loop {
@@ -552,6 +549,38 @@ async fn upload_artifact(
     );
 
     Ok(())
+}
+
+/// Exchange session token for a scoped hub API key via the orchestrator.
+async fn exchange_for_hub_key(
+    client: &reqwest::Client,
+    api_base: &str,
+    auth: &str,
+) -> Result<String> {
+    let url = format!("{api_base}/gpu/agent/exchange");
+    let resp = client
+        .post(&url)
+        .header(reqwest::header::AUTHORIZATION, auth)
+        .send()
+        .await
+        .context("Failed to exchange session token for hub key")?;
+
+    if !resp.status().is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        bail!("Token exchange failed: {text}");
+    }
+
+    #[derive(Deserialize)]
+    struct ExchangeResponse {
+        api_key: String,
+    }
+
+    let exchange: ExchangeResponse = resp.json().await?;
+    eprintln!(
+        "  {} Hub credentials obtained (scoped, expiring)",
+        style("✓").green()
+    );
+    Ok(exchange.api_key)
 }
 
 /// Write hub credentials to ~/.modl/config.yaml so hub push/pull works.
