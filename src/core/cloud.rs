@@ -219,9 +219,11 @@ impl CloudExecutor {
 
 impl Executor for CloudExecutor {
     fn submit(&mut self, spec: &TrainJobSpec) -> Result<JobHandle> {
-        // Run async provisioning + submission in a blocking context
-        let rt = tokio::runtime::Handle::current();
-        let result = rt.block_on(self.submit_train_async(spec))?;
+        // Run async provisioning inside the existing tokio runtime.
+        // block_in_place allows blocking the current thread without deadlocking.
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.submit_train_async(spec))
+        })?;
         Ok(result)
     }
 
@@ -235,8 +237,9 @@ impl Executor for CloudExecutor {
 
     fn cleanup(&mut self) -> Result<()> {
         if self.session_id.is_some() {
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(self.destroy_session())?;
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(self.destroy_session())
+            })?;
         }
         Ok(())
     }
@@ -280,7 +283,7 @@ impl CloudExecutor {
             .header(reqwest::header::AUTHORIZATION, self.auth_header())
             .json(&serde_json::json!({
                 "gpu_type": gpu_type,
-                "idle_timeout": "10m",
+                "idle_timeout": "30m",
                 "models": [base_model],
             }))
             .send()
@@ -511,7 +514,8 @@ async fn poll_events_loop(
             Ok(r) => r,
             Err(e) => {
                 consecutive_errors += 1;
-                if consecutive_errors > 30 {
+                // 300 errors * 2s = 10 min tolerance for agent boot
+                if consecutive_errors > 300 {
                     let _ = tx.send(JobEvent {
                         schema_version: "v1".into(),
                         job_id: job_id.clone(),
@@ -533,7 +537,7 @@ async fn poll_events_loop(
 
         if !resp.status().is_success() {
             consecutive_errors += 1;
-            if consecutive_errors > 30 {
+            if consecutive_errors > 300 {
                 break;
             }
             continue;
@@ -575,6 +579,13 @@ async fn poll_events_loop(
         }
 
         // Also check job status in case we missed the terminal event
+        if events_resp.job_status != "queued" && events_resp.job_status != "running" {
+            eprintln!(
+                "  [poll] job_status={}, events={}",
+                events_resp.job_status,
+                events_resp.events.len()
+            );
+        }
         if events_resp.job_status == "completed" || events_resp.job_status == "failed" {
             // Give a moment for any final events to arrive
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
