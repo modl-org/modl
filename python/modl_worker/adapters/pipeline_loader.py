@@ -87,8 +87,10 @@ def detect_model_format(model_source: str) -> str:
 
             # If we got here with safetensors keys, it's transformer-only
             return "transformer_only"
-        except Exception:
-            return "transformer_only"  # assume transformer-only if header read fails
+        except Exception as exc:
+            import sys
+            print(f"[modl] WARNING: safetensors header read failed, assuming transformer-only: {exc}", file=sys.stderr)
+            return "transformer_only"
 
     # Not a local file — treat as HF repo identifier
     return "hf_repo"

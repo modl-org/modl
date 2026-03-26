@@ -5,6 +5,7 @@ ai-toolkit's ``run.py`` expects.  All architecture-specific logic is driven
 by the tables in ``arch_config.py`` rather than ad-hoc conditionals.
 """
 
+import sys
 from pathlib import Path
 
 from .arch_config import (
@@ -65,7 +66,7 @@ def read_original_intervals(checkpoint_path: str) -> tuple[int | None, int | Non
             interval = nonzero[0]
 
     if interval:
-        print(f"[modl] Preserving original intervals: save_every={interval}, sample_every={interval}")
+        print(f"[modl] Preserving original intervals: save_every={interval}, sample_every={interval}", file=sys.stderr)
         return interval, interval
 
     return None, None
@@ -166,7 +167,7 @@ def build_train_block(arch_key: str, params: dict, lora_type: str, resume_step: 
 
     # Z-Image: LR must not exceed 1e-4 — higher values break the distillation
     if is_zimage and lr > 1e-4:
-        print(f"[modl] WARNING: Clamping LR from {lr} to 1e-4 for Z-Image (higher LR breaks distillation)")
+        print(f"[modl] WARNING: Clamping LR from {lr} to 1e-4 for Z-Image (higher LR breaks distillation)", file=sys.stderr)
         lr = 1e-4
 
     # Klein: community-tested defaults for character LoRAs.
@@ -177,24 +178,24 @@ def build_train_block(arch_key: str, params: dict, lora_type: str, resume_step: 
     if is_klein:
         is_4b = arch_key == "flux2_klein_4b"
         if is_4b and lr > 5e-5:
-            print(f"[modl] WARNING: Clamping LR from {lr} to 5e-5 for Klein 4B (higher LR causes body horror / face collapse)")
+            print(f"[modl] WARNING: Clamping LR from {lr} to 5e-5 for Klein 4B (higher LR causes body horror / face collapse)", file=sys.stderr)
             lr = 5e-5
         elif not is_4b and lr > 1e-4:
-            print(f"[modl] WARNING: Clamping LR from {lr} to 1e-4 for Klein 9B")
+            print(f"[modl] WARNING: Clamping LR from {lr} to 1e-4 for Klein 9B", file=sys.stderr)
             lr = 1e-4
         if lora_type == "character":
             if steps < 2000:
-                print(f"[modl] NOTE: Klein character LoRAs usually need 2000+ steps (current: {steps})")
-            print(f"[modl] NOTE: Klein tip — train on base, generate with distilled for best likeness")
+                print(f"[modl] NOTE: Klein character LoRAs usually need 2000+ steps (current: {steps})", file=sys.stderr)
+            print(f"[modl] NOTE: Klein tip — train on base, generate with distilled for best likeness", file=sys.stderr)
 
     # Qwen-Image guidance notes
     if is_qwen:
         if lora_type == "style" and lr < 2e-4:
             # Per Ostris: style LoRAs converge faster at 2e-4 (bumped from 1e-4)
-            print(f"[modl] NOTE: Qwen-Image style LoRAs often converge faster at lr=2e-4 (current: {lr})")
+            print(f"[modl] NOTE: Qwen-Image style LoRAs often converge faster at lr=2e-4 (current: {lr})", file=sys.stderr)
         if lora_type == "character":
             if steps < 3000:
-                print(f"[modl] NOTE: Qwen-Image character LoRAs usually need ~3000+ steps (current: {steps})")
+                print(f"[modl] NOTE: Qwen-Image character LoRAs usually need ~3000+ steps (current: {steps})", file=sys.stderr)
             # Character training on 24GB is not currently supported well.
             # uint6 needs ~30GB; int4 has severe degradation.
             # No LR bump needed — 1e-4 with rank 16 is the tested recipe.
@@ -331,13 +332,13 @@ def spec_to_aitoolkit_config(spec: dict, train_overrides: dict | None = None) ->
     }
     if base_model_id in _klein_train_remap:
         _train_model_id = _klein_train_remap[base_model_id]
-        print(f"[modl] Klein: remapping to base model for training ({base_model_id} → {_train_model_id})")
+        print(f"[modl] Klein: remapping to base model for training ({base_model_id} → {_train_model_id})", file=sys.stderr)
 
     if local_path and os.path.isdir(local_path):
         model_path = local_path
     else:
         if local_path:
-            print(f"[modl] NOTE: Store path is a single file, falling back to HF hub for training")
+            print(f"[modl] NOTE: Store path is a single file, falling back to HF hub for training", file=sys.stderr)
         model_path = resolve_model_path(_train_model_id)
 
     # -- Model config from the arch table --
@@ -397,9 +398,9 @@ def spec_to_aitoolkit_config(spec: dict, train_overrides: dict | None = None) ->
     if resume_from:
         network_config["pretrained_lora_path"] = resume_from
         resume_step = _step_from_checkpoint_path(resume_from)
-        print(f"[modl] Resuming training from checkpoint: {resume_from}")
+        print(f"[modl] Resuming training from checkpoint: {resume_from}", file=sys.stderr)
         if resume_step is not None:
-            print(f"[modl] Resuming from step {resume_step}")
+            print(f"[modl] Resuming from step {resume_step}", file=sys.stderr)
         original_save_every, original_sample_every = read_original_intervals(resume_from)
 
     # Dataset repeats & caption dropout

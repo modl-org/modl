@@ -279,11 +279,19 @@ async fn training_queue_loop() {
                     args.push(lr.to_string());
                 }
 
+                let log_path = crate::core::paths::modl_root().join("training.log");
+                let stderr_file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_path)
+                    .map(std::process::Stdio::from)
+                    .unwrap_or_else(|_| std::process::Stdio::null());
+
                 let _ = std::process::Command::new(&modl_bin)
                     .args(&args)
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
+                    .stderr(stderr_file)
                     .spawn();
             })
             .await;
