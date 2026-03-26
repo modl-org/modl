@@ -283,11 +283,11 @@ def _write_phase_config(
                         max_step = s
                 if max_step > 0:
                     resume_step = max_step
-                    print(f"[modl] Inferred resume step {resume_step} from directory checkpoints")
+                    print(f"[modl] Inferred resume step {resume_step} from directory checkpoints", file=sys.stderr)
 
         phase_spec["params"]["steps"] = resume_step + phase_steps
         if resume_step:
-            print(f"[modl] Phase target: step {resume_step} + {phase_steps} = {resume_step + phase_steps}")
+            print(f"[modl] Phase target: step {resume_step} + {phase_steps} = {resume_step + phase_steps}", file=sys.stderr)
     else:
         phase_spec["params"]["steps"] = phase_steps
 
@@ -336,8 +336,7 @@ def run_train(config_path: Path, emitter: EventEmitter) -> int:
     try:
         spec = _load_spec(config_path)
     except Exception as e:
-        print(f"[modl] WARNING: spec load failed: {e}", file=sys.stderr)
-        import traceback; traceback.print_exc(file=sys.stderr)
+        emitter.warning("SPEC_LOAD_FAILED", f"spec load failed, falling back to direct config: {e}")
         spec = None
 
     if spec is None:
@@ -380,12 +379,12 @@ def run_train(config_path: Path, emitter: EventEmitter) -> int:
     strategy = resolve_strategy(arch_key, lora_type)
 
     if strategy.is_multiphase:
-        print(f"[modl] Training strategy: {strategy.name} ({len(strategy.phases)} phases)")
+        emitter.info(f"Training strategy: {strategy.name} ({len(strategy.phases)} phases)")
         for i, phase in enumerate(strategy.phases):
             steps = phase.step_count(total_steps)
-            print(f"[modl]   Phase {i+1}: {phase.name} — {steps} steps")
+            emitter.info(f"  Phase {i+1}: {phase.name} — {steps} steps")
             if phase.train_overrides:
-                print(f"[modl]     overrides: {phase.train_overrides}")
+                emitter.info(f"    overrides: {phase.train_overrides}")
 
     phase_step_counts = strategy.phase_steps(total_steps)
     step_offset = 0
@@ -429,11 +428,11 @@ def run_train(config_path: Path, emitter: EventEmitter) -> int:
             checkpoint = find_latest_checkpoint(Path(output_dir))
             if checkpoint:
                 resume_from = checkpoint
-                print(f"[modl] Phase {phase_num} complete. "
-                      f"Resuming phase {phase_num+1} from: {Path(checkpoint).name}")
+                emitter.info(f"Phase {phase_num} complete. "
+                             f"Resuming phase {phase_num+1} from: {Path(checkpoint).name}")
             else:
-                print(f"[modl] WARNING: No checkpoint found after phase {phase_num}. "
-                      "Next phase will start from scratch.")
+                emitter.warning("NO_CHECKPOINT", f"No checkpoint found after phase {phase_num}. "
+                                "Next phase will start from scratch.")
                 resume_from = None
 
     # All phases complete

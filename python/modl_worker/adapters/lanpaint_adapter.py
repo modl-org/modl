@@ -322,7 +322,7 @@ def _run_lanpaint(spec, emitter, pipe, adapter):
             result.save(filepath)
 
         artifact_paths.append(filepath)
-        sha = hashlib.sha256(open(filepath, "rb").read()).hexdigest()
+        sha = hashlib.sha256(Path(filepath).read_bytes()).hexdigest()
         emitter.artifact(filepath, sha256=sha, size_bytes=os.path.getsize(filepath))
         emitter.info(f"  Image {img_idx + 1}/{count} ({elapsed:.1f}s): {filepath}")
 

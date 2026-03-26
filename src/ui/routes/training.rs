@@ -421,11 +421,19 @@ pub async fn api_resume_training(Json(req): Json<ResumeRequest>) -> impl IntoRes
 
     let result = tokio::task::spawn_blocking(move || {
         // Spawn `modl train --resume <checkpoint> --name <name>` as a detached process
+        let log_path = crate::core::paths::modl_root().join("training.log");
+        let stderr_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .map(std::process::Stdio::from)
+            .unwrap_or_else(|_| std::process::Stdio::null());
+
         let child = std::process::Command::new(&modl_bin)
             .args(["train", "--resume", &req.checkpoint, "--name", &req.name])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(stderr_file)
             .spawn();
 
         match child {
@@ -554,11 +562,19 @@ pub async fn api_start_training(Json(req): Json<StartTrainingRequest>) -> impl I
             args.push(class_word);
         }
 
+        let log_path = crate::core::paths::modl_root().join("training.log");
+        let stderr_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .map(std::process::Stdio::from)
+            .unwrap_or_else(|_| std::process::Stdio::null());
+
         let child = std::process::Command::new(&modl_bin)
             .args(&args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(stderr_file)
             .spawn();
 
         match child {

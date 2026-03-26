@@ -630,10 +630,10 @@ class WorkerDaemon:
         """
         log_path = Path.home() / ".modl" / "worker.log"
         try:
-            log_file = open(log_path, "a")  # noqa: SIM115
-            sys.stderr = log_file
+            self._log_file = open(log_path, "a")  # noqa: SIM115
+            sys.stderr = self._log_file
         except OSError:
-            pass  # If we can't redirect, continue anyway
+            self._log_file = None  # If we can't redirect, continue anyway
 
     def _setup_signals(self) -> None:
         """Handle SIGTERM/SIGINT for graceful shutdown."""
@@ -663,6 +663,8 @@ class WorkerDaemon:
         if self.pid_path.exists():
             self.pid_path.unlink()
         print(f"modl worker: served {self._jobs_served} job(s), goodbye", file=sys.stderr)
+        if getattr(self, "_log_file", None) is not None:
+            self._log_file.close()
 
 
 # ---------------------------------------------------------------------------
