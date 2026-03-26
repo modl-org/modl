@@ -584,7 +584,15 @@ async fn poll_events_loop(
             }
 
             // Parse the event using the same parser as local executor
-            if let Some(event) = parse_worker_event(raw_event, &job_id) {
+            if let Some(mut event) = parse_worker_event(raw_event, &job_id) {
+                // Convert tqdm log lines to Progress events for the progress bar.
+                // Format: "name: NN%|...| step/total [..., loss: X.XXe-YY]"
+                if let EventPayload::Log { ref message, .. } = event.event
+                    && let Some(progress) = parse_tqdm_progress(message)
+                {
+                    event.event = progress;
+                }
+
                 let is_terminal = matches!(
                     event.event,
                     EventPayload::Completed { .. }
@@ -663,6 +671,48 @@ async fn poll_events_loop(
             return;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tqdm progress parsing
+// ---------------------------------------------------------------------------
+
+/// Parse a tqdm-style progress line into a Progress event payload.
+/// Format: "name: NN%|...| step/total [..., loss: X.XXe-YY]"
+fn parse_tqdm_progress(message: &str) -> Option<EventPayload> {
+    // Look for "step/total" pattern after the bar
+    let bar_end = message.find('|').and_then(|first| {
+        message[first + 1..]
+            .find('|')
+            .map(|second| first + 1 + second + 1)
+    })?;
+
+    let after_bar = message[bar_end..].trim();
+    // "step/total [...]"
+    let slash_pos = after_bar.find('/')?;
+    let step_str = after_bar[..slash_pos].trim();
+    let step: u32 = step_str.parse().ok()?;
+
+    let rest = &after_bar[slash_pos + 1..];
+    let total_end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    let total: u32 = rest[..total_end].parse().ok()?;
+
+    // Extract loss if present: "loss: X.XXe-YY"
+    let loss = message.find("loss:").and_then(|i| {
+        let val_start = i + 5;
+        let val_str = message[val_start..].trim().split(']').next()?.trim();
+        val_str.parse::<f64>().ok()
+    });
+
+    Some(EventPayload::Progress {
+        stage: "train".to_string(),
+        step,
+        total_steps: total,
+        loss,
+        eta_seconds: None,
+    })
 }
 
 // ---------------------------------------------------------------------------

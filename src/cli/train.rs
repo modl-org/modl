@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
-use serde::Deserialize;
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -676,50 +675,13 @@ async fn execute_training(
 
             let path = PathBuf::from(artifact_path);
 
-            // Cloud artifacts: path is an R2 key (e.g. "gpu-uploads/.../*.safetensors")
-            // Local artifacts: path is an absolute filesystem path
-            if cloud && !path.exists() {
-                // Download from cloud API
-                match download_cloud_artifact(
-                    artifact_path,
-                    &spec.output.lora_name,
-                    &spec.model.base_model_id,
-                    &spec.params.trigger_word,
-                    job_id,
-                    &db,
-                    &store_root,
-                )
-                .await
-                {
-                    Ok(Some(collected)) => {
-                        println!();
-                        println!("{} LoRA downloaded from cloud!", style("✓").green().bold());
-                        println!("  Name:   {}", spec.output.lora_name);
-                        println!("  Path:   {}", collected.store_path.display());
-                        println!("  SHA256: {}", &collected.sha256[..16]);
-                        println!(
-                            "  Size:   {:.1} MB",
-                            collected.size_bytes as f64 / 1_048_576.0
-                        );
-                        for link in &collected.symlinks {
-                            println!("  Link:   {}", link.display());
-                        }
-                    }
-                    Ok(None) => {
-                        println!(
-                            "{} Cloud artifact not available for download: {}",
-                            style("⚠").yellow(),
-                            artifact_path
-                        );
-                    }
-                    Err(e) => {
-                        println!(
-                            "{} Failed to download cloud artifact: {e}",
-                            style("⚠").yellow(),
-                        );
-                    }
-                }
-            } else if path.exists() && path.extension().is_some_and(|e| e == "safetensors") {
+            // Cloud artifacts come via hub:// prefix (handled above).
+            // Local artifacts: collect from filesystem.
+            if !path.exists() {
+                // Skip non-existent paths (cloud artifacts without hub ref)
+                continue;
+            }
+            if path.extension().is_some_and(|e| e == "safetensors") {
                 match artifacts::collect_lora(
                     &path,
                     &spec.output.lora_name,
@@ -819,109 +781,6 @@ async fn pull_from_hub(
 
     let _ = std::fs::remove_file(&tmp_path);
     Ok(collected)
-}
-
-/// Download a cloud-trained LoRA artifact from the hub API and collect it locally.
-async fn download_cloud_artifact(
-    _r2_key: &str,
-    lora_name: &str,
-    base_model: &str,
-    trigger_word: &str,
-    job_id: &str,
-    db: &Database,
-    store_root: &std::path::Path,
-) -> Result<Option<artifacts::CollectedLora>> {
-    use crate::core::hub::HubClient;
-
-    // The artifact is registered on the cloud API. We need to fetch it via
-    // the artifacts endpoint. The job_id here is the GPU job ID.
-    let hub = HubClient::from_config(true)?;
-
-    // We don't know the session_id here. Instead, use the jobs endpoint.
-    // The cloud executor's events include artifact events with the R2 path.
-    // The agent registers artifacts with presigned URLs. Let's use a simpler approach:
-    // download via the general jobs artifact endpoint.
-    let resp = reqwest::Client::new()
-        .get(format!("{}/jobs/{}/artifacts", hub.api_base, job_id))
-        .header(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", hub.api_key.as_deref().unwrap_or("")),
-        )
-        .send()
-        .await;
-
-    // The job might be a GPU job (different endpoint). Try both paths.
-    // For now, skip if we can't reach the API — the LoRA is stored in R2
-    // and will be available via hub pull later.
-    let resp = match resp {
-        Ok(r) if r.status().is_success() => r,
-        _ => {
-            eprintln!(
-                "  {} Could not fetch artifact download URL. LoRA is stored in the cloud.",
-                style("·").dim()
-            );
-            eprintln!(
-                "    Pull it later with: modl hub pull <username>/{}",
-                lora_name
-            );
-            return Ok(None);
-        }
-    };
-
-    #[derive(Deserialize)]
-    struct ArtResp {
-        artifacts: Vec<ArtEntry>,
-    }
-    #[allow(dead_code)]
-    #[derive(Deserialize)]
-    struct ArtEntry {
-        download_url: Option<String>,
-        r2_key: Option<String>,
-        sha256: Option<String>,
-        size_bytes: Option<u64>,
-    }
-
-    let art_resp: ArtResp = resp.json().await?;
-    let lora_art = art_resp.artifacts.iter().find(|a| {
-        a.download_url
-            .as_deref()
-            .is_some_and(|u| u.contains("safetensors") || !u.is_empty())
-    });
-
-    let art = match lora_art {
-        Some(a) => a,
-        None => return Ok(None),
-    };
-
-    let download_url = match &art.download_url {
-        Some(u) => u,
-        None => return Ok(None),
-    };
-
-    // Download the LoRA file
-    eprintln!("  Downloading LoRA artifact...");
-    let bytes = reqwest::get(download_url).await?.bytes().await?;
-
-    // Write to a temp file, then collect via normal artifact pipeline
-    let tmp_dir = store_root.join("tmp");
-    std::fs::create_dir_all(&tmp_dir)?;
-    let tmp_path = tmp_dir.join(format!("{}.safetensors", lora_name));
-    std::fs::write(&tmp_path, &bytes)?;
-
-    let collected = artifacts::collect_lora(
-        &tmp_path,
-        lora_name,
-        base_model,
-        trigger_word,
-        job_id,
-        db,
-        store_root,
-    )?;
-
-    // Clean up temp file
-    let _ = std::fs::remove_file(&tmp_path);
-
-    Ok(Some(collected))
 }
 
 /// Read the `steps` value from an existing run's config.yaml next to the
