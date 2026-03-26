@@ -94,19 +94,6 @@ struct ArtifactsResponse {
     artifacts: Vec<ArtifactEntry>,
 }
 
-#[derive(Debug, Deserialize)]
-struct PresignUploadEntry {
-    #[allow(dead_code)]
-    filename: String,
-    r2_key: String,
-    upload_url: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct PresignUploadsResponse {
-    uploads: Vec<PresignUploadEntry>,
-}
-
 // ---------------------------------------------------------------------------
 // CloudExecutor
 // ---------------------------------------------------------------------------
@@ -315,20 +302,24 @@ impl CloudExecutor {
             eprintln!("  {} GPU ready", style("✓").green());
         }
 
-        // 3. Zip and upload dataset to R2
+        // 3. Push dataset to hub
         eprintln!(
-            "  {} Uploading dataset ({} images)...",
+            "  {} Pushing dataset to hub ({} images)...",
             style("☁").cyan(),
             spec.dataset.image_count,
         );
 
-        let dataset_r2_key = self.upload_dataset(&spec.dataset.path).await?;
-        eprintln!("  {} Dataset uploaded", style("✓").green());
+        let dataset_hub_ref = self.push_dataset_to_hub(&spec.dataset).await?;
+        eprintln!(
+            "  {} Dataset pushed ({})",
+            style("✓").green(),
+            dataset_hub_ref
+        );
 
         // 4. Submit training job to the GPU session
         let mut job_spec = serde_json::to_value(spec)?;
-        // Inject the dataset R2 key so the agent can download it
-        job_spec["_dataset_r2_key"] = serde_json::Value::String(dataset_r2_key);
+        // Inject the dataset hub ref so the agent can pull it
+        job_spec["_dataset_hub_ref"] = serde_json::Value::String(dataset_hub_ref);
 
         let submit_resp = self
             .client
@@ -407,14 +398,44 @@ impl CloudExecutor {
         bail!("GPU session did not become ready within 15 minutes");
     }
 
-    /// Zip a dataset directory and upload to R2 via presigned URL.
-    async fn upload_dataset(&self, dataset_path: &str) -> Result<String> {
-        let ds_path = std::path::Path::new(dataset_path);
+    /// Push dataset to hub via `modl hub push`. Returns hub ref (username/slug).
+    async fn push_dataset_to_hub(&self, dataset: &crate::core::job::DatasetRef) -> Result<String> {
+        use crate::core::hub::{CreateItemRequest, HubClient};
+
+        let ds_path = std::path::Path::new(&dataset.path);
         if !ds_path.exists() {
-            bail!("Dataset path does not exist: {dataset_path}");
+            bail!("Dataset path does not exist: {}", dataset.path);
         }
 
-        // Zip the dataset to a temp file
+        let hub = HubClient::from_config(true)?;
+        let me = hub.me().await.context("Failed to get hub account")?;
+        let username = me
+            .username
+            .as_deref()
+            .context("No hub username — run `modl login` first")?;
+
+        let slug = dataset
+            .name
+            .to_lowercase()
+            .replace(' ', "-")
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect::<String>();
+
+        // Create hub item if not exists
+        let _ = hub
+            .create_item(&CreateItemRequest {
+                slug: slug.clone(),
+                item_type: "dataset".to_string(),
+                visibility: "private".to_string(),
+                description: Some(format!("{} ({} images)", dataset.name, dataset.image_count)),
+                tags: vec![],
+                base_model: None,
+                trigger_words: vec![],
+            })
+            .await;
+
+        // Zip dataset (images + captions only, exclude caches)
         let tmp = std::env::temp_dir().join(format!("modl-dataset-{}.zip", std::process::id()));
         {
             let file = std::fs::File::create(&tmp)?;
@@ -429,6 +450,13 @@ impl CloudExecutor {
             {
                 let rel_path = entry.path().strip_prefix(ds_path)?;
                 let name = rel_path.to_string_lossy();
+                // Skip caches, hidden files, and non-training files
+                if name.starts_with('.')
+                    || name.starts_with("_latent_cache")
+                    || name.contains("__pycache__")
+                {
+                    continue;
+                }
                 zip.start_file(name.as_ref(), options)?;
                 let bytes = std::fs::read(entry.path())?;
                 std::io::Write::write_all(&mut zip, &bytes)?;
@@ -438,50 +466,45 @@ impl CloudExecutor {
 
         let zip_size = std::fs::metadata(&tmp)?.len();
         eprintln!(
-            "    Dataset zipped: {:.1} MB",
+            "    Dataset zipped: {:.1} MB (images + captions only)",
             zip_size as f64 / 1_048_576.0
         );
 
-        // Get presigned upload URL
-        let presign_resp = self
-            .client
-            .post(format!("{}/jobs/uploads/presign", self.api_base))
-            .header(reqwest::header::AUTHORIZATION, self.auth_header())
-            .json(&serde_json::json!({
-                "filenames": ["dataset.zip"],
-                "content_type": "application/zip",
-            }))
-            .send()
+        // Push to hub
+        let push_resp = hub.push_start(username, &slug).await?;
+
+        crate::core::hub::upload_file_presigned(&push_resp.upload_url, &tmp, "application/zip")
             .await
-            .context("Failed to get presigned upload URL")?;
+            .context("Failed to upload dataset to hub")?;
 
-        if !presign_resp.status().is_success() {
-            let text = presign_resp.text().await.unwrap_or_default();
-            let _ = std::fs::remove_file(&tmp);
-            bail!("Failed to get upload URL: {text}");
-        }
+        // Compute SHA256
+        let file_bytes = std::fs::read(&tmp)?;
+        let sha256 = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&file_bytes);
+            format!("{:x}", hasher.finalize())
+        };
 
-        let presign: PresignUploadsResponse = presign_resp.json().await?;
-        let upload = presign.uploads.first().context("No upload URL returned")?;
+        let metadata = serde_json::json!({
+            "source": "modl-cloud-training",
+            "dataset_name": dataset.name,
+            "image_count": dataset.image_count,
+            "caption_coverage": dataset.caption_coverage,
+        });
 
-        // Upload zip to R2
-        let bytes = tokio::fs::read(&tmp).await?;
-        let upload_resp = self
-            .client
-            .put(&upload.upload_url)
-            .header(reqwest::header::CONTENT_TYPE, "application/zip")
-            .body(bytes)
-            .send()
-            .await
-            .context("Failed to upload dataset to R2")?;
+        hub.push_complete(
+            username,
+            &slug,
+            &push_resp.version_id,
+            file_bytes.len() as u64,
+            &sha256,
+            Some(metadata),
+        )
+        .await?;
 
         let _ = std::fs::remove_file(&tmp);
-
-        if !upload_resp.status().is_success() {
-            bail!("Dataset upload failed: HTTP {}", upload_resp.status());
-        }
-
-        Ok(upload.r2_key.clone())
+        Ok(format!("{username}/{slug}"))
     }
 }
 

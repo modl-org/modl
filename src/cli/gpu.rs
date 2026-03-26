@@ -197,18 +197,19 @@ async fn execute_train_job(
     job: &AgentJobResponse,
 ) -> Result<()> {
     // Parse the spec
-    let spec: TrainJobSpec =
+    let mut spec: TrainJobSpec =
         serde_json::from_value(job.spec.clone()).context("Failed to parse TrainJobSpec")?;
 
-    // If spec contains a dataset_r2_key, download the dataset from R2
-    let dataset_r2_key = job
+    // Pull dataset from hub if a hub ref is provided
+    let dataset_hub_ref = job
         .spec
-        .get("_dataset_r2_key")
+        .get("_dataset_hub_ref")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    if !dataset_r2_key.is_empty() {
-        download_dataset(client, api_base, auth, dataset_r2_key, &spec.dataset.path).await?;
+    if !dataset_hub_ref.is_empty() {
+        let dataset_path = pull_dataset_from_hub(dataset_hub_ref).await?;
+        spec.dataset.path = dataset_path;
     }
 
     // Ensure output directory exists
@@ -374,67 +375,40 @@ async fn execute_train_job(
     Ok(())
 }
 
-/// Download a dataset zip from R2 and extract it.
-async fn download_dataset(
-    client: &reqwest::Client,
-    api_base: &str,
-    auth: &str,
-    r2_key: &str,
-    dest_path: &str,
-) -> Result<()> {
-    eprintln!("  Downloading dataset from R2...");
+/// Pull a dataset from the hub and extract it. Returns the local path.
+async fn pull_dataset_from_hub(hub_ref: &str) -> Result<String> {
+    use crate::core::hub::HubClient;
 
-    // Get presigned download URL from the API
-    // We use the upload/presign endpoint pattern but for download we need
-    // a different approach — construct the download URL from the r2_key.
-    // Actually, the agent doesn't have a download endpoint, so we'll ask
-    // for a presigned upload URL and use the job spec's dataset path.
-    //
-    // For now: the dataset_r2_key is passed in the spec, and the API
-    // provides it as a presigned download URL in the job spec.
+    eprintln!("  Pulling dataset from hub ({hub_ref})...");
 
-    // Check if _dataset_download_url is in the spec (set by API when dispatching)
-    // Fall back to constructing a presign request
-    let download_url = format!(
-        "{api_base}/gpu/agent/download?r2_key={}",
-        urlencoding::encode(r2_key)
-    );
+    let (username, slug) = hub_ref
+        .split_once('/')
+        .context("Invalid hub ref — expected username/slug")?;
 
-    // Try direct download via agent endpoint
-    let resp = client
-        .get(&download_url)
-        .header(reqwest::header::AUTHORIZATION, auth)
-        .send()
-        .await;
+    let hub = HubClient::from_config(true)?;
+    let pull_resp = hub.pull(username, slug, None).await?;
 
-    let bytes = match resp {
-        Ok(r) if r.status().is_success() => r.bytes().await?,
-        _ => {
-            // Fallback: the dataset might already exist locally (e.g. pulled with models)
-            if std::path::Path::new(dest_path).exists() {
-                eprintln!("  Dataset already exists at {dest_path}, skipping download");
-                return Ok(());
-            }
-            bail!("Failed to download dataset from R2 (key: {r2_key})");
-        }
-    };
+    // Download the zip
+    let bytes = reqwest::get(&pull_resp.download_url).await?.bytes().await?;
 
-    // Extract zip to destination
-    let dest = std::path::Path::new(dest_path);
-    std::fs::create_dir_all(dest)?;
+    // Extract to a dataset directory
+    let dest = crate::core::paths::modl_root().join("datasets").join(slug);
+    std::fs::create_dir_all(&dest)?;
 
     let cursor = std::io::Cursor::new(&bytes);
     let mut archive = zip::ZipArchive::new(cursor).context("Failed to open dataset zip")?;
     archive
-        .extract(dest)
+        .extract(&dest)
         .context("Failed to extract dataset zip")?;
 
     eprintln!(
-        "  Dataset extracted to {} ({} files)",
-        dest_path,
+        "  {} Dataset ready: {} ({} files)",
+        style("✓").green(),
+        dest.display(),
         archive.len()
     );
-    Ok(())
+
+    Ok(dest.to_string_lossy().to_string())
 }
 
 /// Report events back to the orchestrator API.
