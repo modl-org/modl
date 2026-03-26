@@ -94,19 +94,6 @@ struct ArtifactsResponse {
     artifacts: Vec<ArtifactEntry>,
 }
 
-#[derive(Debug, Deserialize)]
-struct PresignUploadEntry {
-    #[allow(dead_code)]
-    filename: String,
-    r2_key: String,
-    upload_url: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct PresignUploadsResponse {
-    uploads: Vec<PresignUploadEntry>,
-}
-
 // ---------------------------------------------------------------------------
 // CloudExecutor
 // ---------------------------------------------------------------------------
@@ -219,9 +206,11 @@ impl CloudExecutor {
 
 impl Executor for CloudExecutor {
     fn submit(&mut self, spec: &TrainJobSpec) -> Result<JobHandle> {
-        // Run async provisioning + submission in a blocking context
-        let rt = tokio::runtime::Handle::current();
-        let result = rt.block_on(self.submit_train_async(spec))?;
+        // Run async provisioning inside the existing tokio runtime.
+        // block_in_place allows blocking the current thread without deadlocking.
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.submit_train_async(spec))
+        })?;
         Ok(result)
     }
 
@@ -235,8 +224,9 @@ impl Executor for CloudExecutor {
 
     fn cleanup(&mut self) -> Result<()> {
         if self.session_id.is_some() {
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(self.destroy_session())?;
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(self.destroy_session())
+            })?;
         }
         Ok(())
     }
@@ -280,7 +270,7 @@ impl CloudExecutor {
             .header(reqwest::header::AUTHORIZATION, self.auth_header())
             .json(&serde_json::json!({
                 "gpu_type": gpu_type,
-                "idle_timeout": "10m",
+                "idle_timeout": "30m",
                 "models": [base_model],
             }))
             .send()
@@ -312,20 +302,24 @@ impl CloudExecutor {
             eprintln!("  {} GPU ready", style("✓").green());
         }
 
-        // 3. Zip and upload dataset to R2
+        // 3. Push dataset to hub
         eprintln!(
-            "  {} Uploading dataset ({} images)...",
+            "  {} Pushing dataset to hub ({} images)...",
             style("☁").cyan(),
             spec.dataset.image_count,
         );
 
-        let dataset_r2_key = self.upload_dataset(&spec.dataset.path).await?;
-        eprintln!("  {} Dataset uploaded", style("✓").green());
+        let dataset_hub_ref = self.push_dataset_to_hub(&spec.dataset).await?;
+        eprintln!(
+            "  {} Dataset pushed ({})",
+            style("✓").green(),
+            dataset_hub_ref
+        );
 
         // 4. Submit training job to the GPU session
         let mut job_spec = serde_json::to_value(spec)?;
-        // Inject the dataset R2 key so the agent can download it
-        job_spec["_dataset_r2_key"] = serde_json::Value::String(dataset_r2_key);
+        // Inject the dataset hub ref so the agent can pull it
+        job_spec["_dataset_hub_ref"] = serde_json::Value::String(dataset_hub_ref);
 
         let submit_resp = self
             .client
@@ -404,14 +398,44 @@ impl CloudExecutor {
         bail!("GPU session did not become ready within 15 minutes");
     }
 
-    /// Zip a dataset directory and upload to R2 via presigned URL.
-    async fn upload_dataset(&self, dataset_path: &str) -> Result<String> {
-        let ds_path = std::path::Path::new(dataset_path);
+    /// Push dataset to hub via `modl hub push`. Returns hub ref (username/slug).
+    async fn push_dataset_to_hub(&self, dataset: &crate::core::job::DatasetRef) -> Result<String> {
+        use crate::core::hub::{CreateItemRequest, HubClient};
+
+        let ds_path = std::path::Path::new(&dataset.path);
         if !ds_path.exists() {
-            bail!("Dataset path does not exist: {dataset_path}");
+            bail!("Dataset path does not exist: {}", dataset.path);
         }
 
-        // Zip the dataset to a temp file
+        let hub = HubClient::from_config(true)?;
+        let me = hub.me().await.context("Failed to get hub account")?;
+        let username = me
+            .username
+            .as_deref()
+            .context("No hub username — run `modl login` first")?;
+
+        let slug = dataset
+            .name
+            .to_lowercase()
+            .replace(' ', "-")
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect::<String>();
+
+        // Create hub item if not exists
+        let _ = hub
+            .create_item(&CreateItemRequest {
+                slug: slug.clone(),
+                item_type: "dataset".to_string(),
+                visibility: "private".to_string(),
+                description: Some(format!("{} ({} images)", dataset.name, dataset.image_count)),
+                tags: vec![],
+                base_model: None,
+                trigger_words: vec![],
+            })
+            .await;
+
+        // Zip dataset (images + captions only, exclude caches)
         let tmp = std::env::temp_dir().join(format!("modl-dataset-{}.zip", std::process::id()));
         {
             let file = std::fs::File::create(&tmp)?;
@@ -426,6 +450,10 @@ impl CloudExecutor {
             {
                 let rel_path = entry.path().strip_prefix(ds_path)?;
                 let name = rel_path.to_string_lossy();
+                // Skip caches, hidden files, and non-training files
+                if name.starts_with('.') || name.starts_with('_') || name.contains("__pycache__") {
+                    continue;
+                }
                 zip.start_file(name.as_ref(), options)?;
                 let bytes = std::fs::read(entry.path())?;
                 std::io::Write::write_all(&mut zip, &bytes)?;
@@ -435,50 +463,49 @@ impl CloudExecutor {
 
         let zip_size = std::fs::metadata(&tmp)?.len();
         eprintln!(
-            "    Dataset zipped: {:.1} MB",
+            "    Dataset zipped: {:.1} MB (images + captions only)",
             zip_size as f64 / 1_048_576.0
         );
 
-        // Get presigned upload URL
-        let presign_resp = self
-            .client
-            .post(format!("{}/jobs/uploads/presign", self.api_base))
-            .header(reqwest::header::AUTHORIZATION, self.auth_header())
-            .json(&serde_json::json!({
-                "filenames": ["dataset.zip"],
-                "content_type": "application/zip",
-            }))
-            .send()
-            .await
-            .context("Failed to get presigned upload URL")?;
+        // Push to hub
+        let push_resp = hub.push_start(username, &slug).await?;
 
-        if !presign_resp.status().is_success() {
-            let text = presign_resp.text().await.unwrap_or_default();
-            let _ = std::fs::remove_file(&tmp);
-            bail!("Failed to get upload URL: {text}");
-        }
+        crate::core::hub::upload_file_presigned(
+            &push_resp.upload_url,
+            &tmp,
+            "application/octet-stream",
+        )
+        .await
+        .context("Failed to upload dataset to hub")?;
 
-        let presign: PresignUploadsResponse = presign_resp.json().await?;
-        let upload = presign.uploads.first().context("No upload URL returned")?;
+        // Compute SHA256
+        let file_bytes = std::fs::read(&tmp)?;
+        let sha256 = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&file_bytes);
+            format!("{:x}", hasher.finalize())
+        };
 
-        // Upload zip to R2
-        let bytes = tokio::fs::read(&tmp).await?;
-        let upload_resp = self
-            .client
-            .put(&upload.upload_url)
-            .header(reqwest::header::CONTENT_TYPE, "application/zip")
-            .body(bytes)
-            .send()
-            .await
-            .context("Failed to upload dataset to R2")?;
+        let metadata = serde_json::json!({
+            "source": "modl-cloud-training",
+            "dataset_name": dataset.name,
+            "image_count": dataset.image_count,
+            "caption_coverage": dataset.caption_coverage,
+        });
+
+        hub.push_complete(
+            username,
+            &slug,
+            &push_resp.version_id,
+            file_bytes.len() as u64,
+            &sha256,
+            Some(metadata),
+        )
+        .await?;
 
         let _ = std::fs::remove_file(&tmp);
-
-        if !upload_resp.status().is_success() {
-            bail!("Dataset upload failed: HTTP {}", upload_resp.status());
-        }
-
-        Ok(upload.r2_key.clone())
+        Ok(format!("{username}/{slug}"))
     }
 }
 
@@ -511,7 +538,8 @@ async fn poll_events_loop(
             Ok(r) => r,
             Err(e) => {
                 consecutive_errors += 1;
-                if consecutive_errors > 30 {
+                // 300 errors * 2s = 10 min tolerance for agent boot
+                if consecutive_errors > 300 {
                     let _ = tx.send(JobEvent {
                         schema_version: "v1".into(),
                         job_id: job_id.clone(),
@@ -533,7 +561,7 @@ async fn poll_events_loop(
 
         if !resp.status().is_success() {
             consecutive_errors += 1;
-            if consecutive_errors > 30 {
+            if consecutive_errors > 300 {
                 break;
             }
             continue;
@@ -556,7 +584,15 @@ async fn poll_events_loop(
             }
 
             // Parse the event using the same parser as local executor
-            if let Some(event) = parse_worker_event(raw_event, &job_id) {
+            if let Some(mut event) = parse_worker_event(raw_event, &job_id) {
+                // Convert tqdm log lines to Progress events for the progress bar.
+                // Format: "name: NN%|...| step/total [..., loss: X.XXe-YY]"
+                if let EventPayload::Log { ref message, .. } = event.event
+                    && let Some(progress) = parse_tqdm_progress(message)
+                {
+                    event.event = progress;
+                }
+
                 let is_terminal = matches!(
                     event.event,
                     EventPayload::Completed { .. }
@@ -575,6 +611,13 @@ async fn poll_events_loop(
         }
 
         // Also check job status in case we missed the terminal event
+        if events_resp.job_status != "queued" && events_resp.job_status != "running" {
+            eprintln!(
+                "  [poll] job_status={}, events={}",
+                events_resp.job_status,
+                events_resp.events.len()
+            );
+        }
         if events_resp.job_status == "completed" || events_resp.job_status == "failed" {
             // Give a moment for any final events to arrive
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -628,6 +671,48 @@ async fn poll_events_loop(
             return;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tqdm progress parsing
+// ---------------------------------------------------------------------------
+
+/// Parse a tqdm-style progress line into a Progress event payload.
+/// Format: "name: NN%|...| step/total [..., loss: X.XXe-YY]"
+fn parse_tqdm_progress(message: &str) -> Option<EventPayload> {
+    // Look for "step/total" pattern after the bar
+    let bar_end = message.find('|').and_then(|first| {
+        message[first + 1..]
+            .find('|')
+            .map(|second| first + 1 + second + 1)
+    })?;
+
+    let after_bar = message[bar_end..].trim();
+    // "step/total [...]"
+    let slash_pos = after_bar.find('/')?;
+    let step_str = after_bar[..slash_pos].trim();
+    let step: u32 = step_str.parse().ok()?;
+
+    let rest = &after_bar[slash_pos + 1..];
+    let total_end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    let total: u32 = rest[..total_end].parse().ok()?;
+
+    // Extract loss if present: "loss: X.XXe-YY"
+    let loss = message.find("loss:").and_then(|i| {
+        let val_start = i + 5;
+        let val_str = message[val_start..].trim().split(']').next()?.trim();
+        val_str.parse::<f64>().ok()
+    });
+
+    Some(EventPayload::Progress {
+        stage: "train".to_string(),
+        step,
+        total_steps: total,
+        loss,
+        eta_seconds: None,
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -123,6 +123,7 @@ pub struct CreateSessionResponse {
     pub ssh_port: Option<u16>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct SessionStatusResponse {
     pub session_id: String,
@@ -324,6 +325,7 @@ impl GpuClient {
     }
 
     /// DELETE /gpu/sessions/{id} — destroy instance.
+    #[allow(dead_code)]
     pub async fn destroy_session(&self, session_id: &str) -> Result<()> {
         let url = format!("{}/gpu/sessions/{}", self.api_base, session_id);
         let resp = self
