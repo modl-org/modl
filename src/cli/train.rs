@@ -575,7 +575,22 @@ async fn execute_training(
                 final_status = "cancelled";
                 break;
             }
-            EventPayload::Heartbeat | EventPayload::Result { .. } => {}
+            EventPayload::Heartbeat => {}
+            EventPayload::Result {
+                result_type, data, ..
+            } => {
+                if result_type == "hub_registered"
+                    && let Some(href) = data.get("hub_ref").and_then(|v| v.as_str())
+                {
+                    pb.println(format!(
+                        "  {} Published to hub.modl.run/{}",
+                        style("✓").green(),
+                        href
+                    ));
+                    // Store hub ref for later pull
+                    artifact_paths.push(format!("hub://{href}"));
+                }
+            }
         }
 
         // Persist event to DB
@@ -618,6 +633,47 @@ async fn execute_training(
         let store_root = crate::core::paths::modl_root();
 
         for artifact_path in &artifact_paths {
+            // Hub artifacts: "hub://username/slug" — pull from hub
+            if let Some(hub_ref) = artifact_path.strip_prefix("hub://") {
+                println!();
+                println!("{} Downloading LoRA from hub...", style("☁").cyan());
+                match pull_from_hub(
+                    hub_ref,
+                    &spec.output.lora_name,
+                    &spec.model.base_model_id,
+                    &spec.params.trigger_word,
+                    job_id,
+                    &db,
+                    &store_root,
+                )
+                .await
+                {
+                    Ok(collected) => {
+                        println!("{} LoRA downloaded from cloud!", style("✓").green().bold());
+                        println!("  Name:   {}", spec.output.lora_name);
+                        println!("  Path:   {}", collected.store_path.display());
+                        println!("  SHA256: {}", &collected.sha256[..16]);
+                        println!(
+                            "  Size:   {:.1} MB",
+                            collected.size_bytes as f64 / 1_048_576.0
+                        );
+                        for link in &collected.symlinks {
+                            println!("  Link:   {}", link.display());
+                        }
+                        println!();
+                        println!(
+                            "  Generate: modl generate \"a {} cat\" --lora {}",
+                            spec.params.trigger_word, spec.output.lora_name
+                        );
+                    }
+                    Err(e) => {
+                        println!("{} Failed to pull from hub: {e}", style("⚠").yellow(),);
+                        println!("  Pull manually: modl hub pull {hub_ref}");
+                    }
+                }
+                continue;
+            }
+
             let path = PathBuf::from(artifact_path);
 
             // Cloud artifacts: path is an R2 key (e.g. "gpu-uploads/.../*.safetensors")
@@ -720,6 +776,49 @@ async fn execute_training(
     }
 
     Ok(())
+}
+
+/// Pull a LoRA from the hub and collect it locally.
+async fn pull_from_hub(
+    hub_ref: &str,
+    lora_name: &str,
+    base_model: &str,
+    trigger_word: &str,
+    job_id: &str,
+    db: &Database,
+    store_root: &std::path::Path,
+) -> Result<artifacts::CollectedLora> {
+    use crate::core::hub::HubClient;
+
+    let hub = HubClient::from_config(true)?;
+
+    let (username, slug) = hub_ref
+        .split_once('/')
+        .context("Invalid hub ref — expected username/slug")?;
+
+    let pull_resp = hub.pull(username, slug, None).await?;
+
+    // Download the LoRA file
+    let bytes = reqwest::get(&pull_resp.download_url).await?.bytes().await?;
+
+    // Write to temp, then collect
+    let tmp_dir = store_root.join("tmp");
+    std::fs::create_dir_all(&tmp_dir)?;
+    let tmp_path = tmp_dir.join(format!("{lora_name}.safetensors"));
+    std::fs::write(&tmp_path, &bytes)?;
+
+    let collected = artifacts::collect_lora(
+        &tmp_path,
+        lora_name,
+        base_model,
+        trigger_word,
+        job_id,
+        db,
+        store_root,
+    )?;
+
+    let _ = std::fs::remove_file(&tmp_path);
+    Ok(collected)
 }
 
 /// Download a cloud-trained LoRA artifact from the hub API and collect it locally.

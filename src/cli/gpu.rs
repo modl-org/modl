@@ -91,6 +91,13 @@ pub async fn agent(session_token: &str, api_base: &str) -> Result<()> {
     let session_id = std::env::var("MODL_SESSION_ID")
         .context("MODL_SESSION_ID env var required for agent mode")?;
 
+    // Write hub credentials to config so `modl hub push` works on this instance
+    if let Ok(hub_key) = std::env::var("MODL_HUB_API_KEY")
+        && !hub_key.is_empty()
+    {
+        write_hub_config(api_base, &hub_key)?;
+    }
+
     eprintln!(
         "{} GPU agent started (session {})",
         style("→").cyan(),
@@ -275,24 +282,55 @@ async fn execute_train_job(
         let _ = report_events(client, api_base, auth, &job.job_id, &event_batch).await;
     }
 
-    // Upload artifacts to R2
+    // Push artifacts to hub (LoRA + samples as hub versions)
     if final_status == "completed" {
-        for (path, sha256, size_bytes) in &artifact_paths {
+        for (path, _sha256, _size_bytes) in &artifact_paths {
             let local_path = std::path::Path::new(path);
             if local_path.exists() && local_path.extension().is_some_and(|e| e == "safetensors") {
-                eprintln!("  Uploading artifact: {}", local_path.display());
-                if let Err(e) = upload_artifact(
-                    client,
-                    api_base,
-                    auth,
-                    &job.job_id,
+                eprintln!("  Pushing LoRA to hub: {}", local_path.display());
+                match hub_push_artifact(
+                    &spec.output.lora_name,
                     local_path,
-                    sha256.as_deref().unwrap_or(""),
-                    size_bytes.unwrap_or(0),
+                    &spec.model.base_model_id,
+                    &spec.params.trigger_word,
                 )
                 .await
                 {
-                    eprintln!("{} Failed to upload artifact: {e:#}", style("⚠").yellow());
+                    Ok(hub_ref) => {
+                        eprintln!("  {} Published to hub: {}", style("✓").green(), hub_ref);
+                        // Report hub registration event
+                        let hub_event = serde_json::json!({
+                            "schema_version": "v1",
+                            "job_id": job.job_id,
+                            "sequence": sequence + 1,
+                            "timestamp": chrono::Utc::now().to_rfc3339(),
+                            "source": "modl_agent",
+                            "event": {
+                                "type": "result",
+                                "result_type": "hub_registered",
+                                "data": { "hub_ref": hub_ref }
+                            },
+                        });
+                        let _ =
+                            report_events(client, api_base, auth, &job.job_id, &[hub_event]).await;
+                    }
+                    Err(e) => {
+                        eprintln!("{} Hub push failed: {e:#}", style("⚠").yellow());
+                        // Fall back to raw R2 upload
+                        if let Err(e2) = upload_artifact(
+                            client,
+                            api_base,
+                            auth,
+                            &job.job_id,
+                            local_path,
+                            _sha256.as_deref().unwrap_or(""),
+                            _size_bytes.unwrap_or(0),
+                        )
+                        .await
+                        {
+                            eprintln!("{} R2 upload also failed: {e2:#}", style("⚠").yellow());
+                        }
+                    }
                 }
             }
         }
@@ -519,4 +557,122 @@ async fn upload_artifact(
     );
 
     Ok(())
+}
+
+/// Write hub credentials to ~/.modl/config.yaml so hub push/pull works.
+fn write_hub_config(api_base: &str, api_key: &str) -> Result<()> {
+    let config_path = crate::core::paths::modl_root().join("config.yaml");
+    if !config_path.exists() {
+        // config.yaml should exist from `modl init --defaults` in onstart
+        return Ok(());
+    }
+
+    // Read existing config, inject cloud section
+    let content = std::fs::read_to_string(&config_path)?;
+    let mut config: serde_yaml::Value =
+        serde_yaml::from_str(&content).unwrap_or(serde_yaml::Value::Mapping(Default::default()));
+
+    if let serde_yaml::Value::Mapping(ref mut map) = config {
+        let mut cloud = serde_yaml::Mapping::new();
+        cloud.insert(
+            serde_yaml::Value::String("api_base".into()),
+            serde_yaml::Value::String(api_base.to_string()),
+        );
+        cloud.insert(
+            serde_yaml::Value::String("api_key".into()),
+            serde_yaml::Value::String(api_key.to_string()),
+        );
+        map.insert(
+            serde_yaml::Value::String("cloud".into()),
+            serde_yaml::Value::Mapping(cloud),
+        );
+    }
+
+    let yaml = serde_yaml::to_string(&config)?;
+    std::fs::write(&config_path, yaml)?;
+    eprintln!("  {} Hub credentials configured", style("✓").green());
+    Ok(())
+}
+
+/// Push a LoRA artifact to the hub. Returns the hub reference (username/slug).
+async fn hub_push_artifact(
+    lora_name: &str,
+    lora_path: &std::path::Path,
+    base_model: &str,
+    trigger_word: &str,
+) -> Result<String> {
+    use crate::core::hub::{CreateItemRequest, HubClient};
+
+    let hub = HubClient::from_config(true)?;
+    let me = hub.me().await.context("Failed to get hub account")?;
+    let username = me.username.as_deref().unwrap_or("unknown");
+
+    // Slugify the lora name
+    let slug = lora_name
+        .to_lowercase()
+        .replace(' ', "-")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect::<String>();
+
+    // Create hub item if it doesn't exist (ignore 409 conflict)
+    let create_req = CreateItemRequest {
+        slug: slug.clone(),
+        item_type: "lora".to_string(),
+        visibility: "private".to_string(),
+        description: Some(format!("Cloud-trained LoRA: {lora_name}")),
+        tags: vec!["cloud-trained".to_string()],
+        base_model: Some(base_model.to_string()),
+        trigger_words: if trigger_word.is_empty() {
+            vec![]
+        } else {
+            vec![trigger_word.to_string()]
+        },
+    };
+    let _ = hub.create_item(&create_req).await; // ignore if already exists
+
+    // Start push (get presigned upload URL)
+    let push_resp = hub
+        .push_start(username, &slug)
+        .await
+        .context("Failed to start hub push")?;
+
+    // Upload the LoRA file
+    crate::core::hub::upload_file_presigned(
+        &push_resp.upload_url,
+        lora_path,
+        "application/octet-stream",
+    )
+    .await
+    .context("Failed to upload LoRA to hub")?;
+
+    // Compute SHA256
+    let file_bytes = std::fs::read(lora_path)?;
+    let sha256 = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&file_bytes);
+        format!("{:x}", hasher.finalize())
+    };
+
+    // Complete push with metadata
+    let metadata = serde_json::json!({
+        "source": "modl-cloud-agent",
+        "base_model": base_model,
+        "trigger_words": [trigger_word],
+        "file_name": lora_path.file_name().and_then(|n| n.to_str()).unwrap_or("lora.safetensors"),
+    });
+
+    hub.push_complete(
+        username,
+        &slug,
+        &push_resp.version_id,
+        file_bytes.len() as u64,
+        &sha256,
+        Some(metadata),
+    )
+    .await
+    .context("Failed to complete hub push")?;
+
+    Ok(format!("{username}/{slug}"))
 }
