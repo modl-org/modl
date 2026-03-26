@@ -451,10 +451,7 @@ impl CloudExecutor {
                 let rel_path = entry.path().strip_prefix(ds_path)?;
                 let name = rel_path.to_string_lossy();
                 // Skip caches, hidden files, and non-training files
-                if name.starts_with('.')
-                    || name.starts_with("_latent_cache")
-                    || name.contains("__pycache__")
-                {
+                if name.starts_with('.') || name.starts_with('_') || name.contains("__pycache__") {
                     continue;
                 }
                 zip.start_file(name.as_ref(), options)?;
@@ -473,9 +470,13 @@ impl CloudExecutor {
         // Push to hub
         let push_resp = hub.push_start(username, &slug).await?;
 
-        crate::core::hub::upload_file_presigned(&push_resp.upload_url, &tmp, "application/zip")
-            .await
-            .context("Failed to upload dataset to hub")?;
+        crate::core::hub::upload_file_presigned(
+            &push_resp.upload_url,
+            &tmp,
+            "application/octet-stream",
+        )
+        .await
+        .context("Failed to upload dataset to hub")?;
 
         // Compute SHA256
         let file_bytes = std::fs::read(&tmp)?;
