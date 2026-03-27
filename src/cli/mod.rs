@@ -735,6 +735,9 @@ pub enum Commands {
         /// Resume from a checkpoint .safetensors file
         #[arg(long)]
         resume: Option<String>,
+        /// Sample image frequency (steps). 0 = only at the end. Default: auto (steps/10)
+        #[arg(long)]
+        sample_every: Option<u32>,
         /// Load a full TrainJobSpec YAML (escape hatch)
         #[arg(long)]
         config: Option<String>,
@@ -1164,6 +1167,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             caption_dropout,
             class_word,
             resume,
+            sample_every,
             config,
             dry_run,
             cloud,
@@ -1220,6 +1224,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                         caption_dropout,
                         class_word,
                         resume,
+                        sample_every,
                     },
                     config.as_deref(),
                     dry_run,

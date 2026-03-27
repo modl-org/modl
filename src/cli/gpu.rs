@@ -255,6 +255,22 @@ async fn execute_train_job(
                     }
                     Err(e) => {
                         eprintln!("{} Hub push failed: {e:#}", style("⚠").yellow());
+                        // Report the error as an event so the CLI user can see it
+                        sequence += 1;
+                        let err_event = serde_json::json!({
+                            "schema_version": "v1",
+                            "job_id": job.job_id,
+                            "sequence": sequence,
+                            "timestamp": chrono::Utc::now().to_rfc3339(),
+                            "source": "modl_agent",
+                            "event": {
+                                "type": "log",
+                                "level": "warning",
+                                "message": format!("Hub push failed: {e:#}"),
+                            },
+                        });
+                        let _ =
+                            report_events(client, api_base, auth, &job.job_id, &[err_event]).await;
                     }
                 }
             }
@@ -572,15 +588,18 @@ async fn exchange_for_hub_key(
 /// Write hub credentials to ~/.modl/config.yaml so hub push/pull works.
 fn write_hub_config(api_base: &str, api_key: &str) -> Result<()> {
     let config_path = crate::core::paths::modl_root().join("config.yaml");
-    if !config_path.exists() {
-        // config.yaml should exist from `modl init --defaults` in onstart
-        return Ok(());
-    }
 
-    // Read existing config, inject cloud section
-    let content = std::fs::read_to_string(&config_path)?;
-    let mut config: serde_yaml::Value =
-        serde_yaml::from_str(&content).unwrap_or(serde_yaml::Value::Mapping(Default::default()));
+    // Read existing config or start from empty mapping
+    let mut config: serde_yaml::Value = if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)?;
+        serde_yaml::from_str(&content).unwrap_or(serde_yaml::Value::Mapping(Default::default()))
+    } else {
+        // Create parent dirs if needed
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        serde_yaml::Value::Mapping(Default::default())
+    };
 
     if let serde_yaml::Value::Mapping(ref mut map) = config {
         let mut cloud = serde_yaml::Mapping::new();
@@ -746,12 +765,17 @@ async fn hub_push_checkpoint(
         && let Some((zip_path, _, count)) = zip_samples(&spec.output.destination_dir, step)
     {
         samples_count = count;
-        let _ = crate::core::hub::upload_file_presigned(
-            samples_url,
-            &zip_path,
-            "application/octet-stream",
-        )
-        .await;
+        match crate::core::hub::upload_file_presigned(samples_url, &zip_path, "application/zip")
+            .await
+        {
+            Ok(_) => {
+                eprintln!("  {} Uploaded {count} sample images", style("✓").green());
+            }
+            Err(e) => {
+                eprintln!("{} Sample upload failed: {e:#}", style("⚠").yellow());
+                samples_count = 0; // Don't claim samples in metadata
+            }
+        }
         let _ = std::fs::remove_file(&zip_path);
     }
 

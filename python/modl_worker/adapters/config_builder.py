@@ -394,6 +394,17 @@ def spec_to_aitoolkit_config(spec: dict, train_overrides: dict | None = None) ->
     resume_from = params.get("resume_from")
     original_save_every = None
     original_sample_every = None
+    # Explicit sample_every from spec (0 = only final step)
+    spec_sample_every = params.get("sample_every")
+    if spec_sample_every is not None:
+        if spec_sample_every == 0:
+            # 0 means only at the end — set to total steps so it samples once at the last step
+            total = params.get("steps", 2000)
+            original_sample_every = total
+            original_save_every = total
+        else:
+            original_sample_every = spec_sample_every
+            original_save_every = spec_sample_every
     resume_step = None
     if resume_from:
         network_config["pretrained_lora_path"] = resume_from

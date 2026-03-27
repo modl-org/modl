@@ -510,6 +510,10 @@ pub struct TrainingParams {
     /// Used in sample prompts alongside trigger word for better convergence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub class_word: Option<String>,
+    /// How often to generate sample images (in steps). 0 = only at the end.
+    /// Default (None) = auto (steps/10, min 50).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_every: Option<u32>,
 }
 
 fn default_batch_size() -> u32 {
@@ -760,6 +764,7 @@ mod tests {
                 caption_dropout_rate: -1.0,
                 resume_from: None,
                 class_word: None,
+                sample_every: None,
             },
             runtime: RuntimeRef {
                 profile: "trainer-cu124".into(),

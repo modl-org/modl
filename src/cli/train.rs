@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
 use crate::core::artifacts;
@@ -30,6 +30,7 @@ pub struct TrainOverrides {
     pub caption_dropout: Option<f64>,
     pub class_word: Option<String>,
     pub resume: Option<String>,
+    pub sample_every: Option<u32>,
 }
 
 /// Run the train command. Arguments are all optional; missing ones trigger
@@ -269,6 +270,12 @@ pub async fn run(
     if overrides.class_word.is_some() {
         params.class_word = overrides.class_word.clone();
     }
+    if overrides.sample_every.is_some() {
+        params.sample_every = overrides.sample_every;
+    } else if cloud || attach_gpu {
+        // Cloud/remote: skip intermediate sampling by default (saves ~10 min per round)
+        params.sample_every = Some(0);
+    }
     if overrides.resume.is_some() {
         params.resume_from = overrides.resume.clone();
 
@@ -474,15 +481,23 @@ async fn execute_training(
         .open(&log_path)
         .ok();
 
-    let pb = ProgressBar::new(spec.params.steps as u64);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} steps {msg}",
-        )?
-        .progress_chars("█▓░"),
-    );
-    pb.set_message("preparing...");
+    let is_tty = std::io::stderr().is_terminal();
+    let pb = if is_tty {
+        let pb = ProgressBar::new(spec.params.steps as u64);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} steps {msg}",
+            )?
+            .progress_chars("█▓░"),
+        );
+        pb.set_message("preparing...");
+        pb
+    } else {
+        ProgressBar::hidden()
+    };
     let mut got_first_step = false;
+    let mut last_printed_step: u64 = 0;
+    let print_interval: u64 = std::cmp::max(spec.params.steps as u64 / 20, 10);
 
     let mut artifact_paths: Vec<String> = Vec::new();
     let mut final_status = "completed";
@@ -502,6 +517,9 @@ async fn execute_training(
                     // Sample generation — show separate message, don't
                     // overwrite training progress bar position.
                     pb.set_message(format!("generating samples ({}/{})", step, total_steps));
+                    if !is_tty {
+                        eprintln!("  generating samples ({step}/{total_steps})");
+                    }
                 } else {
                     if !got_first_step {
                         got_first_step = true;
@@ -511,6 +529,12 @@ async fn execute_training(
                     pb.set_position(*step as u64);
                     if let Some(l) = loss {
                         pb.set_message(format!("loss: {l:.4}"));
+                    }
+                    // Non-TTY: print periodic progress lines
+                    if !is_tty && (*step as u64) >= last_printed_step + print_interval {
+                        last_printed_step = *step as u64;
+                        let loss_str = loss.map(|l| format!(" loss: {l:.4}")).unwrap_or_default();
+                        eprintln!("  {step}/{total_steps} steps{loss_str}");
                     }
 
                     // Write tqdm-style line to log file for the preview server
@@ -536,7 +560,11 @@ async fn execute_training(
                 artifact_paths.push(path.clone());
             }
             EventPayload::Completed { message } => {
-                pb.finish_with_message(message.as_deref().unwrap_or("done").to_string());
+                let msg = message.as_deref().unwrap_or("done");
+                pb.finish_with_message(msg.to_string());
+                if !is_tty {
+                    eprintln!("✓ Training {msg}");
+                }
                 break;
             }
             EventPayload::Error {

@@ -264,6 +264,7 @@ pub fn resolve_params(
         caption_dropout_rate: -1.0, // negative = let adapter choose
         resume_from: None,
         class_word: None,
+        sample_every: None,
     })
 }
 
