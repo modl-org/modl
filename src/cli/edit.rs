@@ -19,6 +19,8 @@ use crate::core::runtime;
 pub struct EditArgs<'a> {
     pub prompt: &'a str,
     pub images: &'a [String],
+    pub lora: Option<&'a str>,
+    pub lora_strength: f32,
     pub base: Option<&'a str>,
     pub seed: Option<u64>,
     pub steps: Option<u32>,
@@ -100,6 +102,8 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
     let EditArgs {
         prompt,
         images,
+        lora,
+        lora_strength,
         base,
         seed,
         steps,
@@ -193,6 +197,23 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
     };
 
     // -------------------------------------------------------------------
+    // Resolve user --lora (takes priority over Lightning LoRA)
+    // -------------------------------------------------------------------
+    let user_lora = if let Some(lora_name) = lora {
+        if fast.is_some() {
+            anyhow::bail!(
+                "Cannot use --lora and --fast together. --fast applies a Lightning LoRA which conflicts with a user LoRA."
+            );
+        }
+        resolve_lora(lora_name, lora_strength, &db)?
+    } else {
+        None
+    };
+
+    // User LoRA takes priority; fall back to Lightning LoRA
+    let resolved_lora = user_lora.or(fast_lora);
+
+    // -------------------------------------------------------------------
     // Resolve image inputs (download URLs if needed)
     // -------------------------------------------------------------------
     let mut resolved_paths = Vec::new();
@@ -235,7 +256,7 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
             base_model_id: base_model.clone(),
             base_model_path,
         },
-        lora: fast_lora,
+        lora: resolved_lora,
         output: GenerateOutputRef {
             output_dir: output_dir.to_string_lossy().to_string(),
         },
@@ -275,6 +296,9 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
                 "  Mode:   {}",
                 style("fast (Lightning LoRA)").green().bold()
             );
+        }
+        if let Some(lora_name) = lora {
+            println!("  LoRA:   {} (strength: {})", lora_name, lora_strength);
         }
         for (i, path) in resolved_paths.iter().enumerate() {
             println!("  Image {}: {}", i + 1, path);

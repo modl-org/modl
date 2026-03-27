@@ -113,12 +113,15 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
         # Klein: native image editing via the `image` parameter.
         # Supports multiple input images (e.g. source + reference).
         # No guidance (distilled), no negative prompt.
+        # Explicit --size overrides the first image's dimensions.
+        out_h = params.get("height") or source_images[0].size[1]
+        out_w = params.get("width") or source_images[0].size[0]
         gen_kwargs = {
             "image": source_images if len(source_images) > 1 else source_images[0],
             "prompt": prompt,
             "num_inference_steps": steps,
-            "height": source_images[0].size[1],
-            "width": source_images[0].size[0],
+            "height": out_h,
+            "width": out_w,
             "generator": generator,
         }
     else:

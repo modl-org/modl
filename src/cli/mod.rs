@@ -634,6 +634,12 @@ pub enum Commands {
         /// Source image(s) — local path or URL (can be repeated)
         #[arg(long, required = true)]
         image: Vec<String>,
+        /// LoRA name or path to apply (combine with reference images for multi-character scenes)
+        #[arg(long)]
+        lora: Option<String>,
+        /// LoRA strength/weight (0.0 = no effect, 1.0 = full strength)
+        #[arg(long, default_value = "1.0")]
+        lora_strength: f32,
         /// Base model to use (default: qwen-image-edit)
         #[arg(long)]
         base: Option<String>,
@@ -1115,6 +1121,8 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Edit {
             prompt,
             image,
+            lora,
+            lora_strength,
             base,
             seed,
             steps,
@@ -1132,6 +1140,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             edit::run(edit::EditArgs {
                 prompt: &prompt,
                 images: &image,
+                lora: lora.as_deref(),
+                lora_strength,
                 base: base.as_deref(),
                 seed,
                 steps,
