@@ -214,15 +214,21 @@ impl Executor for CloudExecutor {
         Ok(result)
     }
 
-    fn submit_generate(&mut self, _spec: &GenerateJobSpec) -> Result<JobHandle> {
-        bail!("Cloud generation is not yet available. Use local generation (remove --cloud flag).");
+    fn submit_generate(&mut self, spec: &GenerateJobSpec) -> Result<JobHandle> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.submit_infer_async(spec, "generate"))
+        })
     }
 
-    fn submit_edit(&mut self, _spec: &EditJobSpec) -> Result<JobHandle> {
-        bail!("Cloud editing is not yet available. Use local editing (remove --cloud flag).");
+    fn submit_edit(&mut self, spec: &EditJobSpec) -> Result<JobHandle> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.submit_infer_async(spec, "edit"))
+        })
     }
 
     fn cleanup(&mut self) -> Result<()> {
+        // Only destroy GPU sessions (Vast.ai training path).
+        // Modal serverless containers clean up automatically.
         if self.session_id.is_some() {
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(self.destroy_session())
@@ -232,19 +238,27 @@ impl Executor for CloudExecutor {
     }
 
     fn events(&mut self, _job_id: &str) -> Result<mpsc::Receiver<JobEvent>> {
-        let session_id = self.session_id.clone().context("No active GPU session")?;
-        let gpu_job_id = self.gpu_job_id.clone().context("No active GPU job")?;
-
         let api_base = self.api_base.clone();
         let auth = self.auth_header();
         let client = self.client.clone();
-
         let (tx, rx) = mpsc::channel::<JobEvent>();
 
-        // Spawn a tokio task that polls the API and sends events through the channel
-        tokio::spawn(async move {
-            poll_events_loop(client, api_base, auth, session_id, gpu_job_id, tx).await;
-        });
+        if let Some(ref session_id) = self.session_id {
+            // GPU session path (Vast.ai training): poll session events
+            let session_id = session_id.clone();
+            let gpu_job_id = self.gpu_job_id.clone().context("No active GPU job")?;
+            tokio::spawn(async move {
+                poll_events_loop(client, api_base, auth, session_id, gpu_job_id, tx).await;
+            });
+        } else if let Some(ref job_id) = self.gpu_job_id {
+            // Modal serverless path (infer): poll job events directly
+            let job_id = job_id.clone();
+            tokio::spawn(async move {
+                poll_job_events_loop(client, api_base, auth, job_id, tx).await;
+            });
+        } else {
+            bail!("No active job or GPU session");
+        }
 
         Ok(rx)
     }
@@ -346,6 +360,58 @@ impl CloudExecutor {
 
         eprintln!(
             "  {} Training job submitted ({})",
+            style("✓").green(),
+            &job_resp.job_id[..8.min(job_resp.job_id.len())],
+        );
+
+        Ok(JobHandle {
+            job_id: job_resp.job_id,
+            child_pid: None,
+        })
+    }
+
+    /// Submit a generate or edit job to Modal serverless via /jobs/infer.
+    /// No GPU session provisioning — Modal handles container lifecycle.
+    async fn submit_infer_async(
+        &mut self,
+        spec: &(impl serde::Serialize + std::fmt::Debug),
+        mode: &str,
+    ) -> Result<JobHandle> {
+        let spec_json = serde_json::to_value(spec)?;
+        let base_model = spec_json
+            .get("model")
+            .and_then(|m| m.get("base_model_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        eprintln!("  {} Cloud {mode} with {base_model}...", style("☁").cyan(),);
+
+        let resp = self
+            .client
+            .post(format!("{}/jobs/infer", self.api_base))
+            .header(reqwest::header::AUTHORIZATION, self.auth_header())
+            .json(&serde_json::json!({
+                "spec": spec_json,
+                "mode": mode,
+            }))
+            .send()
+            .await
+            .context("Failed to submit cloud job")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            bail!("Cloud {mode} failed (HTTP {status}): {text}");
+        }
+
+        let job_resp: SubmitJobResponse = resp.json().await?;
+
+        // Store as gpu_job_id (reuse the field — events() checks this for Modal path)
+        self.gpu_job_id = Some(job_resp.job_id.clone());
+        // No session_id — signals Modal path to events()
+
+        eprintln!(
+            "  {} Job submitted ({}), waiting for result...",
             style("✓").green(),
             &job_resp.job_id[..8.min(job_resp.job_id.len())],
         );
@@ -677,6 +743,143 @@ async fn poll_events_loop(
                 });
             }
 
+            return;
+        }
+    }
+}
+
+/// Background task: poll Modal job events via /jobs/{id}/events.
+/// Simpler than GPU session polling — no session layer, just job events.
+async fn poll_job_events_loop(
+    client: reqwest::Client,
+    api_base: String,
+    auth: String,
+    job_id: String,
+    tx: mpsc::Sender<JobEvent>,
+) {
+    let mut after: u64 = 0;
+    let mut consecutive_errors = 0u32;
+
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        let url = format!("{}/jobs/{}/events?after={}", api_base, job_id, after);
+
+        let resp = match client
+            .get(&url)
+            .header(reqwest::header::AUTHORIZATION, &auth)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => {
+                consecutive_errors += 1;
+                if consecutive_errors > 90 {
+                    // 90 * 2s = 3 min (Modal should be faster than Vast.ai boot)
+                    let _ = tx.send(JobEvent {
+                        schema_version: "v1".into(),
+                        job_id: job_id.clone(),
+                        sequence: after + 1,
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        source: "modl_cloud".into(),
+                        event: EventPayload::Error {
+                            code: "POLL_FAILED".into(),
+                            message: "Lost connection to cloud API".into(),
+                            recoverable: false,
+                            details: None,
+                        },
+                    });
+                    break;
+                }
+                continue;
+            }
+        };
+
+        if !resp.status().is_success() {
+            consecutive_errors += 1;
+            if consecutive_errors > 90 {
+                break;
+            }
+            continue;
+        }
+
+        consecutive_errors = 0;
+
+        let events_resp: EventsResponse = match resp.json().await {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        for raw_event in &events_resp.events {
+            let seq = raw_event
+                .get("sequence")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if seq > after {
+                after = seq;
+            }
+
+            if let Some(event) = parse_worker_event(raw_event, &job_id) {
+                let is_terminal = matches!(
+                    event.event,
+                    EventPayload::Completed { .. }
+                        | EventPayload::Error { .. }
+                        | EventPayload::Cancelled
+                );
+
+                if tx.send(event).is_err() {
+                    return;
+                }
+
+                if is_terminal {
+                    return;
+                }
+            }
+        }
+
+        // Check job status for completion without terminal event
+        if events_resp.job_status == "completed" || events_resp.job_status == "failed" {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+            // Final poll for any remaining events
+            if let Ok(r) = client
+                .get(format!(
+                    "{}/jobs/{}/events?after={}",
+                    api_base, job_id, after
+                ))
+                .header(reqwest::header::AUTHORIZATION, &auth)
+                .send()
+                .await
+                && let Ok(final_resp) = r.json::<EventsResponse>().await
+            {
+                for raw_event in &final_resp.events {
+                    if let Some(event) = parse_worker_event(raw_event, &job_id) {
+                        let _ = tx.send(event);
+                    }
+                }
+            }
+
+            // Synthesize terminal event if needed
+            let msg = if events_resp.job_status == "completed" {
+                EventPayload::Completed {
+                    message: Some("Cloud job completed".to_string()),
+                }
+            } else {
+                EventPayload::Error {
+                    code: "CLOUD_JOB_FAILED".into(),
+                    message: "Cloud job failed".to_string(),
+                    recoverable: false,
+                    details: None,
+                }
+            };
+            let _ = tx.send(JobEvent {
+                schema_version: "v1".into(),
+                job_id: job_id.clone(),
+                sequence: after + 1,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                source: "modl_cloud".into(),
+                event: msg,
+            });
             return;
         }
     }
