@@ -222,6 +222,17 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
         resolved_paths.push(path);
     }
 
+    // Warn if image count exceeds model's recommended max
+    if let Some(max_images) = model_family::max_edit_images(&base_model)
+        && resolved_paths.len() > max_images as usize
+    {
+        eprintln!(
+            "  {} {base_model} officially supports up to {max_images} reference images. \
+             Extra images may be ignored by the model.",
+            console::style("⚠").yellow(),
+        );
+    }
+
     // -------------------------------------------------------------------
     // Build output directory
     // -------------------------------------------------------------------

@@ -109,7 +109,7 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
     from .arch_config import detect_arch
     arch = detect_arch(base_model_id)
 
-    if arch in ("flux2_klein", "flux2_klein_9b"):
+    if arch in ("flux2_klein", "flux2_klein_9b", "flux2_klein_9b_kv"):
         # Klein: native image editing via the `image` parameter.
         # Supports multiple input images (e.g. source + reference).
         # No guidance (distilled), no negative prompt.

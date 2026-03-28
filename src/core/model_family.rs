@@ -59,6 +59,10 @@ pub struct ModelInfo {
 
     // -- Description --
     pub description: &'static str,
+
+    // -- Limits --
+    /// Maximum recommended number of reference images for edit mode (None = no limit).
+    pub max_edit_images: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -113,6 +117,7 @@ pub static FAMILIES: &[ModelFamily] = &[
                 speed: 2,
                 text_rendering: false,
                 description: "High quality, strong prompt following, 28 steps",
+                max_edit_images: None,
             },
             ModelInfo {
                 id: "flux-schnell",
@@ -140,6 +145,7 @@ pub static FAMILIES: &[ModelFamily] = &[
                 speed: 5,
                 text_rendering: false,
                 description: "Distilled, 4 steps, fast iteration",
+                max_edit_images: None,
             },
             ModelInfo {
                 id: "chroma",
@@ -167,6 +173,7 @@ pub static FAMILIES: &[ModelFamily] = &[
                 speed: 2,
                 text_rendering: false,
                 description: "Apache 2.0 Flux fork, 8.9B, negative prompts, uncensored",
+                max_edit_images: None,
             },
         ],
     },
@@ -205,6 +212,7 @@ pub static FAMILIES: &[ModelFamily] = &[
                 speed: 2,
                 text_rendering: false,
                 description: "Dedicated inpainting model, 384-ch input, no boundary artifacts",
+                max_edit_images: None,
             },
             ModelInfo {
                 id: "flux-fill-dev-onereward",
@@ -232,6 +240,7 @@ pub static FAMILIES: &[ModelFamily] = &[
                 speed: 2,
                 text_rendering: false,
                 description: "RLHF-tuned Fill, outperforms Flux Fill Pro, best inpainting",
+                max_edit_images: None,
             },
         ],
     },
@@ -270,6 +279,7 @@ pub static FAMILIES: &[ModelFamily] = &[
                 speed: 1,
                 text_rendering: false,
                 description: "Best quality, 46B total params, needs 80GB+ GPU",
+                max_edit_images: None,
             },
             ModelInfo {
                 id: "flux2-klein-4b",
@@ -297,6 +307,7 @@ pub static FAMILIES: &[ModelFamily] = &[
                 speed: 5,
                 text_rendering: false,
                 description: "4B distilled, fits on consumer GPUs, 4 steps",
+                max_edit_images: Some(4),
             },
             ModelInfo {
                 id: "flux2-klein-9b",
@@ -324,6 +335,35 @@ pub static FAMILIES: &[ModelFamily] = &[
                 speed: 4,
                 text_rendering: false,
                 description: "9B distilled, good quality/size balance, 4 steps",
+                max_edit_images: Some(4),
+            },
+            ModelInfo {
+                id: "flux2-klein-9b-kv",
+                name: "Flux 2 Klein 9B KV",
+                arch_key: "flux2_klein_9b_kv",
+                transformer_b: 9.0,
+                text_encoder_name: "Qwen3 8B",
+                text_encoder_b: 9.0,
+                total_b: 18.0,
+                vram_bf16_gb: 24,
+                vram_fp8_gb: 16,
+                capabilities: Capabilities {
+                    txt2img: true,
+                    img2img: false,
+                    inpaint: false,
+                    edit: true,
+                    lora: true,
+                    training: true,
+                    lanpaint_inpaint: true,
+                },
+                default_steps: 4,
+                default_guidance: 1.0,
+                default_resolution: 1024,
+                quality: 4,
+                speed: 4,
+                text_rendering: false,
+                description: "9B with KV cache, faster multi-reference editing, 4 steps",
+                max_edit_images: Some(4),
             },
         ],
     },
@@ -362,6 +402,7 @@ pub static FAMILIES: &[ModelFamily] = &[
                 speed: 2,
                 text_rendering: false,
                 description: "Strong aesthetics, 6B transformer, 20 steps",
+                max_edit_images: None,
             },
             ModelInfo {
                 id: "z-image-turbo",
@@ -389,6 +430,7 @@ pub static FAMILIES: &[ModelFamily] = &[
                 speed: 4,
                 text_rendering: false,
                 description: "Distilled Z-Image, 8 steps, good speed/quality",
+                max_edit_images: None,
             },
         ],
     },
@@ -427,6 +469,7 @@ pub static FAMILIES: &[ModelFamily] = &[
                 speed: 2,
                 text_rendering: true,
                 description: "Best text rendering, Chinese/English, 20B transformer",
+                max_edit_images: None,
             },
             ModelInfo {
                 id: "qwen-image-edit",
@@ -454,6 +497,7 @@ pub static FAMILIES: &[ModelFamily] = &[
                 speed: 1,
                 text_rendering: true,
                 description: "Instruction-based editing, text editing, style transfer",
+                max_edit_images: None,
             },
         ],
     },
@@ -492,6 +536,7 @@ pub static FAMILIES: &[ModelFamily] = &[
                 speed: 2,
                 text_rendering: false,
                 description: "Mature ecosystem, huge LoRA library, needs negative prompts",
+                max_edit_images: None,
             },
             ModelInfo {
                 id: "sd-1.5",
@@ -519,6 +564,7 @@ pub static FAMILIES: &[ModelFamily] = &[
                 speed: 4,
                 text_rendering: false,
                 description: "Lightweight, runs on any GPU, dated quality",
+                max_edit_images: None,
             },
         ],
     },
@@ -653,6 +699,9 @@ pub fn resolve_model(model_id: &str) -> Option<&'static ModelInfo> {
     if lower.contains("z-image") || lower.contains("z_image") || lower.contains("zimage") {
         return find_model("z-image");
     }
+    if lower.contains("klein") && lower.contains("9b") && lower.contains("kv") {
+        return find_model("flux2-klein-9b-kv");
+    }
     if lower.contains("klein") && lower.contains("9b") {
         return find_model("flux2-klein-9b");
     }
@@ -685,6 +734,11 @@ pub fn resolve_model(model_id: &str) -> Option<&'static ModelInfo> {
     }
 
     None
+}
+
+/// Get the maximum recommended edit images for a model (None = no limit).
+pub fn max_edit_images(model_id: &str) -> Option<u8> {
+    resolve_model(model_id).and_then(|m| m.max_edit_images)
 }
 
 /// Get default steps and guidance for a model.

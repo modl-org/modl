@@ -274,6 +274,41 @@ ARCH_CONFIGS: dict[str, dict] = {
         "default_resolution": 1024,
         "sample": {"sampler": "flowmatch", "steps": 4, "guidance": 1.0, "neg": ""},
     },
+    "flux2_klein_9b_kv": {
+        "pipeline_class": "Flux2KleinKVPipeline",
+        "gen_components": {
+            "transformer": {
+                "model_class": "Flux2Transformer2DModel",
+                "config_dir": "flux2-klein-9b-transformer",
+            },
+            "text_encoder": {
+                "model_id": "flux2-qwen3-8b-text-encoder",
+                "model_class": "Qwen3ForCausalLM",
+                "config_dir": "qwen3-8b",
+            },
+            "tokenizer": {
+                "model_class": "AutoTokenizer",
+                "config_dir": "qwen3-tokenizer",
+            },
+            "vae": {
+                "model_id": "flux2-vae",
+                "model_class": "AutoencoderKLFlux2",
+                "config_dir": "flux2-vae",
+            },
+            "scheduler": {
+                "model_class": "FlowMatchEulerDiscreteScheduler",
+                "config_dir": "flux2-klein-scheduler",
+            },
+        },
+        "pipeline_kwargs": {"is_distilled": True},
+        "model_flags": {"arch": "flux2_klein_9b"},
+        "noise_scheduler": "flowmatch",
+        "dtype": "bf16",
+        "train_text_encoder": False,
+        "resolutions": [512, 768, 1024],
+        "default_resolution": 1024,
+        "sample": {"sampler": "flowmatch", "steps": 4, "guidance": 1.0, "neg": ""},
+    },
     "flux2_klein_base_9b": {
         "pipeline_class": "Flux2KleinPipeline",
         "gen_components": {
@@ -641,6 +676,7 @@ MODEL_REGISTRY: dict[str, tuple[str, str]] = {
     "flux2-dev":      ("flux2",         "black-forest-labs/FLUX.2-dev"),
     "flux2-klein-4b": ("flux2_klein",   "black-forest-labs/FLUX.2-klein-4b-fp8"),
     "flux2-klein-9b": ("flux2_klein_9b", "black-forest-labs/FLUX.2-klein-9b-fp8"),
+    "flux2-klein-9b-kv": ("flux2_klein_9b_kv", "black-forest-labs/FLUX.2-klein-9b-kv-fp8"),
     "flux2-klein-base-4b": ("flux2_klein_base", "black-forest-labs/FLUX.2-klein-base-4B"),
     "flux2-klein-base-9b": ("flux2_klein_base_9b", "black-forest-labs/FLUX.2-klein-base-9B"),
     "flux-dev":       ("flux",          "black-forest-labs/FLUX.1-dev"),
@@ -694,6 +730,9 @@ def detect_arch(base_model_id: str) -> str:
     if "klein" in bid and ("flux2" in bid or "flux.2" in bid or "flux-2" in bid):
         is_base = "base" in bid
         is_9b = "9b" in bid
+        is_kv = "kv" in bid
+        if is_kv and is_9b:
+            return "flux2_klein_9b_kv"
         if is_base and is_9b:
             return "flux2_klein_base_9b"
         if is_9b:
