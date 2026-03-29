@@ -164,9 +164,12 @@ def build_train_block(arch_key: str, params: dict, lora_type: str, resume_step: 
 
     lr = params.get("learning_rate", 1e-4)
     is_klein = arch_key.startswith("flux2_klein")
+    optimizer = params.get("optimizer", "adamw8bit")
+    is_adaptive_lr = optimizer in ("prodigy",)
 
     # Z-Image: LR must not exceed 1e-4 — higher values break the distillation
-    if is_zimage and lr > 1e-4:
+    # Skip clamping for adaptive-LR optimizers (prodigy uses LR as a multiplier)
+    if is_zimage and lr > 1e-4 and not is_adaptive_lr:
         print(f"[modl] WARNING: Clamping LR from {lr} to 1e-4 for Z-Image (higher LR breaks distillation)", file=sys.stderr)
         lr = 1e-4
 
@@ -175,7 +178,8 @@ def build_train_block(arch_key: str, params: dict, lora_type: str, resume_step: 
     # 9B is more forgiving, 1e-4 works but 5e-5 is safer.
     # Both: train on base model, generate with distilled (LoRAs transfer well).
     # Aim for 50-120 repeats per image (higher dataset => fewer repeats).
-    if is_klein:
+    # Skip clamping for adaptive-LR optimizers (prodigy uses LR as a multiplier)
+    if is_klein and not is_adaptive_lr:
         is_4b = arch_key == "flux2_klein_4b"
         if is_4b and lr > 5e-5:
             print(f"[modl] WARNING: Clamping LR from {lr} to 5e-5 for Klein 4B (higher LR causes body horror / face collapse)", file=sys.stderr)
