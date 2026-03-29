@@ -365,7 +365,7 @@ def spec_to_aitoolkit_config(spec: dict, train_overrides: dict | None = None) ->
             model_config["quantize"] = True
             model_config["quantize_te"] = True
             model_config["low_vram"] = True
-    elif quantize and is_klein:
+    elif quantize and arch_key.startswith("flux2_klein"):
         model_config["quantize"] = True
 
     if arch_key == "qwen_image":
