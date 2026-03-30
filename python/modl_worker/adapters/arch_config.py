@@ -429,7 +429,7 @@ ARCH_CONFIGS: dict[str, dict] = {
         "train_text_encoder": False,
         "resolutions": [512, 768, 1024],
         "default_resolution": 1024,
-        "sample": {"sampler": "flowmatch", "steps": 25, "guidance": 4.0, "neg": ""},
+        "sample": {"sampler": "flowmatch", "steps": 20, "guidance": 4.0, "neg": ""},
     },
     "qwen_image": {
         "pipeline_class": "QwenImagePipeline",
