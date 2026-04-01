@@ -132,6 +132,7 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
             "true_cfg_scale": guidance,
             "negative_prompt": " ",
             "num_inference_steps": steps,
+            "guidance_scale": 1.0,
             "generator": generator,
         }
         # Optional output dimensions (for outpainting — larger than source)

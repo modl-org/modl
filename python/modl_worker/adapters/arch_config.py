@@ -519,6 +519,51 @@ ARCH_CONFIGS: dict[str, dict] = {
         "default_resolution": 1024,
         "sample": {"sampler": "flowmatch", "steps": 50, "guidance": 4.0, "neg": ""},
     },
+    # 2511 "Plus" revision — uses QwenImageEditPlusPipeline (different from original)
+    "qwen_image_edit_2511": {
+        "pipeline_class": "QwenImageEditPlusPipeline",
+        "gen_components": {
+            "transformer": {
+                "model_class": "QwenImageTransformer2DModel",
+                "config_dir": "qwen-image-edit-transformer",
+            },
+            "text_encoder": {
+                "model_id": "qwen-image-clip",
+                "model_class": "Qwen2_5_VLForConditionalGeneration",
+                "config_dir": "qwen-image-text-encoder",
+            },
+            "tokenizer": {
+                "model_class": "AutoTokenizer",
+                "config_dir": "qwen-image-tokenizer",
+            },
+            "processor": {
+                "model_class": "Qwen2VLProcessor",
+                "config_dir": "qwen-image-processor",
+            },
+            "vae": {
+                "model_id": "qwen-image-vae",
+                "model_class": "AutoencoderKLQwenImage",
+                "config_dir": "qwen-image-vae",
+            },
+            "scheduler": {
+                "model_class": "FlowMatchEulerDiscreteScheduler",
+                "config_dir": "qwen-image-edit-scheduler",
+            },
+        },
+        "model_flags": {
+            "arch": "qwen_image_edit_2511",
+            "quantize": True,
+            "quantize_te": True,
+            "qtype_te": "qfloat8",
+            "low_vram": True,
+        },
+        "noise_scheduler": "flowmatch",
+        "dtype": "bf16",
+        "train_text_encoder": False,
+        "resolutions": [512, 768, 1024],
+        "default_resolution": 1024,
+        "sample": {"sampler": "flowmatch", "steps": 40, "guidance": 4.0, "neg": ""},
+    },
     "flux_fill": {
         "pipeline_class": "FluxFillPipeline",
         "gen_components": {
@@ -680,6 +725,8 @@ def detect_arch(base_model_id: str) -> str:
     if "fill" in bid:
         return "flux_fill"
     if ("qwen" in bid and "edit" in bid) or "qwen_image_edit" in bid:
+        if "2511" in bid:
+            return "qwen_image_edit_2511"
         return "qwen_image_edit"
     if "qwen-image" in bid or "qwen_image" in bid:
         return "qwen_image"
