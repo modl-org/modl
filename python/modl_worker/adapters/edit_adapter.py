@@ -73,6 +73,10 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
     seed = params.get("seed")
     count = params.get("count", 1)
 
+    # Detect architecture early — needed for scheduler and kwarg decisions
+    from .arch_config import detect_arch
+    arch = detect_arch(base_model_id)
+
     # Apply scheduler overrides (Lightning mode)
     sched_overrides = params.get("scheduler_overrides")
     lightning_sigmas = None
@@ -80,6 +84,29 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
         from .gen_adapter import _apply_scheduler_overrides, _compute_lightning_sigmas
         _apply_scheduler_overrides(pipeline, sched_overrides, emitter)
         lightning_sigmas = _compute_lightning_sigmas(steps)
+
+    # Qwen-Image-Edit-2511: override scheduler to use fixed shift=3.1
+    # (matching ComfyUI's ModelSamplingAuraFlow node).
+    #
+    # The diffusers QwenImageEditPlusPipeline computes mu = calculate_shift(
+    #   seq_len, base_shift, max_shift) which feeds into the scheduler's
+    # exponential time_shift: shift = exp(mu). By setting base_shift = max_shift
+    # = log(3.1), we get a constant mu → constant shift=3.1 regardless of
+    # image sequence length.
+    if arch == "qwen_image_edit_2511" and hasattr(pipeline, "scheduler"):
+        import math
+        shift_val = 3.1
+        log_shift = math.log(shift_val)
+        sched = pipeline.scheduler
+        config = dict(sched.config)
+        config["use_dynamic_shifting"] = True
+        config["base_shift"] = log_shift
+        config["max_shift"] = log_shift
+        config["time_shift_type"] = "exponential"
+        sched_class = type(sched)
+        pipeline.scheduler = sched_class.from_config(config)
+        emitter.info(f"Qwen 2511: scheduler shift={shift_val} (base_shift=max_shift=log({shift_val})={log_shift:.4f})")
+
     image_paths = params.get("image_paths", [])
 
     if not image_paths:
@@ -106,9 +133,6 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
         generator.manual_seed(seed)
 
     # Build inference kwargs — different pipelines need different params
-    from .arch_config import detect_arch
-    arch = detect_arch(base_model_id)
-
     if arch in ("flux2_klein", "flux2_klein_9b"):
         # Klein: native image editing via the `image` parameter.
         # Supports multiple input images (e.g. source + reference).
@@ -144,6 +168,7 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
     # Lightning mode: use ComfyUI-style simple linear sigmas.
     if lightning_sigmas is not None:
         gen_kwargs["sigmas"] = lightning_sigmas
+
 
     artifact_paths = []
 
