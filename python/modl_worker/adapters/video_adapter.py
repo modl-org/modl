@@ -54,15 +54,26 @@ def run_generate_video(config_path: Path, emitter: EventEmitter) -> int:
     guidance = params.get("guidance", 1.0)
     seed = params.get("seed")
     count = params.get("count", 1)
+    init_image_path = params.get("init_image")
+
+    # Determine mode
+    mode = "img2vid" if init_image_path else "txt2vid"
+
+    # Load init image for img2vid
+    init_image = None
+    if init_image_path:
+        from PIL import Image
+        init_image = Image.open(init_image_path).convert("RGB")
+        emitter.info(f"Init image loaded: {init_image.size[0]}x{init_image.size[1]}")
 
     output_dir = output_info.get("output_dir", ".")
     os.makedirs(output_dir, exist_ok=True)
 
-    emitter.info(f"Loading LTX-2 video pipeline for {base_model_id}...")
+    emitter.info(f"Loading LTX-2 video pipeline for {base_model_id} (mode={mode})...")
     emitter.progress(stage="load", step=0, total_steps=count)
 
     try:
-        pipe = _load_ltx2_pipeline(base_model_id, base_model_path, lora_info, emitter)
+        pipe = _load_ltx2_pipeline(base_model_id, base_model_path, lora_info, mode, emitter)
     except Exception as exc:
         emitter.error("PIPELINE_LOAD_FAILED", f"Failed to load video pipeline: {exc}", recoverable=False)
         import traceback
@@ -86,7 +97,7 @@ def run_generate_video(config_path: Path, emitter: EventEmitter) -> int:
             return callback_kwargs
 
         try:
-            result = pipe(
+            gen_kwargs = dict(
                 prompt=prompt,
                 negative_prompt="blurry, low quality, still frame, watermark",
                 width=width,
@@ -99,6 +110,9 @@ def run_generate_video(config_path: Path, emitter: EventEmitter) -> int:
                 callback_on_step_end=_step_callback,
                 output_type="pil",
             )
+            if init_image is not None:
+                gen_kwargs["image"] = init_image
+            result = pipe(**gen_kwargs)
             video_frames = result.frames[0]
         except Exception as exc:
             emitter.error(
@@ -150,6 +164,7 @@ def _load_ltx2_pipeline(
     base_model_id: str,
     base_model_path: str | None,
     lora_info: dict | None,
+    mode: str,
     emitter: EventEmitter,
 ):
     """Load the LTX-2 pipeline with GGUF transformer for 24GB VRAM.
@@ -164,32 +179,45 @@ def _load_ltx2_pipeline(
     import torch
     from diffusers import (
         LTX2Pipeline,
+        LTX2ImageToVideoPipeline,
         LTX2VideoTransformer3DModel,
         GGUFQuantizationConfig,
     )
     from modl_worker.adapters.arch_config import _get_installed_path
 
+    PipelineClass = LTX2ImageToVideoPipeline if mode == "img2vid" else LTX2Pipeline
+
     CONFIGS = Path(__file__).parent.parent / "configs"
     dtype = torch.bfloat16
 
-    # --- 1. Load GGUF transformer ---
+    # --- 1. Resolve model version (2.3 preferred, 19B fallback) ---
+    is_23 = "2.3" in base_model_id or base_model_id == "ltx-video-2.3"
     transformer_path = base_model_path
     if not transformer_path:
-        transformer_path = _get_installed_path("ltx-video-dev")
+        # Prefer 2.3 distilled, fall back to 19B
+        transformer_path = _get_installed_path("ltx-video-2.3") or _get_installed_path("ltx-video-dev")
+        if transformer_path and "2.3" in Path(transformer_path).name:
+            is_23 = True
     if not transformer_path or not Path(transformer_path).exists():
         raise FileNotFoundError(
-            "LTX-2 transformer not found. Install with: modl pull ltx-video-dev"
+            "LTX Video transformer not found. Install with: modl pull ltx-video-2.3"
         )
 
     emitter.info(f"Loading GGUF transformer from {Path(transformer_path).name}...")
     t0 = time.time()
 
-    config_path = str(CONFIGS / "ltx2-transformer")
-    transformer = LTX2VideoTransformer3DModel.from_single_file(
-        transformer_path,
+    config_path = str(CONFIGS / "ltx23-transformer") if is_23 else str(CONFIGS / "ltx2-transformer")
+    load_kwargs = dict(
         config=config_path,
         quantization_config=GGUFQuantizationConfig(compute_dtype=dtype),
         torch_dtype=dtype,
+    )
+    if is_23:
+        load_kwargs["low_cpu_mem_usage"] = False
+        load_kwargs["ignore_mismatched_sizes"] = True
+    transformer = LTX2VideoTransformer3DModel.from_single_file(
+        transformer_path,
+        **load_kwargs,
     )
     emitter.info(f"Transformer loaded in {time.time()-t0:.1f}s")
 
@@ -206,8 +234,10 @@ def _load_ltx2_pipeline(
         bnb_4bit_compute_dtype=dtype,
         bnb_4bit_quant_type="nf4",
     )
+    # Use the right HF repo for 2.3 vs 19B
+    hf_repo = "dg845/LTX-2.3-Distilled-Diffusers" if is_23 else "Lightricks/LTX-2"
     text_encoder = Gemma3ForConditionalGeneration.from_pretrained(
-        "Lightricks/LTX-2",
+        hf_repo,
         subfolder="text_encoder",
         quantization_config=bnb_config,
         dtype=dtype,
@@ -215,46 +245,42 @@ def _load_ltx2_pipeline(
     emitter.info(f"Text encoder loaded in {time.time()-t1:.1f}s")
 
     # --- 3. Load rest of pipeline (VAE, connector, scheduler, tokenizer) ---
-    # Use from_pretrained but inject our transformer + text encoder to skip
-    # their downloads. The remaining components are small (~3GB total).
-    emitter.info("Loading VAE, connector, scheduler...")
+    emitter.info(f"Loading {PipelineClass.__name__} (VAE, connector, scheduler)...")
     t2 = time.time()
 
     # Move transformer to CPU to free VRAM during pipeline assembly
     transformer.to("cpu")
     torch.cuda.empty_cache()
 
-    pipe = LTX2Pipeline.from_pretrained(
-        "Lightricks/LTX-2",
+    pipe = PipelineClass.from_pretrained(
+        hf_repo,
         transformer=transformer,
         text_encoder=text_encoder,
         torch_dtype=dtype,
     )
     emitter.info(f"Pipeline assembled in {time.time()-t2:.1f}s")
 
-    # --- 8. Memory optimization ---
+    # --- 4. Memory optimization ---
     pipe.enable_model_cpu_offload()
     pipe.vae.enable_tiling()
     emitter.info("CPU offload + VAE tiling enabled")
 
-    # --- 9. Apply distilled LoRA ---
-    lora_path = None
-    lora_strength = 0.6
-
-    if lora_info:
-        lora_path = lora_info.get("path")
-        lora_strength = lora_info.get("weight", 0.6)
-
-    if not lora_path:
-        lora_path = _get_installed_path("ltx2-distilled-lora")
-
-    if lora_path and Path(lora_path).exists():
-        emitter.info(f"Applying distilled LoRA (strength={lora_strength})...")
-        try:
-            pipe.load_lora_weights(lora_path)
-            pipe.fuse_lora(lora_scale=lora_strength)
-            emitter.info("Distilled LoRA applied")
-        except Exception as exc:
-            emitter.warning("LORA_FAILED", f"Failed to apply LoRA: {exc}")
+    # --- 5. Apply distilled LoRA (19B only — 2.3 is already distilled) ---
+    if not is_23:
+        lora_path = None
+        lora_strength = 0.6
+        if lora_info:
+            lora_path = lora_info.get("path")
+            lora_strength = lora_info.get("weight", 0.6)
+        if not lora_path:
+            lora_path = _get_installed_path("ltx2-distilled-lora")
+        if lora_path and Path(lora_path).exists():
+            emitter.info(f"Applying distilled LoRA (strength={lora_strength})...")
+            try:
+                pipe.load_lora_weights(lora_path)
+                pipe.fuse_lora(lora_scale=lora_strength)
+                emitter.info("Distilled LoRA applied")
+            except Exception as exc:
+                emitter.warning("LORA_FAILED", f"Failed to apply LoRA: {exc}")
 
     return pipe
