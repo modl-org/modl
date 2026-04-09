@@ -239,51 +239,37 @@ def _load_safetensors_lenient(filepath: str) -> dict:
     Some safetensors files (e.g. Comfy-Org's Qwen 2.5 VL 7B) have extra bytes
     at the end that aren't referenced by any tensor in the header.  The strict
     ``safetensors.torch.load_file`` rejects these with "incomplete metadata,
-    file not fully covered".  This loader reads tensors manually via mmap,
-    skipping the coverage check.
+    file not fully covered".
+
+    Strategy: truncate a temporary copy of the file to the covered range,
+    then load with the standard (memory-efficient) safetensors loader.
+    If the file is too large to copy, fall back to per-tensor mmap loading.
     """
-    import mmap
     import struct
     import torch
-
-    _DTYPE_MAP = {
-        "BF16": (torch.bfloat16, 2),
-        "F16": (torch.float16, 2),
-        "F32": (torch.float32, 4),
-        "F64": (torch.float64, 8),
-        "I8": (torch.int8, 1),
-        "I16": (torch.int16, 2),
-        "I32": (torch.int32, 4),
-        "I64": (torch.int64, 8),
-        "BOOL": (torch.bool, 1),
-        "F8_E4M3": (torch.float8_e4m3fn, 1),
-    }
 
     with open(filepath, "rb") as f:
         header_size = struct.unpack("<Q", f.read(8))[0]
         header_bytes = f.read(header_size)
         header = json.loads(header_bytes)
-        data_offset = 8 + header_size
 
-        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-        try:
-            state_dict = {}
-            for key, info in header.items():
-                if key == "__metadata__":
-                    continue
-                start, end = info["data_offsets"]
-                shape = info["shape"]
-                dt_str = info["dtype"]
-                if dt_str not in _DTYPE_MAP:
-                    raise ValueError(f"Unsupported dtype {dt_str} for tensor {key}")
-                dt, _ = _DTYPE_MAP[dt_str]
-                raw = mm[data_offset + start : data_offset + end]
-                tensor = torch.frombuffer(bytearray(raw), dtype=dt).reshape(shape)
-                state_dict[key] = tensor
-        finally:
-            mm.close()
+    data_offset = 8 + header_size
+    max_end = 0
+    for key, info in header.items():
+        if key == "__metadata__":
+            continue
+        _, end = info["data_offsets"]
+        max_end = max(max_end, end)
+    valid_size = data_offset + max_end
 
-    return state_dict
+    # Truncate in-place — removes trailing junk bytes so the strict
+    # safetensors loader can handle the file from now on.
+    file_size = os.path.getsize(filepath)
+    if file_size > valid_size:
+        os.truncate(filepath, valid_size)
+
+    import safetensors.torch
+    return safetensors.torch.load_file(filepath)
 
 
 def _detect_weight_dtype(filepath: str) -> str:
@@ -661,6 +647,135 @@ def assemble_pipeline(
     return pipe
 
 
+def _load_gguf_pipeline(
+    base_model_id: str,
+    gguf_path: str,
+    cls_name: str,
+    assembly: dict,
+    emitter,
+):
+    """Load a GGUF model using the official diffusers from_single_file pattern.
+
+    Uses GGUFQuantizationConfig for the transformer and loads other components
+    (text encoder, VAE, scheduler, etc.) from local configs/weights. This
+    ensures proper dequantization during inference and LoRA compatibility.
+    """
+    import torch
+    import safetensors.torch
+
+    dtype = get_inference_dtype()
+    PipelineClass = _get_pipeline(cls_name)
+    filename = Path(gguf_path).name
+
+    # 1. Load transformer via from_single_file with GGUF quantization
+    transformer_spec = assembly.get("transformer", {})
+    transformer_class_name = transformer_spec.get("model_class", "QwenImageTransformer2DModel")
+    TransformerClass = _import_class(transformer_class_name)
+    config_dir = CONFIGS_DIR / transformer_spec["config_dir"]
+
+    from diffusers import GGUFQuantizationConfig
+    emitter.info(f"Loading GGUF transformer: {filename}")
+    transformer = TransformerClass.from_single_file(
+        gguf_path,
+        quantization_config=GGUFQuantizationConfig(compute_dtype=dtype),
+        config=str(config_dir),
+        torch_dtype=dtype,
+    )
+    emitter.info(f"  → GGUF transformer loaded")
+
+    # 2. Load remaining components from local configs/weights
+    components = {"transformer": transformer}
+
+    for param_name, spec in assembly.items():
+        if param_name == "transformer":
+            continue
+
+        model_class_name = spec["model_class"]
+        config_dir = CONFIGS_DIR / spec["config_dir"]
+        resolved_path = spec.get("resolved_path")
+        ModelClass = _import_class(model_class_name)
+
+        if not resolved_path:
+            # Try to resolve from installed models
+            model_id = spec.get("model_id")
+            if model_id:
+                from .arch_config import resolve_model_path as resolve_arch_path
+                try:
+                    resolved_path = resolve_arch_path(model_id)
+                except Exception:
+                    pass
+
+        if not resolved_path or not os.path.exists(str(resolved_path)):
+            # For tokenizer/processor/scheduler — load from config dir only
+            if param_name in ("tokenizer", "processor"):
+                components[param_name] = ModelClass.from_pretrained(str(config_dir))
+                continue
+            elif param_name == "scheduler":
+                components[param_name] = ModelClass.from_pretrained(str(config_dir))
+                continue
+            else:
+                emitter.info(f"Skipping {param_name} (no weights found)")
+                continue
+
+        resolved_path = str(resolved_path)
+        emitter.info(f"Loading {param_name}: {Path(resolved_path).name}")
+
+        # Check if there's an HF layout directory (from prior assembly)
+        hf_dir = Path(resolved_path).parent / "hf_layout"
+        use_hf_dir = spec.get("hf_dir", False) or os.path.isdir(resolved_path)
+
+        if hf_dir.exists() and not use_hf_dir:
+            # Use existing HF layout if available (e.g. text encoder)
+            use_hf_dir = True
+            resolved_path = str(hf_dir)
+
+        if use_hf_dir:
+            components[param_name] = ModelClass.from_pretrained(
+                resolved_path, torch_dtype=dtype,
+            )
+        elif hasattr(ModelClass, "from_single_file"):
+            try:
+                components[param_name] = ModelClass.from_single_file(
+                    resolved_path, config=str(config_dir), torch_dtype=dtype,
+                )
+            except (ValueError, NotImplementedError):
+                # Fallback: manual load
+                config_dict = ModelClass.load_config(str(config_dir))
+                model = ModelClass.from_config(config_dict)
+                sd = safetensors.torch.load_file(resolved_path)
+                model.load_state_dict(sd, strict=False)
+                components[param_name] = model.to(dtype)
+        else:
+            # Transformers models (text encoder) — from_pretrained with HF layout
+            # Create synthetic HF directory if needed
+            if not use_hf_dir and not os.path.isdir(resolved_path):
+                hf_dir = Path(resolved_path).parent / "hf_layout"
+                hf_dir.mkdir(exist_ok=True)
+                link = hf_dir / "model.safetensors"
+                if not link.exists():
+                    link.symlink_to(resolved_path)
+                import shutil
+                for cfg_file in config_dir.iterdir():
+                    dst = hf_dir / cfg_file.name
+                    if not dst.exists():
+                        shutil.copy2(str(cfg_file), str(dst))
+                resolved_path = str(hf_dir)
+
+            components[param_name] = ModelClass.from_pretrained(
+                resolved_path, torch_dtype=dtype,
+            )
+
+    # 3. Assemble pipeline
+    arch_name = detect_arch(base_model_id)
+    pipeline_kwargs = ARCH_CONFIGS.get(arch_name, {}).get("pipeline_kwargs", {})
+    emitter.info(f"Assembling {cls_name} from {len(components)} components")
+    pipe = PipelineClass(**components, **pipeline_kwargs)
+
+    from modl_worker.device import move_pipe_to_device
+    move_pipe_to_device(pipe)
+    return pipe
+
+
 # ---------------------------------------------------------------------------
 # Main pipeline loader (strategy dispatch)
 # ---------------------------------------------------------------------------
@@ -735,14 +850,29 @@ def load_pipeline(
                 torch_dtype=dtype,
             )
     elif fmt == "gguf":
-        # GGUF models need assembly with quantization config
+        # GGUF models: use from_single_file for the transformer with
+        # GGUFQuantizationConfig, then assemble the pipeline with the
+        # remaining components loaded from local configs/weights.
+        #
+        # This follows the official diffusers GGUF pattern and ensures
+        # proper dequantization during inference + LoRA compatibility.
         assembly = resolve_gen_assembly(base_model_id)
-        if assembly:
-            return assemble_pipeline(base_model_id, model_source, cls_name, emitter, force_fp8=force_fp8)
-        else:
+        if not assembly:
             raise RuntimeError(
                 f"GGUF model {model_source} requires assembly spec in arch_config"
             )
+        pipe = _load_gguf_pipeline(
+            base_model_id, model_source, cls_name, assembly, emitter,
+        )
+        pipe._modl_loaded_files = {
+            "transformer": {
+                "file": Path(model_source).name,
+                "path": model_source,
+                "weight_dtype": "gguf",
+                "class": assembly.get("transformer", {}).get("model_class", ""),
+            },
+        }
+        return pipe
     else:
         # HF repo identifier
         pipe = PipelineClass.from_pretrained(

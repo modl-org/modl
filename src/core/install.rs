@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::collections::HashSet;
+
 use std::path::PathBuf;
 
 use super::config::Config;
@@ -112,9 +112,12 @@ pub fn resolve_plan(
 ) -> Result<(InstallPlan, Option<u64>)> {
     let config = Config::load()?;
     let installed_list = db.list_installed(None)?;
-    let installed_ids: HashSet<String> = installed_list.iter().map(|m| m.id.clone()).collect();
+    let installed_map: std::collections::HashMap<String, Option<String>> = installed_list
+        .iter()
+        .map(|m| (m.id.clone(), m.variant.clone()))
+        .collect();
 
-    let plan = resolver::resolve(id, variant, index, &installed_ids)?;
+    let plan = resolver::resolve(id, variant, index, &installed_map)?;
 
     let vram = config
         .gpu

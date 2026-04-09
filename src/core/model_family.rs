@@ -511,7 +511,38 @@ pub static FAMILIES: &[ModelFamily] = &[
                 text_rendering: true,
                 default_frames: 0,
                 default_fps: 0,
-                description: "Instruction-based editing, text editing, style transfer",
+                description: "Original instruction-based editing, text editing, style transfer",
+            },
+            ModelInfo {
+                id: "qwen-image-edit-2511",
+                name: "Qwen Image Edit 2511",
+                arch_key: "qwen_image_edit_2511",
+                transformer_b: 20.0,
+                text_encoder_name: "Qwen2.5-VL 7B",
+                text_encoder_b: 7.0,
+                total_b: 27.0,
+                vram_bf16_gb: 50,
+                vram_fp8_gb: 30,
+                capabilities: Capabilities {
+                    txt2img: false,
+                    img2img: false,
+                    inpaint: false,
+                    edit: true,
+                    lora: true,
+                    training: false,
+                    lanpaint_inpaint: false,
+                    txt2vid: false,
+                    img2vid: false,
+                },
+                default_steps: 40,
+                default_guidance: 4.0,
+                default_resolution: 1024,
+                quality: 5,
+                speed: 1,
+                text_rendering: true,
+                default_frames: 0,
+                default_fps: 0,
+                description: "2511 Plus — improved consistency, less drift, multi-image",
             },
         ],
     },
@@ -725,6 +756,14 @@ pub static LIGHTNING_CONFIGS: &[LightningConfig] = &[
         guidance: 1.0,
         scheduler_overrides: QWEN_LIGHTNING_SCHED,
     },
+    LightningConfig {
+        base_model_id: "qwen-image-edit-2511",
+        lora_registry_id: "qwen-image-edit-2511-lightning",
+        variant_4step: "4step-bf16",
+        variant_8step: "8step-bf16",
+        guidance: 1.0,
+        scheduler_overrides: QWEN_LIGHTNING_SCHED,
+    },
     // Future: sdxl-lightning, flux-lightning, etc.
 ];
 
@@ -781,6 +820,9 @@ pub fn resolve_model(model_id: &str) -> Option<&'static ModelInfo> {
 
     // Qwen Image Edit before Qwen Image (more specific first)
     if lower.contains("qwen") && lower.contains("edit") {
+        if lower.contains("2511") {
+            return find_model("qwen-image-edit-2511");
+        }
         return find_model("qwen-image-edit");
     }
     if lower.contains("qwen") && lower.contains("image") {

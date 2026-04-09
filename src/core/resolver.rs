@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::manifest::Manifest;
 use super::registry::RegistryIndex;
@@ -19,12 +19,16 @@ pub struct ResolvedItem {
     pub already_installed: bool,
 }
 
-/// Resolve all dependencies for a given model ID
+/// Resolve all dependencies for a given model ID.
+///
+/// `installed` maps model ID → installed variant (if any). This allows the
+/// resolver to detect when a different variant is requested and mark the
+/// item as not-yet-installed.
 pub fn resolve(
     id: &str,
     variant: Option<&str>,
     index: &RegistryIndex,
-    installed: &HashSet<String>,
+    installed: &HashMap<String, Option<String>>,
 ) -> Result<InstallPlan> {
     let mut plan = Vec::new();
     let mut visited = HashSet::new();
@@ -36,7 +40,7 @@ fn resolve_recursive(
     id: &str,
     variant: Option<&str>,
     index: &RegistryIndex,
-    installed: &HashSet<String>,
+    installed: &HashMap<String, Option<String>>,
     visited: &mut HashSet<String>,
     plan: &mut Vec<ResolvedItem>,
 ) -> Result<()> {
@@ -82,7 +86,7 @@ fn resolve_recursive(
 
         // If user already installed the optional alternative, skip the primary
         if let Some(ref alt_id) = dep.optional_variant
-            && installed.contains(alt_id)
+            && installed.contains_key(alt_id)
         {
             visited.insert(dep_id.to_string());
             continue;
@@ -94,11 +98,16 @@ fn resolve_recursive(
         )?;
     }
 
-    // Add this item
+    // Add this item. Mark as already_installed only if the same variant
+    // (or no specific variant was requested) is installed.
+    let already_installed = match installed.get(id) {
+        Some(installed_variant) => variant.is_none() || installed_variant.as_deref() == variant,
+        None => false,
+    };
     plan.push(ResolvedItem {
         manifest: manifest.clone(),
         variant_id: variant.map(String::from),
-        already_installed: installed.contains(id),
+        already_installed,
     });
 
     Ok(())
@@ -174,7 +183,7 @@ mod tests {
     #[test]
     fn test_resolve_no_deps() {
         let index = make_index(vec![simple_manifest("model-a", vec![])]);
-        let installed = HashSet::new();
+        let installed = HashMap::new();
         let plan = resolve("model-a", None, &index, &installed).unwrap();
         assert_eq!(plan.items.len(), 1);
         assert_eq!(plan.items[0].manifest.id, "model-a");
@@ -186,7 +195,7 @@ mod tests {
             simple_manifest("vae-1", vec![]),
             simple_manifest("model-a", vec![("vae-1", AssetType::Vae)]),
         ]);
-        let installed = HashSet::new();
+        let installed = HashMap::new();
         let plan = resolve("model-a", None, &index, &installed).unwrap();
         assert_eq!(plan.items.len(), 2);
         assert_eq!(plan.items[0].manifest.id, "vae-1"); // Dep first
@@ -199,11 +208,22 @@ mod tests {
             simple_manifest("vae-1", vec![]),
             simple_manifest("model-a", vec![("vae-1", AssetType::Vae)]),
         ]);
-        let installed: HashSet<String> = ["vae-1".to_string()].into();
+        let installed: HashMap<String, Option<String>> = [("vae-1".to_string(), None)].into();
         let plan = resolve("model-a", None, &index, &installed).unwrap();
         assert_eq!(plan.items.len(), 2);
         assert!(plan.items[0].already_installed); // vae-1 marked as installed
         assert!(!plan.items[1].already_installed);
+    }
+
+    #[test]
+    fn test_resolve_different_variant_not_installed() {
+        let index = make_index(vec![simple_manifest("model-a", vec![])]);
+        // model-a installed with variant "fp8"
+        let installed: HashMap<String, Option<String>> =
+            [("model-a".to_string(), Some("fp8".to_string()))].into();
+        // Request variant "bf16" — should NOT be marked as installed
+        let plan = resolve("model-a", Some("bf16"), &index, &installed).unwrap();
+        assert!(!plan.items[0].already_installed);
     }
 
     #[test]
@@ -237,7 +257,7 @@ mod tests {
         };
 
         let index = make_index(vec![encoder, checkpoint]);
-        let installed = HashSet::new();
+        let installed = HashMap::new();
         let plan = resolve("flux-dev", None, &index, &installed).unwrap();
 
         assert_eq!(plan.items.len(), 2);
@@ -277,7 +297,7 @@ mod tests {
 
         let index = make_index(vec![encoder, checkpoint]);
         // The alternative model is installed — dep should be skipped
-        let installed: HashSet<String> = ["t5-xxl-fp8".to_string()].into();
+        let installed: HashMap<String, Option<String>> = [("t5-xxl-fp8".to_string(), None)].into();
         let plan = resolve("flux-dev", None, &index, &installed).unwrap();
 
         // Only flux-dev should be in the plan (t5-xxl skipped)
@@ -288,7 +308,7 @@ mod tests {
     #[test]
     fn test_resolve_not_found() {
         let index = make_index(vec![]);
-        let installed = HashSet::new();
+        let installed = HashMap::new();
         let result = resolve("nonexistent", None, &index, &installed);
         assert!(result.is_err());
     }
