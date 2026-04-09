@@ -185,6 +185,7 @@ def apply_lora_from_spec(pipeline, spec: dict, emitter) -> bool:
     return load_lora_with_conversion(pipeline, lora_path, lora_weight, emitter)
 
 
+
 def _warn_lora_failed(emitter, message: str) -> None:
     """Emit a warning about LoRA loading failure."""
     if emitter:

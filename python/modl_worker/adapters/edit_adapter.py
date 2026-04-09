@@ -77,23 +77,28 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
     from .arch_config import detect_arch
     arch = detect_arch(base_model_id)
 
-    # Apply scheduler overrides (Lightning mode)
+    # Apply scheduler overrides.
+    #
+    # Lightning mode and Qwen-2511 shift are mutually exclusive:
+    # Lightning LoRAs are distilled with shift=3.0 and a simple linear
+    # schedule — those settings must not be overwritten.  The Qwen-2511
+    # shift=3.1 block only applies to vanilla (non-Lightning) inference.
     sched_overrides = params.get("scheduler_overrides")
     lightning_sigmas = None
     if sched_overrides and hasattr(pipeline, "scheduler"):
+        # Lightning mode — shift=3.0, static schedule, custom sigmas.
         from .gen_adapter import _apply_scheduler_overrides, _compute_lightning_sigmas
         _apply_scheduler_overrides(pipeline, sched_overrides, emitter)
         lightning_sigmas = _compute_lightning_sigmas(steps)
-
-    # Qwen-Image-Edit-2511: override scheduler to use fixed shift=3.1
-    # (matching ComfyUI's ModelSamplingAuraFlow node).
-    #
-    # The diffusers QwenImageEditPlusPipeline computes mu = calculate_shift(
-    #   seq_len, base_shift, max_shift) which feeds into the scheduler's
-    # exponential time_shift: shift = exp(mu). By setting base_shift = max_shift
-    # = log(3.1), we get a constant mu → constant shift=3.1 regardless of
-    # image sequence length.
-    if arch == "qwen_image_edit_2511" and hasattr(pipeline, "scheduler"):
+    elif arch == "qwen_image_edit_2511" and hasattr(pipeline, "scheduler"):
+        # Qwen-Image-Edit-2511 (non-Lightning): fixed shift=3.1 matching
+        # ComfyUI's ModelSamplingAuraFlow node.
+        #
+        # The diffusers QwenImageEditPlusPipeline computes:
+        #   mu = calculate_shift(seq_len, base_shift, max_shift)
+        # then the scheduler applies exp(mu) as the time shift.
+        # Setting base_shift = max_shift = log(3.1) gives a constant
+        # shift=3.1 regardless of image sequence length.
         import math
         shift_val = 3.1
         log_shift = math.log(shift_val)
@@ -106,6 +111,39 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
         sched_class = type(sched)
         pipeline.scheduler = sched_class.from_config(config)
         emitter.info(f"Qwen 2511: scheduler shift={shift_val} (base_shift=max_shift=log({shift_val})={log_shift:.4f})")
+
+    # Debug: dump sigma schedule for comparison with ComfyUI.
+    if os.environ.get("MODL_DEBUG_SIGMAS") and hasattr(pipeline, "scheduler"):
+        import numpy as np
+        sched = pipeline.scheduler
+        # Simulate what the pipeline will do: set_timesteps with the same
+        # sigmas/mu it would compute at inference time.
+        debug_steps = steps
+        debug_sigmas = np.linspace(1.0, 1 / debug_steps, debug_steps)
+        if lightning_sigmas is not None:
+            debug_sigmas = np.array(lightning_sigmas, dtype=np.float32)
+        # Compute mu the same way the pipeline does (calculate_shift)
+        import math as _math
+        base_shift = sched.config.get("base_shift", 0.5)
+        max_shift = sched.config.get("max_shift", 1.15)
+        # Use 1024x1024 as reference (seq_len = (1024/16)^2 = 4096 for typical VAE)
+        ref_seq_len = 4096
+        m = (max_shift - base_shift) / (sched.config.get("max_image_seq_len", 4096) - sched.config.get("base_image_seq_len", 256))
+        b = base_shift - m * sched.config.get("base_image_seq_len", 256)
+        mu = ref_seq_len * m + b
+        emitter.info(f"[DEBUG SIGMAS] steps={debug_steps}, mu={mu:.4f}, "
+                     f"use_dynamic_shifting={sched.config.get('use_dynamic_shifting')}, "
+                     f"shift={sched.config.get('shift', 'N/A')}, "
+                     f"base_shift={base_shift:.4f}, max_shift={max_shift:.4f}")
+        emitter.info(f"[DEBUG SIGMAS] raw input sigmas: {debug_sigmas.tolist()}")
+        # Apply the shift manually to show final sigmas
+        if sched.config.get("use_dynamic_shifting"):
+            shifted = _math.exp(mu) / (_math.exp(mu) + (1.0 / debug_sigmas - 1.0))
+            emitter.info(f"[DEBUG SIGMAS] shifted sigmas (exp shift={_math.exp(mu):.4f}): {shifted.tolist()}")
+        else:
+            s = sched.config.get("shift", 1.0)
+            shifted = s * debug_sigmas / (1 + (s - 1) * debug_sigmas)
+            emitter.info(f"[DEBUG SIGMAS] shifted sigmas (static shift={s}): {shifted.tolist()}")
 
     image_paths = params.get("image_paths", [])
 
