@@ -129,7 +129,7 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
     // -------------------------------------------------------------------
     // Resolve base model
     // -------------------------------------------------------------------
-    let base_model = base.unwrap_or("qwen-image-edit").to_string();
+    let base_model = base.unwrap_or("qwen-image-edit-2511").to_string();
 
     // -------------------------------------------------------------------
     // Pre-flight checks
