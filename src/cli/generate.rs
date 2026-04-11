@@ -566,8 +566,9 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
     let spec = GenerateJobSpec {
         prompt: prompt.to_string(),
         model: ModelRef {
-            base_model_id: spec_model_id,
+            base_model_id: spec_model_id.clone(),
             base_model_path: effective_path,
+            arch_key: model_family::find_model(&spec_model_id).map(|m| m.arch_key.to_string()),
         },
         lora: lora_ref.clone(),
         output: GenerateOutputRef {

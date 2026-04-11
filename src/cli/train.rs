@@ -12,6 +12,7 @@ use crate::core::executor::{Executor, LocalExecutor};
 use crate::core::gpu;
 use crate::core::gpu_session;
 use crate::core::job::*;
+use crate::core::model_family;
 use crate::core::preflight;
 use crate::core::presets::{self, DatasetStats, GpuContext};
 use crate::core::remote_executor::RemoteExecutor;
@@ -341,6 +342,7 @@ pub async fn run(
                 let db = Database::open()?;
                 db.find_installed(&base_model)?.map(|m| m.store_path)
             },
+            arch_key: model_family::find_model(&base_model).map(|m| m.arch_key.to_string()),
         },
         output: OutputRef {
             lora_name: lora_name.clone(),

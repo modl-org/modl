@@ -473,6 +473,10 @@ pub struct ModelRef {
     pub base_model_id: String,
     #[serde(default)]
     pub base_model_path: Option<String>,
+    /// Architecture key for Python worker dispatch (e.g. "flux_schnell", "qwen_image_edit_2511").
+    /// When present, Python uses this directly instead of inferring from base_model_id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arch_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -743,6 +747,7 @@ mod tests {
             model: ModelRef {
                 base_model_id: "flux-schnell".into(),
                 base_model_path: None,
+                arch_key: Some("flux_schnell".into()),
             },
             output: OutputRef {
                 lora_name: "headshots-v1".into(),

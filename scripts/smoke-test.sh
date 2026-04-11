@@ -50,6 +50,17 @@ TEST_IMAGE="/tmp/modl-smoke-test-input.png"
 # Filter to specific model if arg provided
 FILTER="${1:-}"
 
+# Cache installed model list (avoids repeated modl ls calls)
+INSTALLED_MODELS=$($MODL ls 2>/dev/null)
+
+is_installed() {
+  echo "$INSTALLED_MODELS" | grep -q "$1"
+}
+
+is_gguf_variant() {
+  echo "$INSTALLED_MODELS" | grep "$1" | grep -qi "gguf"
+}
+
 create_test_image() {
   if [ ! -f "$TEST_IMAGE" ]; then
     python3 -c "
@@ -75,7 +86,7 @@ run_gen_test() {
 
   [[ -n "$FILTER" && "$model" != "$FILTER" ]] && return
 
-  if ! $MODL info "$model" 2>/dev/null | grep -q "Installed"; then
+  if ! is_installed "$model"; then
     echo "  SKIP  $label (not installed)"
     SKIPPED=$((SKIPPED + 1))
     return
@@ -105,7 +116,7 @@ run_edit_test() {
 
   [[ -n "$FILTER" && "$model" != "$FILTER" ]] && return
 
-  if ! $MODL info "$model" 2>/dev/null | grep -q "Installed"; then
+  if ! is_installed "$model"; then
     echo "  SKIP  $label (not installed)"
     SKIPPED=$((SKIPPED + 1))
     return
@@ -141,7 +152,7 @@ run_fast_edit_test() {
 
   [[ -n "$FILTER" && "$model" != "$FILTER" ]] && return
 
-  if ! $MODL info "$model" 2>/dev/null | grep -q "Installed"; then
+  if ! is_installed "$model"; then
     echo "  SKIP  $label (not installed)"
     SKIPPED=$((SKIPPED + 1))
     return
@@ -154,7 +165,7 @@ run_fast_edit_test() {
   fi
 
   # --fast requires LoRA which is incompatible with GGUF variants
-  if $MODL info "$model" 2>/dev/null | grep "Variant:" | grep -q "gguf"; then
+  if is_gguf_variant "$model"; then
     echo "  SKIP  $label (GGUF variant, LoRA not supported)"
     SKIPPED=$((SKIPPED + 1))
     return

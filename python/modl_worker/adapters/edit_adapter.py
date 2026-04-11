@@ -75,7 +75,7 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
 
     # Detect architecture early — needed for scheduler and kwarg decisions
     from .arch_config import detect_arch
-    arch = detect_arch(base_model_id)
+    arch = detect_arch(base_model_id, arch_key=model_info.get("arch_key"))
 
     # Apply scheduler overrides.
     #

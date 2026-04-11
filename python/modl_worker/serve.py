@@ -99,9 +99,12 @@ class ModelCache:
     exceeded, the least-recently-used pipeline is evicted.
     """
 
+    MAX_UTILITY_MODELS = 6  # cap to prevent unbounded VRAM growth
+
     def __init__(self, max_models: int = 2) -> None:
         self._cache: dict[CacheKey, CachedPipeline] = {}
         self._utility_cache: dict[str, Any] = {}
+        self._utility_order: list[str] = []  # insertion order for LRU eviction
         self._max_models = max_models
         self._lock = threading.Lock()
 
@@ -235,10 +238,25 @@ class ModelCache:
 
     def get_utility(self, key: str) -> Any | None:
         """Get a cached utility model, or None."""
-        return self._utility_cache.get(key)
+        val = self._utility_cache.get(key)
+        if val is not None:
+            # Move to end (most recently used)
+            if key in self._utility_order:
+                self._utility_order.remove(key)
+                self._utility_order.append(key)
+        return val
 
     def set_utility(self, key: str, model: Any) -> None:
-        """Cache a utility model."""
+        """Cache a utility model, evicting LRU entries if over capacity."""
+        import gc
+        import torch
+
+        if key not in self._utility_cache:
+            # Evict oldest entries if at capacity
+            while len(self._utility_cache) >= self.MAX_UTILITY_MODELS and self._utility_order:
+                lru_key = self._utility_order.pop(0)
+                self._utility_cache.pop(lru_key, None)
+            self._utility_order.append(key)
         self._utility_cache[key] = model
 
     def status(self) -> dict:
@@ -277,6 +295,7 @@ class ModelCache:
                 if emitter:
                     emitter.info(f"Evicting {len(self._utility_cache)} utility model(s)")
                 self._utility_cache.clear()
+                self._utility_order.clear()
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -449,7 +468,7 @@ class WorkerDaemon:
                 emitter = SocketEventEmitter(conn, job_id="control")
                 self.cache.evict_all(emitter)  # TODO: evict specific model
             self._send_ok(conn, "evicted")
-        elif action in ("score", "detect", "compare", "segment", "face-restore", "upscale", "remove-bg", "preprocess"):
+        elif self._is_analysis_action(action):
             self._handle_analysis(conn, request, action)
         elif action == "ping":
             self._send_ok(conn, "pong")
@@ -509,6 +528,13 @@ class WorkerDaemon:
                 recoverable=False,
             )
 
+    @staticmethod
+    def _is_analysis_action(action: str) -> bool:
+        """Check if an action is a daemon-capable analysis adapter."""
+        from modl_worker.adapters.registry import get_adapters
+        entry = get_adapters().get(action)
+        return entry is not None and entry.daemon and entry.daemon_handler == "analysis"
+
     def _handle_analysis(self, conn: socket.socket, request: dict, action: str) -> None:
         """Run an analysis command with cached utility models."""
         job_id = request.get("job_id", f"{action}-worker")
@@ -526,24 +552,14 @@ class WorkerDaemon:
                 yaml.dump(spec, f)
                 config_path = Path(f.name)
 
-            # Dispatch to the right adapter
-            from modl_worker.adapters import (
-                run_score, run_detect, run_compare, run_segment, run_face_restore, run_upscale, run_remove_bg,
-                run_preprocess,
-            )
+            # Dispatch to the right adapter via the central registry
+            from modl_worker.adapters.registry import get_adapters
+            adapters = get_adapters()
+            entry = adapters.get(action)
+            if entry is None or not entry.daemon or entry.daemon_handler != "analysis":
+                raise ValueError(f"No daemon-capable analysis adapter for: {action}")
 
-            adapter_map = {
-                "score": run_score,
-                "detect": run_detect,
-                "compare": run_compare,
-                "segment": run_segment,
-                "face-restore": run_face_restore,
-                "upscale": run_upscale,
-                "remove-bg": run_remove_bg,
-                "preprocess": run_preprocess,
-            }
-
-            adapter_fn = adapter_map[action]
+            adapter_fn = entry.run_fn
             exit_code = adapter_fn(config_path, emitter, model_cache=self.cache._utility_cache)
 
             self._jobs_served += 1

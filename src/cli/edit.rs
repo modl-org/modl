@@ -255,6 +255,7 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
         model: ModelRef {
             base_model_id: base_model.clone(),
             base_model_path,
+            arch_key: model_family::find_model(&base_model).map(|m| m.arch_key.to_string()),
         },
         lora: resolved_lora,
         output: GenerateOutputRef {

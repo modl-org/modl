@@ -102,7 +102,7 @@ def run_generate(config_path: Path, emitter: EventEmitter) -> int:
     # Warn about known-broken model/device combos
     from modl_worker.device import is_mps
     from modl_worker.adapters.arch_config import detect_arch
-    arch = detect_arch(base_model_id)
+    arch = detect_arch(base_model_id, arch_key=model_info.get("arch_key"))
     _MPS_UNSUPPORTED_ARCHS = {
         "flux2", "flux2_klein", "flux2_klein_base", "flux2_klein_9b", "flux2_klein_base_9b",
     }
@@ -218,7 +218,7 @@ def run_generate_with_pipeline(
 
     # Detect architecture early (needed for ControlNet/style-ref loading)
     from .arch_config import detect_arch
-    arch = detect_arch(base_model_id)
+    arch = detect_arch(base_model_id, arch_key=model_info.get("arch_key"))
 
     # Apply scheduler overrides (Lightning mode: distilled with different shift values)
     sched_overrides = params.get("scheduler_overrides")
