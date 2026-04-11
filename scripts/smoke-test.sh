@@ -24,18 +24,24 @@ GEN_MODELS=(
   flux-dev
   sdxl-base-1.0
   z-image-turbo
+  z-image
   qwen-image
+  chroma
   flux2-klein-4b
   flux2-klein-9b
 )
 
 # Edit models
 EDIT_MODELS=(
+  qwen-image-edit-2511
   qwen-image-edit
+  flux2-klein-4b
+  flux2-klein-9b
 )
 
 # Models that support --fast (Lightning LoRA)
 FAST_EDIT_MODELS=(
+  qwen-image-edit-2511
   qwen-image-edit
 )
 
