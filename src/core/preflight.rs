@@ -49,7 +49,7 @@ pub fn check_base_model(base_model_id: &str) -> Result<()> {
         let found = installed.iter().any(|m| {
             gen_types.contains(&m.asset_type.as_str())
                 && (m.id == family_info.id
-                    || m.id.contains(family_info.id)
+                    || m.id.contains(family_info.id.as_str())
                     || family_info.id.contains(&*m.id))
         });
         if found {

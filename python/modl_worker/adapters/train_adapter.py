@@ -356,7 +356,7 @@ def run_train(config_path: Path, emitter: EventEmitter) -> int:
     output_dir = spec.get("output", {}).get("destination_dir")
 
     from .arch_config import detect_arch
-    arch_key = detect_arch(base_model_id)
+    arch_key = detect_arch(base_model_id, arch_key=spec.get("model", {}).get("arch_key"))
 
     # Klein models need the Qwen tokenizer cached for ai-toolkit.
     # modl pull only installs the safetensors weights; the tokenizer

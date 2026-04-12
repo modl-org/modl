@@ -21,11 +21,11 @@ pub fn resolve_base_model_path(base_model: &str, db: &Database) -> Option<String
 
     // Fuzzy match via model_family (e.g. "sdxl" → "sdxl-base-1.0")
     if let Some(family_info) = model_family::resolve_model(base_model) {
-        let family_id = family_info.id;
+        let family_id = &family_info.id;
         for model in &installed {
             if gen_types.contains(&model.asset_type.as_str())
-                && (model.id == family_id
-                    || model.id.contains(family_id)
+                && (model.id == *family_id
+                    || model.id.contains(family_id.as_str())
                     || family_id.contains(&*model.id))
             {
                 return Some(model.store_path.clone());

@@ -711,12 +711,17 @@ MODEL_REGISTRY: dict[str, tuple[str, str]] = {
 # Helpers
 # -----------------------------------------------------------------------
 
-def detect_arch(base_model_id: str) -> str:
+def detect_arch(base_model_id: str, arch_key: str | None = None) -> str:
     """Detect architecture key from a base model ID.
 
-    First checks MODEL_REGISTRY for an exact match, then falls back to
-    substring heuristics.  Returns a key into ARCH_CONFIGS.
+    If *arch_key* is provided (e.g. from a job spec), it is used directly
+    when it matches a known ARCH_CONFIGS entry — no inference needed.
+    Otherwise checks MODEL_REGISTRY for an exact match, then falls back
+    to substring heuristics.  Returns a key into ARCH_CONFIGS.
     """
+    if arch_key and arch_key in ARCH_CONFIGS:
+        return arch_key
+
     entry = MODEL_REGISTRY.get(base_model_id)
     if entry:
         return entry[0]

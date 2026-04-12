@@ -3,6 +3,7 @@ use console::style;
 use indicatif::HumanBytes;
 
 use crate::core::db::Database;
+use crate::core::model_family;
 use crate::core::registry::RegistryIndex;
 
 pub async fn run(id: &str) -> Result<()> {
@@ -66,6 +67,83 @@ fn show_registry_model(
     }
     if !manifest.tags.is_empty() {
         println!("  Tags:         {}", manifest.tags.join(", "));
+    }
+
+    // Model specs (from ModelFamily — parameter counts, VRAM, capabilities)
+    if let Some(model) = model_family::find_model(id) {
+        println!();
+        println!("  {}", style("Specs:").bold());
+
+        // Parameters
+        if model.text_encoder_b > 0.0 {
+            println!(
+                "    Parameters:    {:.0}B transformer + {:.0}B text encoder ({:.0}B total)",
+                model.transformer_b, model.text_encoder_b, model.total_b
+            );
+        } else {
+            println!("    Parameters:    {:.0}B", model.total_b);
+        }
+
+        // VRAM
+        if model.vram_fp8_gb > 0 {
+            println!(
+                "    VRAM:          {}GB bf16 / {}GB fp8",
+                model.vram_bf16_gb, model.vram_fp8_gb
+            );
+        } else {
+            println!("    VRAM:          {}GB bf16", model.vram_bf16_gb);
+        }
+
+        // Capabilities
+        let mut caps = Vec::new();
+        if model.capabilities.txt2img {
+            caps.push("generate");
+        }
+        if model.capabilities.edit {
+            caps.push("edit");
+        }
+        if model.capabilities.img2img {
+            caps.push("img2img");
+        }
+        if model.capabilities.inpaint {
+            caps.push("inpaint");
+        }
+        if model.capabilities.lora {
+            caps.push("lora");
+        }
+        if model.capabilities.training {
+            caps.push("training");
+        }
+        if !caps.is_empty() {
+            println!("    Capabilities:  {}", caps.join(", "));
+        }
+
+        // Quality & Speed stars
+        let stars =
+            |n: u8| -> String { "★".repeat(n as usize) + &"☆".repeat((5 - n) as usize) };
+        println!(
+            "    Quality:       {}  Speed: {}",
+            stars(model.quality),
+            stars(model.speed)
+        );
+
+        if model.text_rendering {
+            println!("    Text:          yes (can render text in images)");
+        }
+
+        // Defaults
+        println!(
+            "    Defaults:      {} steps, {:.1} CFG, {}px",
+            model.default_steps, model.default_guidance, model.default_resolution
+        );
+
+        // Lightning LoRA
+        if let Some(lightning) = model_family::lightning_config(id) {
+            println!(
+                "    Fast mode:     --fast (4-step) or --fast 8 (8-step) via {}",
+                style(&lightning.lora_registry_id).cyan()
+            );
+        }
     }
 
     // Variants
@@ -171,6 +249,55 @@ fn show_registry_model(
             }
             println!("    Size:     {}", HumanBytes(m.size));
             println!("    Path:     {}", m.store_path);
+        }
+    }
+
+    // Usage examples based on capabilities
+    if let Some(model) = model_family::find_model(id) {
+        println!();
+        println!("  {}", style("Usage:").bold());
+        if model.capabilities.txt2img {
+            println!(
+                "    {}",
+                style(format!(
+                    "modl generate \"a photo of a sunset\" --base {}",
+                    id
+                ))
+                .dim()
+            );
+        }
+        if model.capabilities.edit {
+            println!(
+                "    {}",
+                style(format!(
+                    "modl edit \"change background to white\" --image photo.jpg --base {}",
+                    id
+                ))
+                .dim()
+            );
+        }
+        if model_family::lightning_config(id).is_some() {
+            if model.capabilities.edit {
+                println!(
+                    "    {}",
+                    style(format!(
+                        "modl edit \"...\" --image photo.jpg --base {} --fast",
+                        id
+                    ))
+                    .dim()
+                );
+            } else if model.capabilities.txt2img {
+                println!(
+                    "    {}",
+                    style(format!("modl generate \"...\" --base {} --fast", id)).dim()
+                );
+            }
+        }
+        if model.capabilities.training {
+            println!(
+                "    {}",
+                style(format!("modl train --base {} --dataset ./my-images", id)).dim()
+            );
         }
     }
 

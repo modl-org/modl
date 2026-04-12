@@ -363,14 +363,14 @@ fn try_resolve_alias(id: &str, index: &RegistryIndex) -> String {
     if let Some(info) = crate::core::model_family::resolve_model(id) {
         // The family ID (e.g. "sdxl") may differ from registry ID (e.g. "sdxl-base-1.0")
         // Try exact match first
-        if index.find(info.id).is_some() {
+        if index.find(&info.id).is_some() {
             return info.id.to_string();
         }
         // Then try substring match with the family ID
         let family_matches: Vec<_> = index
             .items
             .iter()
-            .filter(|m| m.id.to_lowercase().contains(info.id))
+            .filter(|m| m.id.to_lowercase().contains(info.id.as_str()))
             .collect();
         if family_matches.len() == 1 {
             return family_matches[0].id.clone();

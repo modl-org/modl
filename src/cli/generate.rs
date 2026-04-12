@@ -251,9 +251,9 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
         }
 
         let lightning = model_family::lightning_config(&base_model).with_context(|| {
-            let supported: Vec<&str> = model_family::LIGHTNING_CONFIGS
+            let supported: Vec<&str> = model_family::lightning_configs()
                 .iter()
-                .map(|c| c.base_model_id)
+                .map(|c| c.base_model_id.as_str())
                 .collect();
             format!(
                 "--fast is not yet supported for '{}'. Supported: {}",
@@ -263,7 +263,7 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
         })?;
 
         let (variant, resolved_steps) = lightning.resolve(fast_steps);
-        let lora_ref = resolve_lora(lightning.lora_registry_id, 1.0, &db).with_context(|| {
+        let lora_ref = resolve_lora(&lightning.lora_registry_id, 1.0, &db).with_context(|| {
             format!(
                 "Lightning LoRA '{}' is not installed.\n\n  \
                  Install it:\n\n    modl pull {} --variant {}\n",
@@ -345,7 +345,7 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
         match inpaint {
             InpaintMethod::Lanpaint => {
                 if !supports_lanpaint {
-                    let name = model_info.map_or(&base_model as &str, |m| m.name);
+                    let name = model_info.map_or(&base_model as &str, |m| &m.name);
                     anyhow::bail!(
                         "{} does not support LanPaint inpainting. \
                          Models with LanPaint: z-image, z-image-turbo, flux2-klein-4b, flux2-klein-9b",
@@ -365,7 +365,7 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
             }
             InpaintMethod::Standard => {
                 if !supports_standard {
-                    let name = model_info.map_or(&base_model as &str, |m| m.name);
+                    let name = model_info.map_or(&base_model as &str, |m| &m.name);
                     anyhow::bail!(
                         "{} does not support standard inpainting. \
                          Try --inpaint lanpaint instead.",
@@ -566,8 +566,9 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
     let spec = GenerateJobSpec {
         prompt: prompt.to_string(),
         model: ModelRef {
-            base_model_id: spec_model_id,
+            base_model_id: spec_model_id.clone(),
             base_model_path: effective_path,
+            arch_key: model_family::find_model(&spec_model_id).map(|m| m.arch_key.to_string()),
         },
         lora: lora_ref.clone(),
         output: GenerateOutputRef {

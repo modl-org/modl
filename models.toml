@@ -1,0 +1,363 @@
+# models.toml — Single source of truth for model metadata.
+#
+# Embedded in the Rust binary at compile time (include_str!).
+# Python validates against this at startup.
+#
+# To add a new model: add an entry here, then add pipeline config
+# in python/modl_worker/adapters/arch_config.py under the same arch_key.
+# Run `python scripts/validate-arch-sync.py` to verify sync.
+
+# ─── Flux 1 ──────────────────────────────────────────────────────────
+
+[families.flux1]
+name = "Flux 1"
+vendor = "Black Forest Labs"
+year = 2024
+
+[families.flux1.models.flux-dev]
+name = "Flux Dev"
+arch_key = "flux"
+description = "High quality, strong prompt following, 28 steps"
+transformer_b = 12.0
+text_encoder = "CLIP-L + T5-XXL"
+text_encoder_b = 5.0
+total_b = 17.0
+vram_bf16 = 34
+vram_fp8 = 20
+capabilities = ["txt2img", "img2img", "inpaint", "lora", "training"]
+quality = 4
+speed = 2
+text_rendering = false
+defaults = { steps = 28, guidance = 3.5, resolution = 1024 }
+
+[families.flux1.models.flux-dev.controlnet]
+manifest_id = "flux-dev-controlnet-union"
+types = ["canny", "depth", "pose", "softedge", "gray"]
+default_strength = 0.7
+default_end = 0.8
+min_steps = 28
+
+[families.flux1.models.flux-dev.style_ref]
+mechanism = "ip-adapter"
+manifest_id = "flux-dev-ip-adapter"
+default_strength = 0.5
+
+[families.flux1.models.flux-schnell]
+name = "Flux Schnell"
+arch_key = "flux_schnell"
+description = "Distilled, 4 steps, fast iteration"
+transformer_b = 12.0
+text_encoder = "CLIP-L + T5-XXL"
+text_encoder_b = 5.0
+total_b = 17.0
+vram_bf16 = 34
+vram_fp8 = 20
+capabilities = ["txt2img", "img2img", "inpaint", "lora", "training"]
+quality = 3
+speed = 5
+text_rendering = false
+defaults = { steps = 4, guidance = 1.0, resolution = 1024 }
+
+[families.flux1.models.flux-schnell.controlnet]
+manifest_id = "flux-dev-controlnet-union"
+types = ["canny", "depth", "pose", "softedge", "gray"]
+default_strength = 0.7
+default_end = 0.8
+min_steps = 4
+
+[families.flux1.models.chroma]
+name = "Chroma"
+arch_key = "chroma"
+description = "Apache 2.0 Flux fork, 8.9B, negative prompts, uncensored"
+transformer_b = 8.9
+text_encoder = "T5-XXL (no CLIP)"
+text_encoder_b = 4.8
+total_b = 13.7
+vram_bf16 = 28
+vram_fp8 = 16
+capabilities = ["txt2img", "img2img", "inpaint", "lora", "training"]
+quality = 4
+speed = 2
+text_rendering = false
+defaults = { steps = 40, guidance = 5.0, resolution = 1024 }
+
+# ─── Flux Fill ───────────────────────────────────────────────────────
+
+[families.flux_fill]
+name = "Flux Fill"
+vendor = "Black Forest Labs"
+year = 2024
+
+[families.flux_fill.models.flux-fill-dev]
+name = "Flux Fill Dev"
+arch_key = "flux_fill"
+description = "Dedicated inpainting model, 384-ch input, no boundary artifacts"
+transformer_b = 12.0
+text_encoder = "CLIP-L + T5-XXL"
+text_encoder_b = 5.0
+total_b = 17.0
+vram_bf16 = 34
+vram_fp8 = 20
+capabilities = ["inpaint", "lora"]
+quality = 5
+speed = 2
+text_rendering = false
+defaults = { steps = 50, guidance = 30.0, resolution = 1024 }
+
+[families.flux_fill.models.flux-fill-dev-onereward]
+name = "Flux Fill Dev OneReward"
+arch_key = "flux_fill_onereward"
+description = "RLHF-tuned Fill, outperforms Flux Fill Pro, best inpainting"
+transformer_b = 12.0
+text_encoder = "CLIP-L + T5-XXL"
+text_encoder_b = 5.0
+total_b = 17.0
+vram_bf16 = 34
+vram_fp8 = 20
+capabilities = ["inpaint", "lora"]
+quality = 5
+speed = 2
+text_rendering = false
+defaults = { steps = 50, guidance = 30.0, resolution = 1024 }
+
+# ─── Flux 2 ──────────────────────────────────────────────────────────
+
+[families.flux2]
+name = "Flux 2"
+vendor = "Black Forest Labs"
+year = 2025
+
+[families.flux2.models.flux2-dev]
+name = "Flux 2 Dev"
+arch_key = "flux2"
+description = "Best quality, 46B total params, needs 80GB+ GPU"
+transformer_b = 19.0
+text_encoder = "Mistral 3 Small"
+text_encoder_b = 27.0
+total_b = 46.0
+vram_bf16 = 60
+vram_fp8 = 35
+capabilities = ["txt2img", "lora", "training"]
+quality = 5
+speed = 1
+text_rendering = false
+defaults = { steps = 28, guidance = 4.0, resolution = 1024 }
+
+[families.flux2.models.flux2-klein-4b]
+name = "Flux 2 Klein 4B"
+arch_key = "flux2_klein"
+description = "4B distilled, fits on consumer GPUs, 4 steps"
+transformer_b = 4.0
+text_encoder = "Qwen3 4B"
+text_encoder_b = 4.7
+total_b = 9.0
+vram_bf16 = 14
+vram_fp8 = 10
+capabilities = ["txt2img", "edit", "lora", "training", "lanpaint_inpaint"]
+quality = 3
+speed = 5
+text_rendering = false
+defaults = { steps = 4, guidance = 1.0, resolution = 1024 }
+
+[families.flux2.models.flux2-klein-9b]
+name = "Flux 2 Klein 9B"
+arch_key = "flux2_klein_9b"
+description = "9B distilled, good quality/size balance, 4 steps"
+transformer_b = 9.0
+text_encoder = "Qwen3 8B"
+text_encoder_b = 9.0
+total_b = 18.0
+vram_bf16 = 24
+vram_fp8 = 16
+capabilities = ["txt2img", "edit", "lora", "training", "lanpaint_inpaint"]
+quality = 4
+speed = 4
+text_rendering = false
+defaults = { steps = 4, guidance = 1.0, resolution = 1024 }
+
+# ─── Z-Image ─────────────────────────────────────────────────────────
+
+[families.zimage]
+name = "Z-Image"
+vendor = "Tongyi-MAI"
+year = 2025
+
+[families.zimage.models.z-image]
+name = "Z-Image"
+arch_key = "zimage"
+description = "Strong aesthetics, 6B transformer, 20 steps"
+transformer_b = 6.0
+text_encoder = "Qwen3 4B"
+text_encoder_b = 4.7
+total_b = 11.0
+vram_bf16 = 20
+vram_fp8 = 14
+capabilities = ["txt2img", "img2img", "inpaint", "lora", "training", "lanpaint_inpaint"]
+quality = 4
+speed = 2
+text_rendering = false
+defaults = { steps = 20, guidance = 4.0, resolution = 1024 }
+
+[families.zimage.models.z-image.controlnet]
+manifest_id = "z-image-turbo-controlnet-union"
+types = ["canny", "hed", "depth", "pose", "mlsd", "scribble", "gray"]
+default_strength = 0.6
+default_end = 0.8
+min_steps = 20
+
+[families.zimage.models.z-image-turbo]
+name = "Z-Image Turbo"
+arch_key = "zimage_turbo"
+description = "Distilled Z-Image, 8 steps, good speed/quality"
+transformer_b = 6.0
+text_encoder = "Qwen3 4B"
+text_encoder_b = 4.7
+total_b = 11.0
+vram_bf16 = 20
+vram_fp8 = 14
+capabilities = ["txt2img", "img2img", "inpaint", "lora", "training", "lanpaint_inpaint"]
+quality = 3
+speed = 4
+text_rendering = false
+defaults = { steps = 8, guidance = 0.0, resolution = 1024 }
+
+[families.zimage.models.z-image-turbo.controlnet]
+manifest_id = "z-image-turbo-controlnet-union"
+types = ["canny", "hed", "depth", "pose", "mlsd", "scribble", "gray"]
+default_strength = 0.6
+default_end = 0.8
+min_steps = 8
+
+# ─── Qwen Image ──────────────────────────────────────────────────────
+
+[families.qwen_image]
+name = "Qwen Image"
+vendor = "Qwen"
+year = 2025
+
+[families.qwen_image.models.qwen-image]
+name = "Qwen Image"
+arch_key = "qwen_image"
+description = "Best text rendering, Chinese/English, 20B transformer"
+transformer_b = 20.0
+text_encoder = "Qwen2.5-VL 7B"
+text_encoder_b = 7.0
+total_b = 27.0
+vram_bf16 = 50
+vram_fp8 = 30
+capabilities = ["txt2img", "lora", "training"]
+quality = 5
+speed = 2
+text_rendering = true
+defaults = { steps = 25, guidance = 3.0, resolution = 1024 }
+
+[families.qwen_image.models.qwen-image.lightning]
+lora_registry_id = "qwen-image-2512-lightning"
+variant_4step = "4step-bf16"
+variant_8step = "8step-bf16"
+guidance = 1.0
+scheduler_overrides = { base_shift = "1.0986", max_shift = "1.0986", shift_terminal = "null" }
+
+[families.qwen_image.models.qwen-image.controlnet]
+manifest_id = "qwen-image-controlnet-union"
+types = ["canny", "depth", "pose", "softedge"]
+default_strength = 0.8
+default_end = 1.0
+min_steps = 25
+
+[families.qwen_image.models.qwen-image-edit]
+name = "Qwen Image Edit"
+arch_key = "qwen_image_edit"
+description = "Original instruction-based editing, text editing, style transfer"
+transformer_b = 20.0
+text_encoder = "Qwen2.5-VL 7B"
+text_encoder_b = 7.0
+total_b = 27.0
+vram_bf16 = 50
+vram_fp8 = 30
+capabilities = ["edit", "lora"]
+quality = 5
+speed = 1
+text_rendering = true
+defaults = { steps = 50, guidance = 4.0, resolution = 1024 }
+
+[families.qwen_image.models.qwen-image-edit.lightning]
+lora_registry_id = "qwen-image-edit-lightning"
+variant_4step = "fp8-gen-4step-v1-bf16"
+variant_8step = "edit-8step-v1-bf16"
+guidance = 1.0
+scheduler_overrides = { base_shift = "1.0986", max_shift = "1.0986", shift_terminal = "null" }
+
+[families.qwen_image.models.qwen-image-edit-2511]
+name = "Qwen Image Edit 2511"
+arch_key = "qwen_image_edit_2511"
+description = "2511 Plus — improved consistency, less drift, multi-image"
+transformer_b = 20.0
+text_encoder = "Qwen2.5-VL 7B"
+text_encoder_b = 7.0
+total_b = 27.0
+vram_bf16 = 50
+vram_fp8 = 30
+capabilities = ["edit", "lora"]
+quality = 5
+speed = 1
+text_rendering = true
+defaults = { steps = 40, guidance = 4.0, resolution = 1024 }
+
+[families.qwen_image.models.qwen-image-edit-2511.lightning]
+lora_registry_id = "qwen-image-edit-2511-lightning"
+variant_4step = "4step-bf16"
+variant_8step = "8step-bf16"
+guidance = 1.0
+scheduler_overrides = { base_shift = "1.0986", max_shift = "1.0986", shift_terminal = "null" }
+
+# ─── Legacy Stable Diffusion ─────────────────────────────────────────
+
+[families.legacy_sd]
+name = "Stable Diffusion"
+vendor = "Stability AI"
+year = 2023
+
+[families.legacy_sd.models.sdxl]
+name = "SDXL"
+arch_key = "sdxl"
+description = "Mature ecosystem, huge LoRA library, needs negative prompts"
+transformer_b = 2.6
+text_encoder = "CLIP-L + OpenCLIP-G"
+text_encoder_b = 1.0
+total_b = 3.7
+vram_bf16 = 7
+vram_fp8 = 5
+capabilities = ["txt2img", "img2img", "inpaint", "lora", "training"]
+quality = 3
+speed = 2
+text_rendering = false
+defaults = { steps = 30, guidance = 7.5, resolution = 1024 }
+
+[families.legacy_sd.models.sdxl.controlnet]
+manifest_id = "sdxl-controlnet-union"
+types = ["canny", "depth", "pose", "softedge", "tile", "scribble", "hed", "mlsd", "normal"]
+default_strength = 0.75
+default_end = 1.0
+min_steps = 28
+
+[families.legacy_sd.models.sdxl.style_ref]
+mechanism = "ip-adapter"
+manifest_id = "sdxl-ip-adapter"
+default_strength = 0.6
+
+[families.legacy_sd.models."sd-1.5"]
+name = "SD 1.5"
+arch_key = "sd15"
+description = "Lightweight, runs on any GPU, dated quality"
+transformer_b = 0.9
+text_encoder = "CLIP-L"
+text_encoder_b = 0.2
+total_b = 1.1
+vram_bf16 = 4
+vram_fp8 = 3
+capabilities = ["txt2img", "img2img", "inpaint", "lora", "training"]
+quality = 2
+speed = 4
+text_rendering = false
+defaults = { steps = 30, guidance = 7.5, resolution = 512 }

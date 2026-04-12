@@ -553,5 +553,5 @@ pub async fn api_delete_model(Path(id): Path<String>) -> impl IntoResponse {
 
 /// GET /api/model-families — all model families with capabilities, params, and UI metadata.
 pub async fn api_model_families() -> impl IntoResponse {
-    Json(model_family::FAMILIES)
+    Json(model_family::families())
 }

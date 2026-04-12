@@ -24,6 +24,28 @@ CONFIGS_DIR = Path(__file__).parent.parent / "configs"
 # ---------------------------------------------------------------------------
 
 
+def _ensure_hf_layout(safetensors_path: str, config_dir: Path) -> str:
+    """Create a synthetic HF directory from a single safetensors file + config.
+
+    Many model classes require ``from_pretrained(directory)`` but modl stores
+    weights as single files. This creates a symlinked HF-style layout:
+        <parent>/hf_layout/model.safetensors → <safetensors_path>
+        <parent>/hf_layout/config.json       (copied from config_dir)
+    """
+    import shutil
+
+    hf_dir = Path(safetensors_path).parent / "hf_layout"
+    hf_dir.mkdir(exist_ok=True)
+    link = hf_dir / "model.safetensors"
+    if not link.exists():
+        link.symlink_to(safetensors_path)
+    for cfg_file in config_dir.iterdir():
+        dst = hf_dir / cfg_file.name
+        if not dst.exists():
+            shutil.copy2(str(cfg_file), str(dst))
+    return str(hf_dir)
+
+
 def _resolve_pipeline_class(base_model_id: str) -> str:
     """Determine diffusers pipeline class from base model id."""
     return resolve_pipeline_class(base_model_id)
@@ -541,20 +563,7 @@ def assemble_pipeline(
             use_hf_dir = spec.get("hf_dir", False) or os.path.isdir(resolved_path)
 
             if use_hf_dir and not os.path.isdir(resolved_path):
-                # Single safetensors file but component needs from_pretrained.
-                # Create a synthetic HF directory with config + weights symlink.
-                hf_dir = Path(resolved_path).parent / "hf_layout"
-                hf_dir.mkdir(exist_ok=True)
-                link = hf_dir / "model.safetensors"
-                if not link.exists():
-                    link.symlink_to(resolved_path)
-                # Copy config files into the HF directory
-                import shutil
-                for cfg_file in config_dir.iterdir():
-                    dst = hf_dir / cfg_file.name
-                    if not dst.exists():
-                        shutil.copy2(str(cfg_file), str(dst))
-                resolved_path = str(hf_dir)
+                resolved_path = _ensure_hf_layout(resolved_path, config_dir)
                 use_hf_dir = True
 
             if hasattr(ModelClass, "from_single_file") and not use_hf_dir:
@@ -734,19 +743,8 @@ def _load_gguf_pipeline(
                 components[param_name] = model.to(dtype)
         else:
             # Transformers models (text encoder) — from_pretrained with HF layout
-            # Create synthetic HF directory if needed
             if not use_hf_dir and not os.path.isdir(resolved_path):
-                hf_dir = Path(resolved_path).parent / "hf_layout"
-                hf_dir.mkdir(exist_ok=True)
-                link = hf_dir / "model.safetensors"
-                if not link.exists():
-                    link.symlink_to(resolved_path)
-                import shutil
-                for cfg_file in config_dir.iterdir():
-                    dst = hf_dir / cfg_file.name
-                    if not dst.exists():
-                        shutil.copy2(str(cfg_file), str(dst))
-                resolved_path = str(hf_dir)
+                resolved_path = _ensure_hf_layout(resolved_path, config_dir)
 
             components[param_name] = ModelClass.from_pretrained(
                 resolved_path, torch_dtype=dtype,

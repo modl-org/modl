@@ -28,6 +28,7 @@ comfy-table = "7"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 serde_json = "1"
+toml = "0.8"
 
 # HTTP + async
 reqwest = { version = "0.12", features = ["stream", "rustls-tls-native-roots", "json", "blocking"], default-features = false }

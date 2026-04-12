@@ -175,7 +175,7 @@ const GENERATE_EXAMPLES: &str = "\
 
 const EDIT_EXAMPLES: &str = "\
 \x1b[1mExamples:\x1b[0m
-  # Edit with default model (qwen-image-edit)
+  # Edit with default model (qwen-image-edit-2511)
   modl edit \"make the sky sunset orange\" --image photo.png
 
   # Use a faster/smaller model
@@ -527,9 +527,17 @@ pub enum Commands {
     ///   img2img:    modl generate "prompt" --init-image photo.png --strength 0.6
     ///   inpainting: modl generate "prompt" --init-image photo.png --mask mask.png
     ///
-    /// Models: flux-schnell (default, fast), flux-dev (quality), z-image, sdxl, qwen-image, chroma.
+    /// Models:
+    ///   flux-schnell (default)   4 steps, 12B, fastest
+    ///   flux-dev                28 steps, 12B, best quality
+    ///   z-image-turbo            8 steps, 6B, fast
+    ///   z-image                 30 steps, 6B, quality
+    ///   qwen-image              40 steps, 20B, text rendering
+    ///   chroma                  45 steps, 12B, artistic
+    ///   sdxl                    30 steps, 3.5B, legacy
+    ///
     /// Use --lora to apply a trained LoRA. Use --controlnet for structural guidance.
-    #[command(after_help = GENERATE_EXAMPLES)]
+    #[command(verbatim_doc_comment, after_help = GENERATE_EXAMPLES)]
     Generate {
         /// Text prompt for image generation
         prompt: String,
@@ -621,13 +629,18 @@ pub enum Commands {
     /// Unlike generate --mask (pixel-level inpainting), edit uses instruction-following
     /// models that understand "change X to Y" without needing a mask.
     ///
-    /// Models: qwen-image-edit (default, 20B), klein-4b (fast), klein-9b (quality), flux-2-dev.
+    /// Models:
+    ///   qwen-image-edit-2511 (default)  40 steps, 20B, best quality
+    ///   qwen-image-edit                 40 steps, 20B, original
+    ///   klein-4b                         4 steps, 4B, fastest
+    ///   klein-9b                         4 steps, 9B, balanced
+    ///   flux2-dev                       28 steps, 24B, flux-based
     ///
     /// Examples:
     ///   modl edit "make the sky sunset orange" --image photo.png
     ///   modl edit "replace the chair with a sofa" --image room.png --base klein-4b
     ///   modl edit "add sunglasses" --image portrait.png --count 3
-    #[command(after_help = EDIT_EXAMPLES)]
+    #[command(verbatim_doc_comment, after_help = EDIT_EXAMPLES)]
     Edit {
         /// Natural language edit instruction (e.g. "make the sky sunset orange")
         prompt: String,
@@ -1669,28 +1682,30 @@ fn print_train_info() {
 }
 
 fn dump_cli_schema() {
-    use crate::core::model_family::{self, CONTROLNET_SUPPORT, STYLE_REF_SUPPORT};
+    use crate::core::model_family;
 
     let cmd = Cli::command();
     let mut commands = Vec::new();
     collect_schema_commands(&cmd, "", &mut commands);
 
-    // Build model capability matrix from model_family.rs
-    let models: Vec<serde_json::Value> = model_family::FAMILIES
+    // Build model capability matrix from models.toml
+    let cn_list = model_family::controlnet_support_list();
+    let sr_list = model_family::style_ref_support_list();
+    let models: Vec<serde_json::Value> = model_family::families()
         .iter()
         .flat_map(|f| {
             f.models.iter().map(move |m| {
-                let has_controlnet = CONTROLNET_SUPPORT.iter().any(|c| c.base_model_id == m.id);
-                let controlnet_types: Vec<&str> = CONTROLNET_SUPPORT
+                let has_controlnet = cn_list.iter().any(|c| c.base_model_id == m.id);
+                let controlnet_types: Vec<String> = cn_list
                     .iter()
                     .find(|c| c.base_model_id == m.id)
                     .map(|c| c.supported_types.to_vec())
                     .unwrap_or_default();
-                let has_style_ref = STYLE_REF_SUPPORT.iter().any(|s| s.base_model_id == m.id);
-                let style_ref_mechanism = STYLE_REF_SUPPORT
+                let has_style_ref = sr_list.iter().any(|s| s.base_model_id == m.id);
+                let style_ref_mechanism = sr_list
                     .iter()
                     .find(|s| s.base_model_id == m.id)
-                    .map(|s| s.mechanism);
+                    .map(|s| s.mechanism.as_str());
 
                 serde_json::json!({
                     "id": m.id,
