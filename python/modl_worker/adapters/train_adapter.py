@@ -358,17 +358,12 @@ def run_train(config_path: Path, emitter: EventEmitter) -> int:
     from .arch_config import detect_arch
     arch_key = detect_arch(base_model_id, arch_key=spec.get("model", {}).get("arch_key"))
 
-    # Klein models need the Qwen tokenizer cached for ai-toolkit.
+    # Some architectures need external tokenizers cached for ai-toolkit.
     # modl pull only installs the safetensors weights; the tokenizer
     # (config.json, tokenizer.json, etc.) must come from HuggingFace.
-    _klein_tokenizer_repos = {
-        "flux2_klein": "Qwen/Qwen3-4B",
-        "flux2_klein_base": "Qwen/Qwen3-4B",
-        "flux2_klein_9b": "Qwen/Qwen3-8B",
-        "flux2_klein_base_9b": "Qwen/Qwen3-8B",
-    }
-    if arch_key in _klein_tokenizer_repos:
-        _tok_repo = _klein_tokenizer_repos[arch_key]
+    from .arch_config import ARCH_CONFIGS
+    _tok_repo = ARCH_CONFIGS.get(arch_key, {}).get("training", {}).get("required_tokenizer_repo")
+    if _tok_repo:
         try:
             from transformers import AutoTokenizer
             emitter.info(f"Ensuring {_tok_repo} tokenizer is cached...")

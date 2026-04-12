@@ -163,26 +163,17 @@ def build_train_block(arch_key: str, params: dict, lora_type: str, resume_step: 
         bs = 2 if (is_style and not is_zimage) else 1
 
     lr = params.get("learning_rate", 1e-4)
+    train_cfg = arch.get("training", {})
     is_klein = arch_key.startswith("flux2_klein")
 
-    # Z-Image: LR must not exceed 1e-4 — higher values break the distillation
-    if is_zimage and lr > 1e-4:
-        print(f"[modl] WARNING: Clamping LR from {lr} to 1e-4 for Z-Image (higher LR breaks distillation)", file=sys.stderr)
-        lr = 1e-4
+    # Clamp LR to per-architecture maximum (config-driven via training.max_learning_rate)
+    max_lr = train_cfg.get("max_learning_rate")
+    if max_lr is not None and lr > max_lr:
+        print(f"[modl] WARNING: Clamping LR from {lr} to {max_lr} for {arch_key}", file=sys.stderr)
+        lr = max_lr
 
-    # Klein: community-tested defaults for character LoRAs.
-    # 4B is very sensitive to LR — body horror / face collapse above 5e-5.
-    # 9B is more forgiving, 1e-4 works but 5e-5 is safer.
-    # Both: train on base model, generate with distilled (LoRAs transfer well).
-    # Aim for 50-120 repeats per image (higher dataset => fewer repeats).
+    # Klein: community-tested guidance for character LoRAs
     if is_klein:
-        is_4b = arch_key == "flux2_klein_4b"
-        if is_4b and lr > 5e-5:
-            print(f"[modl] WARNING: Clamping LR from {lr} to 5e-5 for Klein 4B (higher LR causes body horror / face collapse)", file=sys.stderr)
-            lr = 5e-5
-        elif not is_4b and lr > 1e-4:
-            print(f"[modl] WARNING: Clamping LR from {lr} to 1e-4 for Klein 9B", file=sys.stderr)
-            lr = 1e-4
         if lora_type == "character":
             if steps < 2000:
                 print(f"[modl] NOTE: Klein character LoRAs usually need 2000+ steps (current: {steps})", file=sys.stderr)
@@ -217,25 +208,25 @@ def build_train_block(arch_key: str, params: dict, lora_type: str, resume_step: 
     train["noise_scheduler"] = arch["noise_scheduler"]
     train["dtype"] = arch["dtype"]
 
-    # EMA for most architectures
-    if arch_key not in ("sd15",):
+    # EMA for most architectures (disabled via training.use_ema=False)
+    if train_cfg.get("use_ema", True):
         train["ema_config"] = {"use_ema": True, "ema_decay": 0.99}
 
-    # SDXL-specific noise_offset
-    if arch_key == "sdxl":
-        train["noise_offset"] = 0.0357 if is_style else 0.0
+    # Per-architecture noise_offset (config-driven via training.noise_offset)
+    noise_offset_cfg = train_cfg.get("noise_offset")
+    if noise_offset_cfg is not None:
+        train["noise_offset"] = noise_offset_cfg.get("style", 0.0) if is_style else noise_offset_cfg.get("default", 0.0)
 
     # Merge any extra train keys from the arch config
     extra = arch.get("extra_train", {})
     train.update(extra)
 
-    # Z-Image Turbo style-specific settings (per Ostris):
-    # - Differential guidance (scale=3): overshoots training target to converge faster.
-    # - linear_timesteps2 (high-noise bias) is a two-phase technique — NOT from step 0.
-    #   TODO: support mid-training phase switching for advanced users.
-    if is_zimage and is_style:
+    # Differential guidance (config-driven via training.differential_guidance).
+    # Overshoots training target to converge faster (e.g. Z-Image style).
+    diff_guidance = train_cfg.get("differential_guidance")
+    if diff_guidance is not None and is_style:
         train["do_differential_guidance"] = True
-        train["differential_guidance_scale"] = 3.0
+        train["differential_guidance_scale"] = diff_guidance["scale"]
 
     # Resume: tell ai-toolkit to start counting from the checkpoint step
     if resume_step is not None:
@@ -260,9 +251,10 @@ def build_sample_block(
     sample_cfg = arch["sample"]
     steps = params.get("steps", 2000)
 
-    # Z-Image Turbo style: sample 5 times during training
-    if arch_key == "zimage_turbo" and lora_type == "style":
-        default_every = max(steps // 5, 50)
+    # Config-driven sample frequency multiplier (e.g. Z-Image Turbo style: 5x more frequent)
+    sample_freq_mult = arch.get("training", {}).get("sample_frequency_multiplier")
+    if sample_freq_mult and lora_type == "style":
+        default_every = max(steps // sample_freq_mult, 50)
     else:
         default_every = max(steps // 10, 50)
 
@@ -380,7 +372,7 @@ def spec_to_aitoolkit_config(spec: dict, train_overrides: dict | None = None) ->
     # which needs alpha=rank for its single-phase high-denoise training.
     if lora_type in ("character", "object"):
         alpha = rank
-    elif arch_key == "zimage_turbo" and is_style:
+    elif arch.get("training", {}).get("network_alpha_mode") == "rank" and is_style:
         alpha = rank
     else:
         alpha = 1
@@ -423,16 +415,16 @@ def spec_to_aitoolkit_config(spec: dict, train_overrides: dict | None = None) ->
     if caption_dropout < 0:
         caption_dropout = 0.3 if is_style else 0.05
 
-    if arch_key == "qwen_image":
-        # cache_text_embeddings=True is incompatible with caption dropout.
-        # TODO: If future ai-toolkit versions support non-cached TE mode for
-        # Qwen character training, re-enable caption_dropout for that path.
-        if caption_dropout > 0:
+    forced_caption_dropout = arch.get("training", {}).get("caption_dropout")
+    if forced_caption_dropout is not None:
+        # Some architectures (e.g. Qwen-Image) force caption_dropout due to
+        # cache_text_embeddings=True being incompatible with dropout.
+        if caption_dropout > 0 and forced_caption_dropout == 0.0:
             print(
-                f"[modl] NOTE: For Qwen-Image with cached text embeddings, "
+                f"[modl] NOTE: For {arch_key} with cached text embeddings, "
                 f"forcing caption_dropout_rate=0.0 (requested {caption_dropout})."
             )
-        caption_dropout = 0.0
+        caption_dropout = forced_caption_dropout
 
     config = {
         "job": "extension",
