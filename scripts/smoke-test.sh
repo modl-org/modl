@@ -66,12 +66,14 @@ FILTER="${1:-}"
 # Cache installed model list (avoids repeated modl ls calls)
 INSTALLED_MODELS=$($MODL ls 2>/dev/null)
 
+# Match on the ID column exactly (last column, between ┆ and │)
+# Avoids "z-image" matching "z-image-turbo" or "qwen-image" matching "qwen-image-edit"
 is_installed() {
-  echo "$INSTALLED_MODELS" | grep -q "$1"
+  echo "$INSTALLED_MODELS" | grep -qP "┆ ${1}\s+│"
 }
 
 is_gguf_variant() {
-  echo "$INSTALLED_MODELS" | grep "$1" | grep -qi "gguf"
+  echo "$INSTALLED_MODELS" | grep -P "┆ ${1}\s+│" | grep -qi "gguf"
 }
 
 # Generate a real test image using the first available model.
