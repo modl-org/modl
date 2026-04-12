@@ -49,6 +49,10 @@ export type GenerateFormState = {
 
   // Edit mode
   edit_images: EditImage[]
+
+  // Video
+  num_frames: number
+  fps: number
 }
 
 export type EditImage =
@@ -79,6 +83,8 @@ export function createDefaultGenerateFormState(): GenerateFormState {
     init_image_file: null,
     denoise_strength: 0.7,
     edit_images: [],
+    num_frames: 121,
+    fps: 24,
   }
 }
 

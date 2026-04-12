@@ -296,6 +296,30 @@ variant_8step = "8step-bf16"
 guidance = 1.0
 scheduler_overrides = { base_shift = "1.0986", max_shift = "1.0986", shift_terminal = "null" }
 
+# ─── LTX Video ──────────────────────────────────────────────────────
+
+[families.ltx_video]
+name = "LTX Video"
+vendor = "Lightricks"
+year = 2025
+
+[families.ltx_video.models.ltx-video-2-3]
+name = "LTX Video 2.3"
+arch_key = "ltx2_video_distilled"
+description = "Distilled 8-step video, GGUF Q4 fits 24GB VRAM"
+transformer_b = 22.0
+text_encoder = "Gemma 3"
+text_encoder_b = 12.0
+total_b = 34.0
+vram_bf16 = 60
+vram_fp8 = 35
+capabilities = ["txt2vid", "img2vid"]
+quality = 5
+speed = 3
+text_rendering = false
+defaults = { steps = 8, guidance = 1.0, resolution = 768 }
+video_defaults = { frames = 97, fps = 24 }
+
 # ─── Stable Diffusion ────────────────────────────────────────────────
 
 [families.stable_diffusion]

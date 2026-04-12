@@ -610,6 +610,12 @@ pub enum Commands {
         /// Supported: qwen-image, qwen-image-edit.
         #[arg(long, num_args = 0..=1, default_missing_value = "4", value_name = "STEPS")]
         fast: Option<u32>,
+        /// Number of video frames (must be 8*N+1, e.g. 121 for ~5s). Auto-set for video models.
+        #[arg(long)]
+        frames: Option<u32>,
+        /// Video frame rate (default: 24)
+        #[arg(long)]
+        fps: Option<u32>,
         /// Force one-shot mode (skip persistent worker, cold start every time)
         #[arg(long)]
         no_worker: bool,
@@ -1102,6 +1108,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             style_strength,
             style_type,
             fast,
+            frames,
+            fps,
             cloud,
             provider,
             no_worker,
@@ -1131,6 +1139,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 style_strength,
                 style_type: style_type.as_deref(),
                 fast,
+                frames,
+                fps,
                 cloud,
                 provider,
                 no_worker,

@@ -1,9 +1,13 @@
 import React from 'react'
-import { Check, PencilIcon, Play, Trash2 } from 'lucide-react'
+import { Check, Film, PencilIcon, Play, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { modelColor } from '@/lib/utils'
 import type { GeneratedImage } from '../../api'
 import { LazyImage } from '../LazyImage'
+
+function isVideoFile(path: string): boolean {
+  return path.endsWith('.mp4') || path.endsWith('.webm')
+}
 
 /** Shorten a model id for display: keep it under 16 chars */
 function modelLabel(id: string): string {
@@ -59,15 +63,40 @@ export const ImageGridItem = React.memo(function ImageGridItem({
     <article
       className={`group relative overflow-hidden rounded-lg ${isSelected ? 'ring-2 ring-primary' : ''} ${isCursor && !isSelected ? 'ring-2 ring-primary/40' : ''}`}
     >
-      <LazyImage
-        src={`/files/${image.path}`}
-        alt={image.filename}
-        className="aspect-square"
-        thumbWidth={thumbWidth}
-        onClick={onImageClick}
-      />
+      {isVideoFile(image.path) ? (
+        <video
+          src={`/files/${image.path}`}
+          className="aspect-square object-cover cursor-pointer"
+          muted
+          loop
+          playsInline
+          onMouseEnter={e => (e.target as HTMLVideoElement).play().catch(() => {})}
+          onMouseLeave={e => { const v = e.target as HTMLVideoElement; v.pause(); v.currentTime = 0 }}
+          onClick={onImageClick}
+        />
+      ) : (
+        <LazyImage
+          src={`/files/${image.path}`}
+          alt={image.filename}
+          className="aspect-square"
+          thumbWidth={thumbWidth}
+          onClick={onImageClick}
+        />
+      )}
       {/* Hover overlay */}
       <div className="pointer-events-none absolute inset-0 bg-black/0 transition-colors group-hover:bg-black/30" />
+
+      {/* Video badge */}
+      {isVideoFile(image.path) && (
+        <div className="absolute top-1.5 right-1.5 flex items-center gap-0.5 rounded bg-black/60 px-1.5 py-0.5 backdrop-blur-sm pointer-events-none">
+          <Film className="size-3 text-white/90" />
+          {image.fps && image.num_frames && (
+            <span className="text-[9px] font-medium text-white/80">
+              {(image.num_frames / image.fps).toFixed(1)}s
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Model color dot */}
       {image.base_model_id && (

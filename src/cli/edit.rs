@@ -499,6 +499,8 @@ async fn execute_edit(
                 lora_strength: spec.lora.as_ref().map(|l| l.weight),
                 created_at: chrono::Utc::now().to_rfc3339(),
                 source: "edit".to_string(),
+                num_frames: None,
+                fps: None,
             };
             write_sidecar_yaml(&artifact.path, &sidecar);
         }

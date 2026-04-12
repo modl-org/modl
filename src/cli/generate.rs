@@ -168,6 +168,8 @@ pub struct GenerateArgs<'a> {
     pub style_strength: f32,
     pub style_type: Option<&'a str>,
     pub fast: Option<u32>,
+    pub frames: Option<u32>,
+    pub fps: Option<u32>,
     pub cloud: bool,
     pub provider: Option<CloudProvider>,
     pub no_worker: bool,
@@ -202,6 +204,8 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
         style_strength,
         style_type,
         fast,
+        frames,
+        fps,
         cloud,
         provider,
         no_worker,
@@ -227,6 +231,9 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
 
     let base_model_path = resolve_base_model_path(&base_model, &db);
 
+    // Detect if this is a video model → auto-set video mode
+    let is_video = model_family::is_video_model(&base_model) || frames.is_some();
+
     // -------------------------------------------------------------------
     // Resolve size: explicit --size wins, otherwise use init-image dims
     // -------------------------------------------------------------------
@@ -234,6 +241,9 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
         model_resolve::resolve_size(s)?
     } else if let Some(path) = init_image {
         image_dimensions(path)?
+    } else if is_video {
+        // Video default: 768x512 (landscape, divisible by 32)
+        (768, 512)
     } else {
         model_resolve::resolve_size("1:1")?
     };
@@ -328,7 +338,11 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
     }
 
     // Check model supports the requested mode
-    let mode = if mask.is_some() {
+    let mode = if is_video && init_image.is_some() {
+        "img2vid"
+    } else if is_video {
+        "txt2vid"
+    } else if mask.is_some() {
         "inpaint"
     } else if init_image.is_some() {
         "img2img"
@@ -588,6 +602,24 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
             controlnet: cn_inputs,
             style_ref: style_inputs,
             inpaint_method: resolved_inpaint_method.map(|s| s.to_string()),
+            num_frames: if is_video {
+                Some(frames.unwrap_or_else(|| {
+                    model_family::video_defaults(&base_model)
+                        .map(|(f, _)| f)
+                        .unwrap_or(121)
+                }))
+            } else {
+                None
+            },
+            fps: if is_video {
+                Some(fps.unwrap_or_else(|| {
+                    model_family::video_defaults(&base_model)
+                        .map(|(_, f)| f)
+                        .unwrap_or(24)
+                }))
+            } else {
+                None
+            },
         },
         runtime: RuntimeRef {
             profile: runtime::resolved_generation_profile().to_string(),
@@ -607,7 +639,11 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
     // Print summary
     // -------------------------------------------------------------------
     if !json {
-        let mode_label = if resolved_inpaint_method == Some("lanpaint") {
+        let mode_label = if is_video && init_image.is_some() {
+            "img2vid"
+        } else if is_video {
+            "txt2vid"
+        } else if resolved_inpaint_method == Some("lanpaint") {
             "LanPaint inpainting"
         } else if mask.is_some() {
             "inpainting"
@@ -616,9 +652,11 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
         } else {
             "txt2img"
         };
+        let gen_noun = if is_video { "video" } else { "image(s)" };
         println!(
-            "{} Generating image(s) [{}]...",
+            "{} Generating {} [{}]...",
             style("→").cyan(),
+            gen_noun,
             mode_label
         );
         println!("  Prompt: {}", style(prompt).italic());
@@ -676,6 +714,11 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
             );
         }
         println!("  Size:   {}×{}", width, height);
+        if let Some(nf) = spec.params.num_frames {
+            let fps_val = spec.params.fps.unwrap_or(24);
+            let duration = nf as f32 / fps_val as f32;
+            println!("  Frames: {} @ {}fps ({:.1}s)", nf, fps_val, duration);
+        }
         println!("  Steps:  {}", steps);
         if let Some(s) = seed {
             println!("  Seed:   {}", s);
@@ -814,10 +857,15 @@ async fn execute_generate(
                     pb.set_length(*total_steps as u64);
                     pb.set_position(*step as u64);
                 } else if stage == "generate" {
-                    // Image completed — reset bar for next image
+                    // Batch item completed — reset bar for next
                     if *step < *total_steps {
                         pb.set_position(0);
-                        pb.set_message(format!("(image {}/{})", step + 1, total_steps));
+                        let noun = if spec.params.num_frames.is_some() {
+                            "video"
+                        } else {
+                            "image"
+                        };
+                        pb.set_message(format!("({noun} {}/{})", step + 1, total_steps));
                     }
                 }
             }
@@ -910,10 +958,16 @@ async fn execute_generate(
             }
 
             if !json {
+                let noun = if spec.params.num_frames.is_some() {
+                    "video(s)"
+                } else {
+                    "image(s)"
+                };
                 println!(
-                    "  {} Downloaded {} image(s)",
+                    "  {} Downloaded {} {}",
                     style("✓").green(),
-                    artifacts.len()
+                    artifacts.len(),
+                    noun,
                 );
             }
         }
@@ -924,8 +978,14 @@ async fn execute_generate(
     // -------------------------------------------------------------------
     if final_status == "completed" && !artifacts.is_empty() {
         // Register artifacts in DB
+        let artifact_kind = if spec.params.num_frames.is_some() {
+            "video"
+        } else {
+            "image"
+        };
+
         for (i, artifact) in artifacts.iter().enumerate() {
-            let artifact_id = format!("{}-img-{}", job_id, i);
+            let artifact_id = format!("{}-{}-{}", job_id, artifact_kind, i);
             let image_seed = spec.params.seed.map(|s| s + i as u64);
             let metadata = serde_json::json!({
                 "generated_with": "modl.run",
@@ -941,12 +1001,14 @@ async fn execute_generate(
                 "seed": image_seed,
                 "image_index": i,
                 "count": spec.params.count,
+                "num_frames": spec.params.num_frames,
+                "fps": spec.params.fps,
             });
             let metadata_str = metadata.to_string();
             let _ = db.insert_artifact(
                 &artifact_id,
                 Some(job_id),
-                "image",
+                artifact_kind,
                 &artifact.path,
                 artifact.sha256.as_deref().unwrap_or(""),
                 artifact.size_bytes.unwrap_or(0),
@@ -965,24 +1027,33 @@ async fn execute_generate(
                 lora_strength: spec.lora.as_ref().map(|l| l.weight),
                 created_at: chrono::Utc::now().to_rfc3339(),
                 source: "generate".to_string(),
+                num_frames: spec.params.num_frames,
+                fps: spec.params.fps,
             };
             write_sidecar_yaml(&artifact.path, &sidecar);
         }
 
         let artifact_paths: Vec<String> = artifacts.iter().map(|a| a.path.clone()).collect();
+        let output_noun = if artifact_kind == "video" {
+            "video(s)"
+        } else {
+            "image(s)"
+        };
         if json {
             let output = serde_json::json!({
                 "status": "completed",
                 "job_id": job_id,
-                "images": artifact_paths,
+                "artifacts": artifact_paths,
+                "kind": artifact_kind,
             });
             println!("{}", serde_json::to_string(&output)?);
         } else {
             println!();
             println!(
-                "{} Generated {} image(s):",
+                "{} Generated {} {}:",
                 style("✓").green().bold(),
-                artifact_paths.len()
+                artifact_paths.len(),
+                output_noun,
             );
             for path in &artifact_paths {
                 println!("  {}", path);
@@ -992,11 +1063,11 @@ async fn execute_generate(
         if json {
             println!(
                 "{}",
-                serde_json::json!({"status": "completed", "images": []})
+                serde_json::json!({"status": "completed", "artifacts": []})
             );
         } else {
             println!(
-                "\n{} Generation completed but no images were produced.",
+                "\n{} Generation completed but no outputs were produced.",
                 style("⚠").yellow()
             );
         }
@@ -1004,7 +1075,7 @@ async fn execute_generate(
         let artifact_paths: Vec<String> = artifacts.iter().map(|a| a.path.clone()).collect();
         println!(
             "{}",
-            serde_json::json!({"status": final_status, "images": artifact_paths})
+            serde_json::json!({"status": final_status, "artifacts": artifact_paths})
         );
     }
 

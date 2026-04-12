@@ -685,6 +685,81 @@ ARCH_CONFIGS: dict[str, dict] = {
         "sample": {"sampler": "flowmatch", "steps": 50, "guidance": 30.0, "neg": ""},
         "inference": {"skip_strength_in_inpaint": True},
     },
+    # -------------------------------------------------------------------
+    # LTX Video 2.3 (Lightricks, 2025)
+    # -------------------------------------------------------------------
+    "ltx2_video": {
+        "pipeline_class": "LTX2Pipeline",
+        "img2vid_class": "LTX2ImageToVideoPipeline",
+        "gen_components": {
+            "transformer": {
+                "model_class": "LTX2VideoTransformer3DModel",
+                "config_dir": "ltx2-video-transformer",
+            },
+            "text_encoder": {
+                "model_id": "ltx2-gemma3-12b",
+                "model_class": "Gemma3ForConditionalGeneration",
+                "config_dir": "gemma3-12b",
+                "hf_dir": True,
+            },
+            "tokenizer": {
+                "model_class": "AutoTokenizer",
+                "config_dir": "gemma3-tokenizer",
+            },
+            "vae": {
+                "model_id": "ltx2-vae",
+                "model_class": "AutoencoderKLLTX2Video",
+                "config_dir": "ltx2-vae",
+            },
+            "scheduler": {
+                "model_class": "FlowMatchEulerDiscreteScheduler",
+                "config_dir": "ltx2-video-scheduler",
+            },
+        },
+        "model_flags": {"is_video": True},
+        "noise_scheduler": "flowmatch",
+        "dtype": "bf16",
+        "train_text_encoder": False,
+        "resolutions": [512, 768],
+        "default_resolution": 768,
+        "sample": {"sampler": "flowmatch", "steps": 30, "guidance": 3.0, "neg": ""},
+    },
+    "ltx2_video_distilled": {
+        "pipeline_class": "LTX2Pipeline",
+        "img2vid_class": "LTX2ImageToVideoPipeline",
+        "gen_components": {
+            "transformer": {
+                "model_class": "LTX2VideoTransformer3DModel",
+                "config_dir": "ltx2-video-distilled-transformer",
+            },
+            "text_encoder": {
+                "model_id": "ltx2-gemma3-12b",
+                "model_class": "Gemma3ForConditionalGeneration",
+                "config_dir": "gemma3-12b",
+                "hf_dir": True,
+            },
+            "tokenizer": {
+                "model_class": "AutoTokenizer",
+                "config_dir": "gemma3-tokenizer",
+            },
+            "vae": {
+                "model_id": "ltx2-vae",
+                "model_class": "AutoencoderKLLTX2Video",
+                "config_dir": "ltx2-vae",
+            },
+            "scheduler": {
+                "model_class": "FlowMatchEulerDiscreteScheduler",
+                "config_dir": "ltx2-video-scheduler",
+            },
+        },
+        "model_flags": {"is_video": True, "is_distilled": True},
+        "noise_scheduler": "flowmatch",
+        "dtype": "bf16",
+        "train_text_encoder": False,
+        "resolutions": [512, 768],
+        "default_resolution": 768,
+        "sample": {"sampler": "flowmatch", "steps": 8, "guidance": 1.0, "neg": ""},
+    },
     "sdxl": {
         "pipeline_class": "StableDiffusionXLPipeline",
         "img2img_class": "StableDiffusionXLImg2ImgPipeline",
@@ -740,6 +815,9 @@ MODEL_REGISTRY: dict[str, tuple[str, str]] = {
     "qwen_image_edit_2511":  ("qwen_image_edit_2511", "Qwen/Qwen-Image-Edit-2511"),
     "flux-fill-dev":            ("flux_fill",            "black-forest-labs/FLUX.1-Fill-dev"),
     "flux-fill-dev-onereward":  ("flux_fill_onereward",  "yichengup/flux.1-fill-dev-OneReward"),
+    "ltx-video-2-3":       ("ltx2_video_distilled", "Lightricks/LTX-2.3"),
+    "ltx-video-dev":       ("ltx2_video",           "Lightricks/LTX-2.3"),
+    "ltx-video-distilled": ("ltx2_video_distilled", "Lightricks/LTX-2.3"),
     "sdxl-base-1.0":  ("sdxl",          "stabilityai/stable-diffusion-xl-base-1.0"),
     "sdxl-turbo":     ("sdxl",          "stabilityai/sdxl-turbo"),
     "sd-1.5":         ("sd15",          "stable-diffusion-v1-5/stable-diffusion-v1-5"),
@@ -766,6 +844,10 @@ def detect_arch(base_model_id: str, arch_key: str | None = None) -> str:
         return entry[0]
 
     bid = base_model_id.lower()
+    if "ltx" in bid:
+        if "distill" in bid:
+            return "ltx2_video_distilled"
+        return "ltx2_video"
     if "fill" in bid and "onereward" in bid:
         return "flux_fill_onereward"
     if "fill" in bid:
@@ -833,6 +915,8 @@ def resolve_pipeline_class_for_mode(base_model_id: str, mode: str = "txt2img") -
         return config.get("img2img_class", config["pipeline_class"])
     elif mode == "inpaint":
         return config.get("inpaint_class", config["pipeline_class"])
+    elif mode == "img2vid":
+        return config.get("img2vid_class", config["pipeline_class"])
     return config["pipeline_class"]
 
 

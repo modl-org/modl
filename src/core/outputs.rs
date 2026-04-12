@@ -34,6 +34,12 @@ pub struct SidecarMetadata {
     pub lora_strength: Option<f32>,
     pub created_at: String,
     pub source: String,
+    /// Number of video frames (video outputs only)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_frames: Option<u32>,
+    /// Video frame rate (video outputs only)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fps: Option<u32>,
 }
 
 /// Write a YAML sidecar file next to an image.
@@ -106,6 +112,12 @@ pub struct GeneratedImage {
     pub generated_with: Option<String>,
     /// Whether the user has starred this image
     pub favorited: bool,
+    /// Artifact kind: "image" or "video"
+    pub kind: String,
+    /// Number of video frames (video only)
+    pub num_frames: Option<u32>,
+    /// Video frame rate (video only)
+    pub fps: Option<u32>,
 }
 
 pub struct DeleteOutputResult {
@@ -139,6 +151,8 @@ struct OutputMetaSummary {
     width: Option<u32>,
     height: Option<u32>,
     generated_with: Option<String>,
+    num_frames: Option<u32>,
+    fps: Option<u32>,
 }
 
 fn parse_output_meta(metadata: Option<&str>) -> OutputMetaSummary {
@@ -172,6 +186,11 @@ fn parse_output_meta(metadata: Option<&str>) -> OutputMetaSummary {
             .get("generated_with")
             .and_then(|x| x.as_str())
             .map(|s| s.to_string()),
+        num_frames: v
+            .get("num_frames")
+            .and_then(|x| x.as_u64())
+            .map(|n| n as u32),
+        fps: v.get("fps").and_then(|x| x.as_u64()).map(|n| n as u32),
     }
 }
 
@@ -206,6 +225,14 @@ fn parse_generate_job_spec_meta(spec_json: &str) -> Option<OutputMetaSummary> {
             .and_then(|x| x.as_u64())
             .map(|n| n as u32),
         generated_with: Some("modl.run".to_string()),
+        num_frames: spec
+            .pointer("/params/num_frames")
+            .and_then(|x| x.as_u64())
+            .map(|n| n as u32),
+        fps: spec
+            .pointer("/params/fps")
+            .and_then(|x| x.as_u64())
+            .map(|n| n as u32),
     })
 }
 
@@ -226,7 +253,7 @@ fn load_output_artifact_index() -> HashMap<String, OutputArtifactInfo> {
     };
 
     for artifact in artifacts {
-        if artifact.kind != "image" || artifact.path.is_empty() {
+        if (artifact.kind != "image" && artifact.kind != "video") || artifact.path.is_empty() {
             continue;
         }
         if by_path.contains_key(&artifact.path) {
@@ -250,6 +277,8 @@ fn load_output_artifact_index() -> HashMap<String, OutputArtifactInfo> {
                                 "guidance": m.guidance,
                                 "width": m.width,
                                 "height": m.height,
+                                "num_frames": m.num_frames,
+                                "fps": m.fps,
                             })
                             .to_string()
                         })
@@ -350,7 +379,10 @@ pub fn list_outputs() -> Vec<GeneratedOutput> {
             .filter(|e| {
                 let name = e.file_name();
                 let name = name.to_string_lossy();
-                name.ends_with(".png") || name.ends_with(".jpg") || name.ends_with(".webp")
+                name.ends_with(".png")
+                    || name.ends_with(".jpg")
+                    || name.ends_with(".webp")
+                    || name.ends_with(".mp4")
             })
             .map(|e| {
                 let filename = e.file_name().to_string_lossy().to_string();
@@ -365,6 +397,11 @@ pub fn list_outputs() -> Vec<GeneratedOutput> {
                     .unwrap_or(0);
                 let artifact = artifacts_by_path.get(&abs);
                 let meta = parse_output_meta(artifact.and_then(|a| a.metadata.as_deref()));
+                let kind = if filename.ends_with(".mp4") {
+                    "video".to_string()
+                } else {
+                    "image".to_string()
+                };
                 GeneratedImage {
                     path: rel.clone(),
                     filename,
@@ -383,6 +420,9 @@ pub fn list_outputs() -> Vec<GeneratedOutput> {
                     size_bytes: artifact.and_then(|a| (a.size_bytes > 0).then_some(a.size_bytes)),
                     generated_with: meta.generated_with,
                     favorited: favorites.contains(&rel),
+                    kind,
+                    num_frames: meta.num_frames,
+                    fps: meta.fps,
                 }
             })
             .collect();

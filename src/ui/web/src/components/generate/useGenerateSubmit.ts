@@ -104,6 +104,8 @@ export function useGenerateSubmit({
       init_image: initImagePath,
       strength: initImagePath ? f.denoise_strength : undefined,
       fast: f.fast || undefined,
+      num_frames: f.num_frames > 0 ? f.num_frames : undefined,
+      fps: f.fps > 0 ? f.fps : undefined,
     }
 
     const sessionId = nextSessionId('gen')
