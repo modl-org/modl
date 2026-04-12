@@ -18,6 +18,7 @@ from pathlib import Path
 from modl_worker.protocol import EventEmitter
 from modl_worker.image_util import save_and_emit_artifact
 from modl_worker.adapters.arch_config import (
+    ARCH_CONFIGS,
     resolve_pipeline_class_for_mode,
     resolve_gen_defaults,
 )
@@ -283,22 +284,22 @@ def run_generate_with_pipeline(
     if lightning_sigmas is not None:
         gen_kwargs["sigmas"] = lightning_sigmas
 
-    # QwenImagePipeline/QwenImageEditPlusPipeline use true_cfg_scale (not guidance_scale).
-    # negative_prompt=" " (space) is required to enable true CFG — without it quality degrades.
-    if arch in ("qwen_image", "qwen_image_edit"):
-        gen_kwargs["true_cfg_scale"] = guidance
-        gen_kwargs["negative_prompt"] = " "
-    else:
-        gen_kwargs["guidance_scale"] = guidance
+    # Guidance param and negative prompt are config-driven via ARCH_CONFIGS.inference.
+    inf_cfg = ARCH_CONFIGS.get(arch, {}).get("inference", {})
+    guidance_param = inf_cfg.get("guidance_param", "guidance_scale")
+    gen_kwargs[guidance_param] = guidance
+    force_neg = inf_cfg.get("force_negative_prompt")
+    if force_neg is not None:
+        gen_kwargs["negative_prompt"] = force_neg
 
-    # Chroma supports and benefits from negative prompts (unlike Flux).
-    if arch == "chroma":
+    # Architectures that support negative prompts (e.g. Chroma, SDXL, SD1.5).
+    if inf_cfg.get("supports_negative_prompt"):
+        default_neg = inf_cfg.get("default_negative_prompt", "")
         neg = params.get("negative_prompt", "")
-        if not neg:
-            neg = "low quality, ugly, unfinished, out of focus, deformed, disfigured, blurry"
-        gen_kwargs["negative_prompt"] = neg
-
-    is_flux_fill = arch in ("flux_fill", "flux_fill_onereward")
+        if not neg and default_neg and "negative_prompt" not in gen_kwargs:
+            gen_kwargs["negative_prompt"] = default_neg
+        elif neg:
+            gen_kwargs["negative_prompt"] = neg
 
     if mode == "txt2img":
         gen_kwargs["width"] = width
@@ -311,7 +312,7 @@ def run_generate_with_pipeline(
         gen_kwargs["mask_image"] = mask_img
         gen_kwargs["width"] = width
         gen_kwargs["height"] = height
-        if not is_flux_fill:
+        if not inf_cfg.get("skip_strength_in_inpaint"):
             gen_kwargs["strength"] = strength  # Fill pipelines don't use strength
 
     # Add ControlNet conditioning

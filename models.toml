@@ -228,7 +228,7 @@ default_strength = 0.6
 default_end = 0.8
 min_steps = 8
 
-# ─── Qwen Image ──────────────────────────────────────────────────────
+# ─── Qwen Image (generation) ─────────────────────────────────────────
 
 [families.qwen_image]
 name = "Qwen Image"
@@ -265,30 +265,15 @@ default_strength = 0.8
 default_end = 1.0
 min_steps = 25
 
-[families.qwen_image.models.qwen-image-edit]
+# ─── Qwen Image Edit (editing) ──────────────────────────────────────
+
+[families.qwen_image_edit]
 name = "Qwen Image Edit"
-arch_key = "qwen_image_edit"
-description = "Original instruction-based editing, text editing, style transfer"
-transformer_b = 20.0
-text_encoder = "Qwen2.5-VL 7B"
-text_encoder_b = 7.0
-total_b = 27.0
-vram_bf16 = 50
-vram_fp8 = 30
-capabilities = ["edit", "lora"]
-quality = 5
-speed = 1
-text_rendering = true
-defaults = { steps = 50, guidance = 4.0, resolution = 1024 }
+vendor = "Qwen"
+year = 2025
 
-[families.qwen_image.models.qwen-image-edit.lightning]
-lora_registry_id = "qwen-image-edit-lightning"
-variant_4step = "fp8-gen-4step-v1-bf16"
-variant_8step = "edit-8step-v1-bf16"
-guidance = 1.0
-scheduler_overrides = { base_shift = "1.0986", max_shift = "1.0986", shift_terminal = "null" }
 
-[families.qwen_image.models.qwen-image-edit-2511]
+[families.qwen_image_edit.models.qwen-image-edit-2511]
 name = "Qwen Image Edit 2511"
 arch_key = "qwen_image_edit_2511"
 description = "2511 Plus — improved consistency, less drift, multi-image"
@@ -304,21 +289,21 @@ speed = 1
 text_rendering = true
 defaults = { steps = 40, guidance = 4.0, resolution = 1024 }
 
-[families.qwen_image.models.qwen-image-edit-2511.lightning]
+[families.qwen_image_edit.models.qwen-image-edit-2511.lightning]
 lora_registry_id = "qwen-image-edit-2511-lightning"
 variant_4step = "4step-bf16"
 variant_8step = "8step-bf16"
 guidance = 1.0
 scheduler_overrides = { base_shift = "1.0986", max_shift = "1.0986", shift_terminal = "null" }
 
-# ─── Legacy Stable Diffusion ─────────────────────────────────────────
+# ─── Stable Diffusion ────────────────────────────────────────────────
 
-[families.legacy_sd]
+[families.stable_diffusion]
 name = "Stable Diffusion"
 vendor = "Stability AI"
 year = 2023
 
-[families.legacy_sd.models.sdxl]
+[families.stable_diffusion.models.sdxl]
 name = "SDXL"
 arch_key = "sdxl"
 description = "Mature ecosystem, huge LoRA library, needs negative prompts"
@@ -334,19 +319,19 @@ speed = 2
 text_rendering = false
 defaults = { steps = 30, guidance = 7.5, resolution = 1024 }
 
-[families.legacy_sd.models.sdxl.controlnet]
+[families.stable_diffusion.models.sdxl.controlnet]
 manifest_id = "sdxl-controlnet-union"
 types = ["canny", "depth", "pose", "softedge", "tile", "scribble", "hed", "mlsd", "normal"]
 default_strength = 0.75
 default_end = 1.0
 min_steps = 28
 
-[families.legacy_sd.models.sdxl.style_ref]
+[families.stable_diffusion.models.sdxl.style_ref]
 mechanism = "ip-adapter"
 manifest_id = "sdxl-ip-adapter"
 default_strength = 0.6
 
-[families.legacy_sd.models."sd-1.5"]
+[families.stable_diffusion.models."sd-1.5"]
 name = "SD 1.5"
 arch_key = "sd15"
 description = "Lightweight, runs on any GPU, dated quality"

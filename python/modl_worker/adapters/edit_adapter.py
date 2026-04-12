@@ -79,10 +79,12 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
 
     # Apply scheduler overrides.
     #
-    # Lightning mode and Qwen-2511 shift are mutually exclusive:
+    # Lightning mode and config-driven shift are mutually exclusive:
     # Lightning LoRAs are distilled with shift=3.0 and a simple linear
-    # schedule — those settings must not be overwritten.  The Qwen-2511
-    # shift=3.1 block only applies to vanilla (non-Lightning) inference.
+    # schedule — those settings must not be overwritten.  The config-driven
+    # shift (e.g. 3.1 for Qwen-2511) only applies to vanilla (non-Lightning) inference.
+    from .arch_config import ARCH_CONFIGS
+    inf_cfg = ARCH_CONFIGS.get(arch, {}).get("inference", {})
     sched_overrides = params.get("scheduler_overrides")
     lightning_sigmas = None
     if sched_overrides and hasattr(pipeline, "scheduler"):
@@ -90,27 +92,20 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
         from .gen_adapter import _apply_scheduler_overrides, _compute_lightning_sigmas
         _apply_scheduler_overrides(pipeline, sched_overrides, emitter)
         lightning_sigmas = _compute_lightning_sigmas(steps)
-    elif arch == "qwen_image_edit_2511" and hasattr(pipeline, "scheduler"):
-        # Qwen-Image-Edit-2511 (non-Lightning): fixed shift=3.1 matching
-        # ComfyUI's ModelSamplingAuraFlow node.
-        #
-        # The diffusers QwenImageEditPlusPipeline computes:
-        #   mu = calculate_shift(seq_len, base_shift, max_shift)
-        # then the scheduler applies exp(mu) as the time shift.
-        # Setting base_shift = max_shift = log(3.1) gives a constant
-        # shift=3.1 regardless of image sequence length.
-        import math
-        shift_val = 3.1
-        log_shift = math.log(shift_val)
-        sched = pipeline.scheduler
-        config = dict(sched.config)
-        config["use_dynamic_shifting"] = True
-        config["base_shift"] = log_shift
-        config["max_shift"] = log_shift
-        config["time_shift_type"] = "exponential"
-        sched_class = type(sched)
-        pipeline.scheduler = sched_class.from_config(config)
-        emitter.info(f"Qwen 2511: scheduler shift={shift_val} (base_shift=max_shift=log({shift_val})={log_shift:.4f})")
+    else:
+        shift_val = inf_cfg.get("scheduler_shift")
+        if shift_val is not None and hasattr(pipeline, "scheduler"):
+            import math
+            log_shift = math.log(shift_val)
+            sched = pipeline.scheduler
+            config = dict(sched.config)
+            config["use_dynamic_shifting"] = True
+            config["base_shift"] = log_shift
+            config["max_shift"] = log_shift
+            config["time_shift_type"] = "exponential"
+            sched_class = type(sched)
+            pipeline.scheduler = sched_class.from_config(config)
+            emitter.info(f"Scheduler shift={shift_val} (base_shift=max_shift=log({shift_val})={log_shift:.4f})")
 
     # Debug: dump sigma schedule for comparison with ComfyUI.
     if os.environ.get("MODL_DEBUG_SIGMAS") and hasattr(pipeline, "scheduler"):
@@ -171,8 +166,9 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
         generator.manual_seed(seed)
 
     # Build inference kwargs — different pipelines need different params
-    if arch in ("flux2_klein", "flux2_klein_9b"):
-        # Klein: native image editing via the `image` parameter.
+    inf_cfg = ARCH_CONFIGS.get(arch, {}).get("inference", {})
+    if inf_cfg.get("editing_mode") == "native":
+        # Native editing via the `image` parameter (e.g. Klein).
         # Supports multiple input images (e.g. source + reference).
         # No guidance (distilled), no negative prompt.
         # Explicit --size overrides the first image's dimensions.
@@ -188,10 +184,17 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
         }
     else:
         # Qwen-Image-Edit: instruction-based editing with true CFG.
+        # true_cfg_scale controls actual classifier-free guidance (default 4.0).
+        # guidance_scale controls diffusers noise scheduling (always 1.0 for Qwen).
+        # In Lightning mode, the Rust CLI overrides guidance to 1.0 — but that's
+        # meant for guidance_scale, NOT true_cfg_scale. We must preserve true_cfg_scale
+        # at a reasonable level or the output is soft/blurry (no CFG).
+        is_lightning = sched_overrides is not None
+        true_cfg = guidance if not is_lightning else 4.0
         gen_kwargs = {
             "image": source_images if len(source_images) > 1 else source_images[0],
             "prompt": prompt,
-            "true_cfg_scale": guidance,
+            "true_cfg_scale": true_cfg,
             "negative_prompt": " ",
             "num_inference_steps": steps,
             "guidance_scale": 1.0,

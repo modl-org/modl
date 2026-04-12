@@ -15,6 +15,24 @@ Fields in each ARCH_CONFIGS entry:
     default_resolution – fallback when user doesn't specify
     sample             – sampler, steps, guidance, neg for sample/generate defaults
     extra_train        – extra keys merged into "train" block
+
+Optional sub-dicts (only present when values differ from defaults):
+    inference          – generation/edit-time overrides:
+        guidance_param              – kwarg name for guidance (default: "guidance_scale")
+        force_negative_prompt       – negative prompt always passed (default: None)
+        supports_negative_prompt    – whether neg prompt is accepted (default: False)
+        default_negative_prompt     – fallback neg prompt when user omits one
+        editing_mode                – "standard" or "native" (Klein-style image param)
+        scheduler_shift             – fixed scheduler shift value (e.g. 3.1)
+    training           – training-time overrides:
+        max_learning_rate           – LR ceiling (clamped if user exceeds it)
+        differential_guidance       – {"scale": float} for style training
+        sample_frequency_multiplier – sample N times during training (default: 10)
+        network_alpha_mode          – "rank" to set alpha=rank for style LoRAs
+        noise_offset                – {"style": float, "default": float}
+        use_ema                     – whether to use EMA (default: True)
+        caption_dropout             – forced caption dropout rate
+        required_tokenizer_repo     – HF repo to pre-cache for training
 """
 
 import os
@@ -204,6 +222,8 @@ ARCH_CONFIGS: dict[str, dict] = {
         "resolutions": [512, 768, 1024],
         "default_resolution": 1024,
         "sample": {"sampler": "flowmatch", "steps": 4, "guidance": 1.0, "neg": ""},
+        "inference": {"editing_mode": "native"},
+        "training": {"max_learning_rate": 5e-5, "required_tokenizer_repo": "Qwen/Qwen3-4B", "cache_text_embeddings": True},
     },
     "flux2_klein_base": {
         "pipeline_class": "Flux2KleinPipeline",
@@ -238,6 +258,8 @@ ARCH_CONFIGS: dict[str, dict] = {
         "resolutions": [512, 768, 1024],
         "default_resolution": 1024,
         "sample": {"sampler": "flowmatch", "steps": 50, "guidance": 4.0, "neg": ""},
+        "inference": {"editing_mode": "native"},
+        "training": {"max_learning_rate": 5e-5, "required_tokenizer_repo": "Qwen/Qwen3-4B", "cache_text_embeddings": True},
     },
     "flux2_klein_9b": {
         "pipeline_class": "Flux2KleinPipeline",
@@ -273,6 +295,8 @@ ARCH_CONFIGS: dict[str, dict] = {
         "resolutions": [512, 768, 1024],
         "default_resolution": 1024,
         "sample": {"sampler": "flowmatch", "steps": 4, "guidance": 1.0, "neg": ""},
+        "inference": {"editing_mode": "native"},
+        "training": {"max_learning_rate": 1e-4, "required_tokenizer_repo": "Qwen/Qwen3-8B", "cache_text_embeddings": True},
     },
     "flux2_klein_base_9b": {
         "pipeline_class": "Flux2KleinPipeline",
@@ -307,6 +331,8 @@ ARCH_CONFIGS: dict[str, dict] = {
         "resolutions": [512, 768, 1024],
         "default_resolution": 1024,
         "sample": {"sampler": "flowmatch", "steps": 50, "guidance": 4.0, "neg": ""},
+        "inference": {"editing_mode": "native"},
+        "training": {"max_learning_rate": 1e-4, "required_tokenizer_repo": "Qwen/Qwen3-8B", "cache_text_embeddings": True},
     },
     "zimage_turbo": {
         "pipeline_class": "ZImagePipeline",
@@ -354,6 +380,7 @@ ARCH_CONFIGS: dict[str, dict] = {
             "cache_text_embeddings": True,
         },
         "sample": {"sampler": "flowmatch", "steps": 8, "guidance": 0.0, "neg": ""},
+        "training": {"max_learning_rate": 1e-4, "differential_guidance": {"scale": 3.0}, "sample_frequency_multiplier": 5, "network_alpha_mode": "rank", "cache_text_embeddings": True},
     },
     "zimage": {
         "pipeline_class": "ZImagePipeline",
@@ -396,6 +423,7 @@ ARCH_CONFIGS: dict[str, dict] = {
         "default_resolution": 1024,
         "extra_train": {"timestep_type": "weighted"},
         "sample": {"sampler": "flowmatch", "steps": 30, "guidance": 4.0, "neg": ""},
+        "training": {"max_learning_rate": 1e-4, "differential_guidance": {"scale": 3.0}, "cache_text_embeddings": True},
     },
     "chroma": {
         "pipeline_class": "ChromaPipeline",
@@ -430,6 +458,7 @@ ARCH_CONFIGS: dict[str, dict] = {
         "resolutions": [512, 768, 1024],
         "default_resolution": 1024,
         "sample": {"sampler": "flowmatch", "steps": 25, "guidance": 4.0, "neg": ""},
+        "inference": {"supports_negative_prompt": True, "default_negative_prompt": "low quality, ugly, unfinished, out of focus, deformed, disfigured, blurry"},
     },
     "qwen_image": {
         "pipeline_class": "QwenImagePipeline",
@@ -474,6 +503,8 @@ ARCH_CONFIGS: dict[str, dict] = {
             "timestep_type": "sigmoid",
         },
         "sample": {"sampler": "flowmatch", "steps": 25, "guidance": 3.0, "neg": ""},
+        "inference": {"guidance_param": "true_cfg_scale", "force_negative_prompt": " "},
+        "training": {"caption_dropout": 0.0, "cache_text_embeddings": True},
     },
     "qwen_image_edit": {
         "pipeline_class": "QwenImageEditPipeline",
@@ -518,6 +549,7 @@ ARCH_CONFIGS: dict[str, dict] = {
         "resolutions": [512, 768, 1024],
         "default_resolution": 1024,
         "sample": {"sampler": "flowmatch", "steps": 50, "guidance": 4.0, "neg": ""},
+        "inference": {"guidance_param": "true_cfg_scale", "force_negative_prompt": " "},
     },
     # 2511 "Plus" revision — uses QwenImageEditPlusPipeline (different from original)
     "qwen_image_edit_2511": {
@@ -563,6 +595,7 @@ ARCH_CONFIGS: dict[str, dict] = {
         "resolutions": [512, 768, 1024],
         "default_resolution": 1024,
         "sample": {"sampler": "flowmatch", "steps": 40, "guidance": 4.0, "neg": ""},
+        "inference": {"guidance_param": "true_cfg_scale", "force_negative_prompt": " ", "scheduler_shift": 3.1},
     },
     "flux_fill": {
         "pipeline_class": "FluxFillPipeline",
@@ -606,6 +639,7 @@ ARCH_CONFIGS: dict[str, dict] = {
         "resolutions": [512, 768, 1024],
         "default_resolution": 1024,
         "sample": {"sampler": "flowmatch", "steps": 50, "guidance": 30.0, "neg": ""},
+        "inference": {"skip_strength_in_inpaint": True},
     },
     "flux_fill_onereward": {
         "pipeline_class": "FluxFillPipeline",
@@ -649,6 +683,7 @@ ARCH_CONFIGS: dict[str, dict] = {
         "resolutions": [512, 768, 1024],
         "default_resolution": 1024,
         "sample": {"sampler": "flowmatch", "steps": 50, "guidance": 30.0, "neg": ""},
+        "inference": {"skip_strength_in_inpaint": True},
     },
     "sdxl": {
         "pipeline_class": "StableDiffusionXLPipeline",
@@ -662,6 +697,8 @@ ARCH_CONFIGS: dict[str, dict] = {
         "default_resolution": 1024,
         "extra_train": {"max_denoising_steps": 1000},
         "sample": {"sampler": "euler", "steps": 30, "guidance": 7.5, "neg": "blurry, low quality, deformed"},
+        "inference": {"supports_negative_prompt": True},
+        "training": {"noise_offset": {"style": 0.0357, "default": 0.0}},
     },
     "sd15": {
         "pipeline_class": "StableDiffusionPipeline",
@@ -675,6 +712,8 @@ ARCH_CONFIGS: dict[str, dict] = {
         "default_resolution": 512,
         "extra_train": {"max_denoising_steps": 1000},
         "sample": {"sampler": "euler", "steps": 30, "guidance": 7.5, "neg": "blurry, low quality, deformed"},
+        "inference": {"supports_negative_prompt": True},
+        "training": {"use_ema": False},
     },
 }
 

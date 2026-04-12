@@ -534,7 +534,7 @@ pub enum Commands {
     ///   z-image                 30 steps, 6B, quality
     ///   qwen-image              40 steps, 20B, text rendering
     ///   chroma                  45 steps, 12B, artistic
-    ///   sdxl                    30 steps, 3.5B, legacy
+    ///   sdxl                    30 steps, 3.5B, huge LoRA ecosystem
     ///
     /// Use --lora to apply a trained LoRA. Use --controlnet for structural guidance.
     #[command(verbatim_doc_comment, after_help = GENERATE_EXAMPLES)]
@@ -631,7 +631,6 @@ pub enum Commands {
     ///
     /// Models:
     ///   qwen-image-edit-2511 (default)  40 steps, 20B, best quality
-    ///   qwen-image-edit                 40 steps, 20B, original
     ///   klein-4b                         4 steps, 4B, fastest
     ///   klein-9b                         4 steps, 9B, balanced
     ///   flux2-dev                       28 steps, 24B, flux-based
