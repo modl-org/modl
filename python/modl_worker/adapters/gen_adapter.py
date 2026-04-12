@@ -301,8 +301,6 @@ def run_generate_with_pipeline(
         elif neg:
             gen_kwargs["negative_prompt"] = neg
 
-    is_flux_fill = arch in ("flux_fill", "flux_fill_onereward")
-
     if mode == "txt2img":
         gen_kwargs["width"] = width
         gen_kwargs["height"] = height
@@ -314,7 +312,7 @@ def run_generate_with_pipeline(
         gen_kwargs["mask_image"] = mask_img
         gen_kwargs["width"] = width
         gen_kwargs["height"] = height
-        if not is_flux_fill:
+        if not inf_cfg.get("skip_strength_in_inpaint"):
             gen_kwargs["strength"] = strength  # Fill pipelines don't use strength
 
     # Add ControlNet conditioning

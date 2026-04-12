@@ -223,7 +223,7 @@ ARCH_CONFIGS: dict[str, dict] = {
         "default_resolution": 1024,
         "sample": {"sampler": "flowmatch", "steps": 4, "guidance": 1.0, "neg": ""},
         "inference": {"editing_mode": "native"},
-        "training": {"max_learning_rate": 5e-5, "required_tokenizer_repo": "Qwen/Qwen3-4B"},
+        "training": {"max_learning_rate": 5e-5, "required_tokenizer_repo": "Qwen/Qwen3-4B", "cache_text_embeddings": True},
     },
     "flux2_klein_base": {
         "pipeline_class": "Flux2KleinPipeline",
@@ -259,7 +259,7 @@ ARCH_CONFIGS: dict[str, dict] = {
         "default_resolution": 1024,
         "sample": {"sampler": "flowmatch", "steps": 50, "guidance": 4.0, "neg": ""},
         "inference": {"editing_mode": "native"},
-        "training": {"max_learning_rate": 5e-5, "required_tokenizer_repo": "Qwen/Qwen3-4B"},
+        "training": {"max_learning_rate": 5e-5, "required_tokenizer_repo": "Qwen/Qwen3-4B", "cache_text_embeddings": True},
     },
     "flux2_klein_9b": {
         "pipeline_class": "Flux2KleinPipeline",
@@ -296,7 +296,7 @@ ARCH_CONFIGS: dict[str, dict] = {
         "default_resolution": 1024,
         "sample": {"sampler": "flowmatch", "steps": 4, "guidance": 1.0, "neg": ""},
         "inference": {"editing_mode": "native"},
-        "training": {"max_learning_rate": 1e-4, "required_tokenizer_repo": "Qwen/Qwen3-8B"},
+        "training": {"max_learning_rate": 1e-4, "required_tokenizer_repo": "Qwen/Qwen3-8B", "cache_text_embeddings": True},
     },
     "flux2_klein_base_9b": {
         "pipeline_class": "Flux2KleinPipeline",
@@ -332,7 +332,7 @@ ARCH_CONFIGS: dict[str, dict] = {
         "default_resolution": 1024,
         "sample": {"sampler": "flowmatch", "steps": 50, "guidance": 4.0, "neg": ""},
         "inference": {"editing_mode": "native"},
-        "training": {"max_learning_rate": 1e-4, "required_tokenizer_repo": "Qwen/Qwen3-8B"},
+        "training": {"max_learning_rate": 1e-4, "required_tokenizer_repo": "Qwen/Qwen3-8B", "cache_text_embeddings": True},
     },
     "zimage_turbo": {
         "pipeline_class": "ZImagePipeline",
@@ -380,7 +380,7 @@ ARCH_CONFIGS: dict[str, dict] = {
             "cache_text_embeddings": True,
         },
         "sample": {"sampler": "flowmatch", "steps": 8, "guidance": 0.0, "neg": ""},
-        "training": {"max_learning_rate": 1e-4, "differential_guidance": {"scale": 3.0}, "sample_frequency_multiplier": 5, "network_alpha_mode": "rank"},
+        "training": {"max_learning_rate": 1e-4, "differential_guidance": {"scale": 3.0}, "sample_frequency_multiplier": 5, "network_alpha_mode": "rank", "cache_text_embeddings": True},
     },
     "zimage": {
         "pipeline_class": "ZImagePipeline",
@@ -423,7 +423,7 @@ ARCH_CONFIGS: dict[str, dict] = {
         "default_resolution": 1024,
         "extra_train": {"timestep_type": "weighted"},
         "sample": {"sampler": "flowmatch", "steps": 30, "guidance": 4.0, "neg": ""},
-        "training": {"max_learning_rate": 1e-4, "differential_guidance": {"scale": 3.0}},
+        "training": {"max_learning_rate": 1e-4, "differential_guidance": {"scale": 3.0}, "cache_text_embeddings": True},
     },
     "chroma": {
         "pipeline_class": "ChromaPipeline",
@@ -504,7 +504,7 @@ ARCH_CONFIGS: dict[str, dict] = {
         },
         "sample": {"sampler": "flowmatch", "steps": 25, "guidance": 3.0, "neg": ""},
         "inference": {"guidance_param": "true_cfg_scale", "force_negative_prompt": " "},
-        "training": {"caption_dropout": 0.0},
+        "training": {"caption_dropout": 0.0, "cache_text_embeddings": True},
     },
     "qwen_image_edit": {
         "pipeline_class": "QwenImageEditPipeline",
@@ -639,6 +639,7 @@ ARCH_CONFIGS: dict[str, dict] = {
         "resolutions": [512, 768, 1024],
         "default_resolution": 1024,
         "sample": {"sampler": "flowmatch", "steps": 50, "guidance": 30.0, "neg": ""},
+        "inference": {"skip_strength_in_inpaint": True},
     },
     "flux_fill_onereward": {
         "pipeline_class": "FluxFillPipeline",
@@ -682,6 +683,7 @@ ARCH_CONFIGS: dict[str, dict] = {
         "resolutions": [512, 768, 1024],
         "default_resolution": 1024,
         "sample": {"sampler": "flowmatch", "steps": 50, "guidance": 30.0, "neg": ""},
+        "inference": {"skip_strength_in_inpaint": True},
     },
     "sdxl": {
         "pipeline_class": "StableDiffusionXLPipeline",

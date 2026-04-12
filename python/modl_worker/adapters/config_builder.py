@@ -450,7 +450,7 @@ def spec_to_aitoolkit_config(spec: dict, train_overrides: dict | None = None) ->
                             "caption_ext": "txt",
                             "caption_dropout_rate": caption_dropout,
                             "shuffle_tokens": False,
-                            "cache_text_embeddings": arch_key in ("qwen_image", "zimage_turbo", "zimage") or arch_key.startswith("flux2_klein"),
+                            "cache_text_embeddings": train_cfg.get("cache_text_embeddings", False),
                             "resolution": dataset_resolution,
                             "cache_latents_to_disk": True,
                             "default_caption": _resolve_trigger_word(params, arch_key, lora_type),
