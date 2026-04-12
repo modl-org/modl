@@ -184,10 +184,17 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
         }
     else:
         # Qwen-Image-Edit: instruction-based editing with true CFG.
+        # true_cfg_scale controls actual classifier-free guidance (default 4.0).
+        # guidance_scale controls diffusers noise scheduling (always 1.0 for Qwen).
+        # In Lightning mode, the Rust CLI overrides guidance to 1.0 — but that's
+        # meant for guidance_scale, NOT true_cfg_scale. We must preserve true_cfg_scale
+        # at a reasonable level or the output is soft/blurry (no CFG).
+        is_lightning = sched_overrides is not None
+        true_cfg = guidance if not is_lightning else 4.0
         gen_kwargs = {
             "image": source_images if len(source_images) > 1 else source_images[0],
             "prompt": prompt,
-            "true_cfg_scale": guidance,
+            "true_cfg_scale": true_cfg,
             "negative_prompt": " ",
             "num_inference_steps": steps,
             "guidance_scale": 1.0,

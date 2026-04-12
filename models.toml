@@ -272,28 +272,6 @@ name = "Qwen Image Edit"
 vendor = "Qwen"
 year = 2025
 
-[families.qwen_image_edit.models.qwen-image-edit]
-name = "Qwen Image Edit"
-arch_key = "qwen_image_edit"
-description = "Original instruction-based editing, text editing, style transfer"
-transformer_b = 20.0
-text_encoder = "Qwen2.5-VL 7B"
-text_encoder_b = 7.0
-total_b = 27.0
-vram_bf16 = 50
-vram_fp8 = 30
-capabilities = ["edit", "lora"]
-quality = 5
-speed = 1
-text_rendering = true
-defaults = { steps = 50, guidance = 4.0, resolution = 1024 }
-
-[families.qwen_image_edit.models.qwen-image-edit.lightning]
-lora_registry_id = "qwen-image-edit-lightning"
-variant_4step = "fp8-gen-4step-v1-bf16"
-variant_8step = "edit-8step-v1-bf16"
-guidance = 1.0
-scheduler_overrides = { base_shift = "1.0986", max_shift = "1.0986", shift_terminal = "null" }
 
 [families.qwen_image_edit.models.qwen-image-edit-2511]
 name = "Qwen Image Edit 2511"

@@ -42,7 +42,6 @@ GEN_MODELS=(
 # Edit models
 EDIT_MODELS=(
   qwen-image-edit-2511
-  qwen-image-edit
   flux2-klein-4b
   flux2-klein-9b
 )
@@ -50,7 +49,6 @@ EDIT_MODELS=(
 # Models that support --fast (Lightning LoRA)
 FAST_EDIT_MODELS=(
   qwen-image-edit-2511
-  qwen-image-edit
 )
 
 # Models that support --fast for generation

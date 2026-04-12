@@ -631,7 +631,6 @@ pub enum Commands {
     ///
     /// Models:
     ///   qwen-image-edit-2511 (default)  40 steps, 20B, best quality
-    ///   qwen-image-edit                 40 steps, 20B, original
     ///   klein-4b                         4 steps, 4B, fastest
     ///   klein-9b                         4 steps, 9B, balanced
     ///   flux2-dev                       28 steps, 24B, flux-based
