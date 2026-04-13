@@ -5,7 +5,7 @@
 #
 # To add a new model: add an entry here, then add pipeline config
 # in python/modl_worker/adapters/arch_config.py under the same arch_key.
-# Run `python scripts/validate-arch-sync.py` to verify sync.
+# Run `pytest` from `python/` to verify sync (see python/tests/test_arch_config.py).
 
 # ─── Flux 1 ──────────────────────────────────────────────────────────
 
