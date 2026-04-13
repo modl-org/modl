@@ -21,6 +21,7 @@ import { ModelPanel } from './ModelPanel'
 import { PromptPanel } from './PromptPanel'
 import { SamplingPanel } from './SamplingPanel'
 import { SizePanel } from './SizePanel'
+import { VideoPanel } from './VideoPanel'
 import { EditImagesPanel } from './EditImagesPanel'
 import { buildSendToEdit, findModelFamily, modelDefaults, type GenerateFormState, type GenerationMode } from './generate-state'
 import { useGenerateQueue } from './useGenerateQueue'
@@ -159,6 +160,12 @@ export function GenerateView() {
     [models, form.base_model_id],
   )
 
+  const isVideoModel = useMemo(() => {
+    if (!selectedModel) return false
+    const info = findModelFamily(selectedModel.name, families)
+    return info?.capabilities?.txt2vid || info?.capabilities?.img2vid || false
+  }, [selectedModel, families])
+
   const checkpointCount = useMemo(
     () => models.filter((m: InstalledModel) => m.model_type === 'checkpoint' || m.model_type === 'diffusion_model').length,
     [models],
@@ -277,6 +284,12 @@ export function GenerateView() {
                 <SizePanel form={form} setForm={setForm} />
                 <BatchPanel form={form} setForm={setForm} />
               </div>
+            </CollapsibleSection>
+          )}
+
+          {!isEditMode && isVideoModel && (
+            <CollapsibleSection title="Video" defaultOpen={true}>
+              <VideoPanel form={form} setForm={setForm} />
             </CollapsibleSection>
           )}
 

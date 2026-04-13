@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
-import { ArrowUpIcon, ChevronLeft, ChevronRight, EraserIcon, Info, LoaderCircleIcon, PencilIcon, Play, Trash2, X } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { ArrowUpIcon, ChevronLeft, ChevronRight, EraserIcon, Info, LoaderCircleIcon, Pause, PencilIcon, Play, Trash2, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import {
@@ -26,16 +26,25 @@ function val(value: unknown): string {
   return String(value)
 }
 
+function isVideoFile(path: string): boolean {
+  return path.endsWith('.mp4') || path.endsWith('.webm')
+}
+
 export function ImageDetail({ image, onClose, allImages, onNavigate, onToggleFavorite, onEditImage, onDeleteImage }: Props) {
   const { useAsRecipe } = useAppNav()
   const [upscaling, setUpscaling] = useState(false)
   const [removingBg, setRemovingBg] = useState(false)
   const [showPanel, setShowPanel] = useState(false)
   const [imageLoaded, setImageLoaded] = useState(false)
+  const [videoPlaying, setVideoPlaying] = useState(false)
+  const videoRef = useRef<HTMLVideoElement>(null)
+
+  const isVideo = image ? isVideoFile(image.path) : false
 
   // Reset load state when image changes
   useEffect(() => {
     setImageLoaded(false)
+    setVideoPlaying(false)
   }, [image?.path])
 
   const handleUpscale = useCallback(async () => {
@@ -113,6 +122,13 @@ export function ImageDetail({ image, onClose, allImages, onNavigate, onToggleFav
       } else if (e.key === 'i' || e.key === 'I') {
         e.preventDefault()
         setShowPanel((prev) => !prev)
+      } else if (e.key === ' ' && isVideo) {
+        e.preventDefault()
+        const v = videoRef.current
+        if (v) {
+          if (v.paused) { v.play().catch(() => {}); setVideoPlaying(true) }
+          else { v.pause(); setVideoPlaying(false) }
+        }
       } else if (e.key === 'Escape') {
         e.preventDefault()
         onClose()
@@ -120,7 +136,7 @@ export function ImageDetail({ image, onClose, allImages, onNavigate, onToggleFav
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [image, goPrev, goNext, onToggleFavorite, onDeleteImage, useAsRecipe, onEditImage, onClose])
+  }, [image, isVideo, goPrev, goNext, onToggleFavorite, onDeleteImage, useAsRecipe, onEditImage, onClose])
 
   const mColor = modelColor(image?.base_model_id)
 
@@ -151,22 +167,60 @@ export function ImageDetail({ image, onClose, allImages, onNavigate, onToggleFav
                 </button>
               ) : null}
 
-              {/* Loading spinner — visible while image loads */}
+              {/* Loading spinner — visible while media loads */}
               {!imageLoaded && (
                 <div className="absolute inset-0 z-10 flex items-center justify-center">
                   <LoaderCircleIcon className="size-6 animate-spin text-white/30" />
                 </div>
               )}
 
-              <img
-                key={image.path}
-                src={`/files/${image.path}`}
-                alt={image.filename}
-                onLoad={() => setImageLoaded(true)}
-                className={`max-h-[88vh] max-w-full rounded object-contain p-2 transition-opacity duration-200 ${
-                  imageLoaded ? 'opacity-100' : 'opacity-0'
-                }`}
-              />
+              {isVideo ? (
+                <div className="relative">
+                  <video
+                    ref={videoRef}
+                    key={image.path}
+                    src={`/files/${image.path}`}
+                    className={`max-h-[88vh] max-w-full rounded object-contain p-2 transition-opacity duration-200 ${
+                      imageLoaded ? 'opacity-100' : 'opacity-0'
+                    }`}
+                    loop
+                    playsInline
+                    onLoadedData={() => setImageLoaded(true)}
+                    onClick={() => {
+                      const v = videoRef.current
+                      if (v) {
+                        if (v.paused) { v.play().catch(() => {}); setVideoPlaying(true) }
+                        else { v.pause(); setVideoPlaying(false) }
+                      }
+                    }}
+                  />
+                  {/* Play/pause overlay */}
+                  {imageLoaded && !videoPlaying && (
+                    <button
+                      type="button"
+                      className="absolute inset-0 z-10 flex items-center justify-center"
+                      onClick={() => {
+                        const v = videoRef.current
+                        if (v) { v.play().catch(() => {}); setVideoPlaying(true) }
+                      }}
+                    >
+                      <div className="rounded-full bg-black/50 p-4 backdrop-blur transition-transform hover:scale-110">
+                        <Play className="size-8 text-white" fill="white" />
+                      </div>
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <img
+                  key={image.path}
+                  src={`/files/${image.path}`}
+                  alt={image.filename}
+                  onLoad={() => setImageLoaded(true)}
+                  className={`max-h-[88vh] max-w-full rounded object-contain p-2 transition-opacity duration-200 ${
+                    imageLoaded ? 'opacity-100' : 'opacity-0'
+                  }`}
+                />
+              )}
 
               {/* Top-right: close only */}
               <button
@@ -187,7 +241,7 @@ export function ImageDetail({ image, onClose, allImages, onNavigate, onToggleFav
 
               {/* Keyboard hints */}
               <div className="absolute top-3 left-3 z-20 rounded-full bg-black/30 px-2.5 py-1 text-[10px] text-white/20 backdrop-blur">
-                ← → F R E D I
+                {isVideo ? '← → ␣ F R D I' : '← → F R E D I'}
               </div>
 
               {/* ── Bottom toolbar — single control surface ──── */}
@@ -223,7 +277,26 @@ export function ImageDetail({ image, onClose, allImages, onNavigate, onToggleFav
                   <Play className="mr-1 size-3" />
                   Recipe
                 </Button>
-                {onEditImage && (
+                {isVideo && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 px-2.5 text-xs text-white/90 hover:bg-white/15 hover:text-white"
+                    onClick={() => {
+                      const v = videoRef.current
+                      if (v) {
+                        if (v.paused) { v.play().catch(() => {}); setVideoPlaying(true) }
+                        else { v.pause(); setVideoPlaying(false) }
+                      }
+                    }}
+                    title="Play/Pause (Space)"
+                  >
+                    {videoPlaying ? <Pause className="mr-1 size-3" /> : <Play className="mr-1 size-3" />}
+                    {videoPlaying ? 'Pause' : 'Play'}
+                  </Button>
+                )}
+                {!isVideo && onEditImage && (
                   <Button
                     type="button"
                     size="sm"
@@ -239,30 +312,34 @@ export function ImageDetail({ image, onClose, allImages, onNavigate, onToggleFav
                     Edit
                   </Button>
                 )}
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  className="h-7 px-2.5 text-xs text-white/90 hover:bg-white/15 hover:text-white"
-                  disabled={upscaling}
-                  onClick={handleUpscale}
-                  title="Upscale 4x"
-                >
-                  {upscaling ? <LoaderCircleIcon className="mr-1 size-3 animate-spin" /> : <ArrowUpIcon className="mr-1 size-3" />}
-                  4x
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  className="h-7 px-2.5 text-xs text-white/90 hover:bg-white/15 hover:text-white"
-                  disabled={removingBg}
-                  onClick={handleRemoveBg}
-                  title="Remove background"
-                >
-                  {removingBg ? <LoaderCircleIcon className="mr-1 size-3 animate-spin" /> : <EraserIcon className="mr-1 size-3" />}
-                  BG
-                </Button>
+                {!isVideo && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 px-2.5 text-xs text-white/90 hover:bg-white/15 hover:text-white"
+                    disabled={upscaling}
+                    onClick={handleUpscale}
+                    title="Upscale 4x"
+                  >
+                    {upscaling ? <LoaderCircleIcon className="mr-1 size-3 animate-spin" /> : <ArrowUpIcon className="mr-1 size-3" />}
+                    4x
+                  </Button>
+                )}
+                {!isVideo && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 px-2.5 text-xs text-white/90 hover:bg-white/15 hover:text-white"
+                    disabled={removingBg}
+                    onClick={handleRemoveBg}
+                    title="Remove background"
+                  >
+                    {removingBg ? <LoaderCircleIcon className="mr-1 size-3 animate-spin" /> : <EraserIcon className="mr-1 size-3" />}
+                    BG
+                  </Button>
+                )}
 
                 <div className="mx-0.5 h-4 w-px bg-white/15" />
 
@@ -387,6 +464,20 @@ export function ImageDetail({ image, onClose, allImages, onNavigate, onToggleFav
                             {image.width && image.height ? `${image.width}×${image.height}` : '—'}
                           </p>
                         </div>
+                        {image.num_frames && (
+                          <div>
+                            <p className="text-[10px] text-white/30">Frames</p>
+                            <p className="font-mono text-xs text-white/70">{image.num_frames}</p>
+                          </div>
+                        )}
+                        {image.fps && (
+                          <div>
+                            <p className="text-[10px] text-white/30">Duration</p>
+                            <p className="font-mono text-xs text-white/70">
+                              {image.num_frames ? `${(image.num_frames / image.fps).toFixed(1)}s @ ${image.fps}fps` : `${image.fps}fps`}
+                            </p>
+                          </div>
+                        )}
                       </div>
                     </div>
 

@@ -56,6 +56,9 @@ export type GeneratedImage = {
   size_bytes?: number
   generated_with?: string
   favorited?: boolean
+  kind?: string
+  num_frames?: number
+  fps?: number
 }
 
 export type GeneratedOutput = {
@@ -245,6 +248,8 @@ export type GenerateRequest = {
   mask?: string        // server-side path to mask image for inpainting
   strength?: number    // denoising strength (0.0-1.0)
   fast?: boolean       // use Lightning distillation LoRA
+  num_frames?: number  // video frames (video models only)
+  fps?: number         // video frame rate (video models only)
 }
 
 export type EditRequest = {
@@ -325,6 +330,8 @@ export type ModelCapabilities = {
   edit: boolean
   lora: boolean
   training: boolean
+  txt2vid: boolean
+  img2vid: boolean
 }
 
 export type ModelFamilyInfo = {
@@ -344,6 +351,8 @@ export type ModelFamilyInfo = {
   quality: number
   speed: number
   text_rendering: boolean
+  default_frames: number
+  default_fps: number
   description: string
 }
 

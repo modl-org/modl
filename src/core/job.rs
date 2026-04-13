@@ -414,6 +414,12 @@ pub struct GenerateParams {
     /// Inpainting method: "standard" (diffusers/Flux Fill) or "lanpaint" (training-free)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inpaint_method: Option<String>,
+    /// Number of video frames to generate (must be 8*N+1, e.g. 121 for ~5s at 24fps)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_frames: Option<u32>,
+    /// Video frame rate
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

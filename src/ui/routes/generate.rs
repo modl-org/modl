@@ -83,6 +83,12 @@ pub struct GenerateRequest {
     /// Use Lightning distillation LoRA for fast generation
     #[serde(default)]
     pub fast: bool,
+    /// Number of video frames (video models only)
+    #[serde(default)]
+    pub num_frames: Option<u32>,
+    /// Video frame rate (video models only)
+    #[serde(default)]
+    pub fps: Option<u32>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -250,6 +256,8 @@ async fn run_single_generate(sender: &broadcast::Sender<String>, req: GenerateRe
         style_strength: 0.6,
         style_type: None,
         fast: if req.fast { Some(4) } else { None },
+        frames: req.num_frames,
+        fps: req.fps,
         cloud: false,
         provider: None,
         no_worker: false,

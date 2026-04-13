@@ -24,26 +24,76 @@ CONFIGS_DIR = Path(__file__).parent.parent / "configs"
 # ---------------------------------------------------------------------------
 
 
+def _peek_safetensors_keys(filepath: str) -> list[str]:
+    """Read safetensors header to get key names without loading tensor data."""
+    import struct
+    with open(filepath, "rb") as f:
+        header_len = struct.unpack("<Q", f.read(8))[0]
+        header_json = f.read(header_len)
+    import json
+    header = json.loads(header_json)
+    return [k for k in header if k != "__metadata__"]
+
+
 def _ensure_hf_layout(safetensors_path: str, config_dir: Path) -> str:
     """Create a synthetic HF directory from a single safetensors file + config.
 
     Many model classes require ``from_pretrained(directory)`` but modl stores
     weights as single files. This creates a symlinked HF-style layout:
-        <parent>/hf_layout/model.safetensors → <safetensors_path>
-        <parent>/hf_layout/config.json       (copied from config_dir)
+        <parent>/hf_layout_<target-stem>/model.safetensors → <safetensors_path>
+        <parent>/hf_layout_<target-stem>/config.json       (copied from config_dir)
+
+    The layout dir is keyed by the target filename stem so multiple safetensors
+    files in the same parent dir get distinct layouts and never collide.
     """
     import shutil
 
-    hf_dir = Path(safetensors_path).parent / "hf_layout"
+    target = Path(safetensors_path)
+    hf_dir = target.parent / f"hf_layout_{target.stem}"
     hf_dir.mkdir(exist_ok=True)
     link = hf_dir / "model.safetensors"
+    # If the symlink exists but points somewhere else, recreate it.
+    if link.is_symlink() or link.exists():
+        try:
+            if link.resolve() != target.resolve():
+                link.unlink()
+        except Exception:
+            link.unlink()
     if not link.exists():
-        link.symlink_to(safetensors_path)
+        link.symlink_to(target)
     for cfg_file in config_dir.iterdir():
         dst = hf_dir / cfg_file.name
         if not dst.exists():
             shutil.copy2(str(cfg_file), str(dst))
     return str(hf_dir)
+
+
+def _dequant_comfy_scales(checkpoint: dict, target_dtype, emitter, label: str = ""):
+    """Dequantize ComfyUI FP4/FP8 weight tensors (weight * scale → target dtype).
+
+    Handles both weight_scale (fp8) and weight_scale_2 (fp4) formats.
+    Mutates the checkpoint dict in place: dequantized weights replace originals,
+    scale tensors are removed.
+    """
+    import torch
+
+    dequant_count = 0
+    for suffix in (".weight_scale", ".weight_scale_2"):
+        scale_keys = [k for k in checkpoint if k.endswith(suffix)]
+        for sk in scale_keys:
+            wk = sk.removesuffix(suffix.replace(".weight", "")).rsplit(".", 1)[0] + ".weight" if suffix == ".weight_scale_2" else sk.removesuffix("_scale")
+            if wk in checkpoint:
+                actual = checkpoint[wk].float() * checkpoint[sk].float()
+                checkpoint[wk] = actual.to(target_dtype)
+                dequant_count += 1
+
+    # Strip all scale/quant tensors
+    to_remove = [k for k in checkpoint if k.endswith("_scale") or k.endswith("_scale_2") or k.endswith(".input_scale")]
+    for k in to_remove:
+        del checkpoint[k]
+
+    if dequant_count:
+        emitter.info(f"  → Dequantized {dequant_count} quantized weights for {label}")
 
 
 def _resolve_pipeline_class(base_model_id: str) -> str:
@@ -670,6 +720,7 @@ def _load_gguf_pipeline(
     config_dir = CONFIGS_DIR / transformer_spec["config_dir"]
 
     from diffusers import GGUFQuantizationConfig
+    from accelerate import init_empty_weights
     emitter.info(f"Loading GGUF transformer: {filename}")
     transformer = TransformerClass.from_single_file(
         gguf_path,
@@ -716,18 +767,84 @@ def _load_gguf_pipeline(
         resolved_path = str(resolved_path)
         emitter.info(f"Loading {param_name}: {Path(resolved_path).name}")
 
+        # Detect ComfyUI NVFP4 quantized weights (e.g. Gemma 3 fp4 text encoder)
+        if resolved_path.endswith(".safetensors") and not os.path.isdir(resolved_path):
+            from .comfy_fp4 import is_comfy_nvfp4, cached_dequant_path, dequant_comfy_nvfp4_to_file
+            if is_comfy_nvfp4(resolved_path):
+                cache_path = cached_dequant_path(resolved_path)
+                if not cache_path.exists():
+                    emitter.info(
+                        f"  → ComfyUI NVFP4 detected, dequantizing to {cache_path.name} (one-time, ~1min)..."
+                    )
+                    dequant_comfy_nvfp4_to_file(
+                        resolved_path, str(cache_path), target_dtype=dtype,
+                        progress_callback=lambda done, total: emitter.info(
+                            f"  → Dequantizing: {done}/{total}"
+                        ) if done % 100 == 0 else None,
+                    )
+                    emitter.info(f"  → Cached dequantized weights to {cache_path.name}")
+                else:
+                    emitter.info(f"  → Using cached dequantized weights: {cache_path.name}")
+
+                # Load via standard from_pretrained using synthetic HF layout
+                hf_layout = _ensure_hf_layout(str(cache_path), config_dir)
+                components[param_name] = ModelClass.from_pretrained(
+                    hf_layout, torch_dtype=dtype, low_cpu_mem_usage=True,
+                )
+                emitter.info(f"  → {param_name} loaded from dequantized cache")
+                continue
+
         # Check if there's an HF layout directory (from prior assembly)
-        hf_dir = Path(resolved_path).parent / "hf_layout"
+        hf_layout_dir = Path(resolved_path).parent / "hf_layout"
+        quantize_nf4 = spec.get("quantize_nf4", False)
         use_hf_dir = spec.get("hf_dir", False) or os.path.isdir(resolved_path)
 
-        if hf_dir.exists() and not use_hf_dir:
+        if hf_layout_dir.exists() and not use_hf_dir:
             # Use existing HF layout if available (e.g. text encoder)
             use_hf_dir = True
-            resolved_path = str(hf_dir)
+            resolved_path = str(hf_layout_dir)
 
-        if use_hf_dir:
+        # Check if the weights file has ComfyUI FP4/FP8 scale keys —
+        # if so, dequantize manually rather than using from_pretrained
+        # which doesn't understand the custom quantization format.
+        is_comfy_quantized = False
+        raw_weights_path = resolved_path
+        if not os.path.isdir(resolved_path) and resolved_path.endswith(".safetensors"):
+            header = safetensors.torch.load_file(resolved_path, device="cpu")
+            scale_keys = [k for k in header if k.endswith(".weight_scale") or k.endswith(".weight_scale_2")]
+            if scale_keys:
+                is_comfy_quantized = True
+                emitter.info(f"  → ComfyUI quantized weights detected ({len(scale_keys)} scale keys)")
+
+        if is_comfy_quantized:
+            # Manual dequantization: load state dict, dequant scale keys, load into model
+            checkpoint = safetensors.torch.load_file(raw_weights_path, device="cpu")
+            _dequant_comfy_scales(checkpoint, dtype, emitter, param_name)
+            config_obj = ModelClass.config_class.from_pretrained(str(config_dir))
+            with init_empty_weights():
+                model = ModelClass(config_obj)
+            model.load_state_dict(checkpoint, strict=False, assign=True)
+            _materialize_meta_tensors(model)
+            model = model.to(dtype)
+            components[param_name] = model
+
+        elif use_hf_dir:
+            # If hf_dir is requested but path is a file, create synthetic HF layout
+            if not os.path.isdir(resolved_path):
+                resolved_path = _ensure_hf_layout(resolved_path, config_dir)
+
+            load_kwargs = {"torch_dtype": dtype}
+            if quantize_nf4:
+                try:
+                    from transformers import BitsAndBytesConfig
+                    load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                        load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                    )
+                    emitter.info(f"  → NF4 quantization for {param_name}")
+                except ImportError:
+                    emitter.info(f"  → bitsandbytes not available, loading {param_name} in bf16")
             components[param_name] = ModelClass.from_pretrained(
-                resolved_path, torch_dtype=dtype,
+                resolved_path, **load_kwargs,
             )
         elif hasattr(ModelClass, "from_single_file"):
             try:
@@ -746,8 +863,18 @@ def _load_gguf_pipeline(
             if not use_hf_dir and not os.path.isdir(resolved_path):
                 resolved_path = _ensure_hf_layout(resolved_path, config_dir)
 
+            load_kwargs = {"torch_dtype": dtype}
+            if quantize_nf4:
+                try:
+                    from transformers import BitsAndBytesConfig
+                    load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                        load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                    )
+                    emitter.info(f"  → NF4 quantization for {param_name}")
+                except ImportError:
+                    pass
             components[param_name] = ModelClass.from_pretrained(
-                resolved_path, torch_dtype=dtype,
+                resolved_path, **load_kwargs,
             )
 
     # 3. Assemble pipeline

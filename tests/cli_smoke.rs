@@ -105,6 +105,73 @@ fn generate_rejects_invalid_provider() {
 }
 
 // ---------------------------------------------------------------------------
+// Video generation flags
+// ---------------------------------------------------------------------------
+
+#[test]
+fn generate_accepts_frames_flag() {
+    // --frames should be accepted without clap error (will fail on missing model, not flag parse)
+    let result = modl_cmd()
+        .args([
+            "generate",
+            "a cat",
+            "--base",
+            "ltx-video-2-3",
+            "--frames",
+            "97",
+        ])
+        .assert();
+
+    let output = result.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("unexpected argument"),
+        "--frames should be accepted by generate"
+    );
+}
+
+#[test]
+fn generate_accepts_fps_flag() {
+    let result = modl_cmd()
+        .args([
+            "generate",
+            "a cat",
+            "--base",
+            "ltx-video-2-3",
+            "--fps",
+            "24",
+        ])
+        .assert();
+
+    let output = result.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("unexpected argument"),
+        "--fps should be accepted by generate"
+    );
+}
+
+#[test]
+fn generate_help_shows_video_flags() {
+    modl_cmd()
+        .args(["generate", "--help"])
+        .assert()
+        .success()
+        .stdout(contains("--frames"))
+        .stdout(contains("--fps"));
+}
+
+#[test]
+fn generate_frames_flag_requires_value() {
+    // --frames without value should fail
+    modl_cmd()
+        .args(["generate", "a cat", "--frames"])
+        .assert()
+        .failure()
+        .stderr(contains("a value is required"));
+}
+
+// ---------------------------------------------------------------------------
 // Aliases
 // ---------------------------------------------------------------------------
 

@@ -43,6 +43,8 @@ struct TomlModel {
     text_rendering: bool,
     defaults: TomlDefaults,
     #[serde(default)]
+    video_defaults: Option<TomlVideoDefaults>,
+    #[serde(default)]
     lightning: Option<TomlLightning>,
     #[serde(default)]
     controlnet: Option<TomlControlNet>,
@@ -55,6 +57,12 @@ struct TomlDefaults {
     steps: u32,
     guidance: f32,
     resolution: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct TomlVideoDefaults {
+    frames: u32,
+    fps: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,6 +121,8 @@ pub struct ModelInfo {
     pub quality: u8,
     pub speed: u8,
     pub text_rendering: bool,
+    pub default_frames: u32,
+    pub default_fps: u32,
     pub description: String,
 }
 
@@ -125,6 +135,8 @@ pub struct Capabilities {
     pub lora: bool,
     pub training: bool,
     pub lanpaint_inpaint: bool,
+    pub txt2vid: bool,
+    pub img2vid: bool,
 }
 
 impl Capabilities {
@@ -137,6 +149,8 @@ impl Capabilities {
             lora: caps.iter().any(|c| c == "lora"),
             training: caps.iter().any(|c| c == "training"),
             lanpaint_inpaint: caps.iter().any(|c| c == "lanpaint_inpaint"),
+            txt2vid: caps.iter().any(|c| c == "txt2vid"),
+            img2vid: caps.iter().any(|c| c == "img2vid"),
         }
     }
 }
@@ -259,6 +273,11 @@ fn build_parsed(root: TomlRoot) -> ParsedModels {
                 });
             }
 
+            let (default_frames, default_fps) = match &m.video_defaults {
+                Some(v) => (v.frames, v.fps),
+                None => (0, 0),
+            };
+
             models.push(ModelInfo {
                 id: model_id,
                 name: m.name,
@@ -276,6 +295,8 @@ fn build_parsed(root: TomlRoot) -> ParsedModels {
                 quality: m.quality,
                 speed: m.speed,
                 text_rendering: m.text_rendering,
+                default_frames,
+                default_fps,
                 description: m.description,
             });
         }
@@ -332,6 +353,14 @@ fn build_fuzzy_patterns(families: &[ModelFamily]) -> Vec<(Vec<String>, String)> 
         (&["flux.2"], "flux2-dev"),
         (&["flux-2"], "flux2-dev"),
         (&["flux"], "flux-dev"),
+        // LTX Video
+        (&["ltx", "2.3"], "ltx-video-2-3"),
+        (&["ltx", "2-3"], "ltx-video-2-3"),
+        (&["ltx", "video"], "ltx-video-2-3"),
+        (&["ltx", "dev"], "ltx-video-2-3"),
+        (&["ltx2"], "ltx-video-2-3"),
+        (&["ltx"], "ltx-video-2-3"),
+        // Stable Diffusion
         (&["sdxl"], "sdxl"),
         (&["xl"], "sdxl"),
         (&["sd-1.5"], "sd-1.5"),
@@ -463,6 +492,8 @@ pub fn models_with_capability(capability: &str) -> Vec<&'static ModelInfo> {
             "lora" => m.capabilities.lora,
             "training" => m.capabilities.training,
             "text_rendering" => m.text_rendering,
+            "txt2vid" => m.capabilities.txt2vid,
+            "img2vid" => m.capabilities.img2vid,
             _ => false,
         })
         .collect()
@@ -479,6 +510,8 @@ pub fn validate_mode(model_id: &str, mode: &str) -> Result<(), String> {
         "img2img" => info.capabilities.img2img,
         "inpaint" => info.capabilities.inpaint || info.capabilities.lanpaint_inpaint,
         "edit" => info.capabilities.edit,
+        "txt2vid" => info.capabilities.txt2vid,
+        "img2vid" => info.capabilities.img2vid,
         _ => return Ok(()),
     };
 
@@ -494,6 +527,8 @@ pub fn validate_mode(model_id: &str, mode: &str) -> Result<(), String> {
             "img2img" => m.capabilities.img2img,
             "inpaint" => m.capabilities.inpaint || m.capabilities.lanpaint_inpaint,
             "edit" => m.capabilities.edit,
+            "txt2vid" => m.capabilities.txt2vid,
+            "img2vid" => m.capabilities.img2vid,
             _ => false,
         })
         .map(|m| m.id.as_str())
@@ -576,4 +611,21 @@ pub fn validate_style_ref(model_id: &str) -> Result<(), String> {
         resolved.id,
         alternatives.join(", ")
     ))
+}
+
+/// Returns (default_frames, default_fps) for a video model, or None if not a video model.
+pub fn video_defaults(model_id: &str) -> Option<(u32, u32)> {
+    let info = resolve_model(model_id)?;
+    if info.capabilities.txt2vid || info.capabilities.img2vid {
+        Some((info.default_frames, info.default_fps))
+    } else {
+        None
+    }
+}
+
+/// Returns true if the model supports txt2vid or img2vid.
+pub fn is_video_model(model_id: &str) -> bool {
+    resolve_model(model_id)
+        .map(|m| m.capabilities.txt2vid || m.capabilities.img2vid)
+        .unwrap_or(false)
 }

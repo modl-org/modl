@@ -46,6 +46,11 @@ EDIT_MODELS=(
   flux2-klein-9b
 )
 
+# Video models (txt2vid)
+VIDEO_MODELS=(
+  ltx-video-dev
+)
+
 # Models that support --fast (Lightning LoRA)
 FAST_EDIT_MODELS=(
   qwen-image-edit-2511
@@ -127,11 +132,11 @@ img.save('$TEST_IMAGE')
 check_output_size() {
   local output="$1"
   local label="$2"
-  local img_path
-  img_path=$(echo "$output" | grep -oP '\S+\.png' | tail -1)
-  if [ -n "$img_path" ] && [ -f "$img_path" ]; then
+  local file_path
+  file_path=$(echo "$output" | grep -oP '\S+\.(png|mp4)' | tail -1)
+  if [ -n "$file_path" ] && [ -f "$file_path" ]; then
     local size
-    size=$(stat -c%s "$img_path" 2>/dev/null || echo 0)
+    size=$(stat -c%s "$file_path" 2>/dev/null || echo 0)
     if [ "$size" -lt "$MIN_OUTPUT_SIZE" ]; then
       echo -n "WARN ($(( size / 1024 ))KB) "
     fi
@@ -254,6 +259,39 @@ run_fast_edit_test() {
   fi
 }
 
+run_video_test() {
+  local model="$1"
+  local label="txt2vid/$model"
+
+  [[ -n "$FILTER" && "$model" != "$FILTER" ]] && return
+
+  if ! is_installed "$model"; then
+    echo "  SKIP  $label (not installed)"
+    SKIPPED=$((SKIPPED + 1))
+    return
+  fi
+
+  echo -n "  TEST  $label ... "
+  local output
+  # Use small frame count (25 = 8*3+1) for fast smoke test
+  if output=$($MODL generate "$GEN_PROMPT" \
+      --base "$model" \
+      --frames 25 \
+      --fps 24 \
+      --count 1 \
+      --seed 42 \
+      2>&1) && echo "$output" | grep -q "Generated"; then
+    check_output_size "$output" "$label"
+    echo "OK"
+    PASSED=$((PASSED + 1))
+  else
+    echo "FAIL"
+    echo "$output" | tail -3 | sed 's/^/        /'
+    FAILED=$((FAILED + 1))
+    FAILURES+=("$label")
+  fi
+}
+
 run_fast_gen_test() {
   local model="$1"
   local fast_steps="${2:-4}"
@@ -306,6 +344,12 @@ echo ""
 echo "--- txt2img --fast 8 (Lightning LoRA) ---"
 for model in "${FAST_GEN_MODELS[@]}"; do
   run_fast_gen_test "$model" 8
+done
+
+echo ""
+echo "--- txt2vid (25 frames) ---"
+for model in "${VIDEO_MODELS[@]}"; do
+  run_video_test "$model"
 done
 
 echo ""
