@@ -181,6 +181,90 @@ steps:
 - Bounds can't be checked at parse time because `count` / `seeds.len()`
   determines cardinality at execution time.
 
+## Validating before you run
+
+Every `modl run` invocation supports `--dry-run`, which parses the spec,
+validates the schema, resolves the model + LoRA locally, expands seeds, and
+prints the execution plan — without touching the GPU, the DB, or writing any
+files.
+
+```bash
+modl run book-chapter-3.yaml --dry-run
+```
+
+You'll see per-step resolved params (defaults merged, seeds expanded), the
+total number of planned artifacts, and either `✓ Workflow is valid` or a
+specific error pointing at the offending step.
+
+**Human mode** (default): exit code is `0` on success, nonzero on any
+validation failure. Shell-friendly: `modl run x.yaml --dry-run && modl run x.yaml`.
+
+**JSON mode** (`--dry-run --json`): exit code is **always 0** and validity
+is signalled by the top-level `"valid"` field. Agent-friendly — a
+workflow-writing agent can pipe through `jq` or a JSON parser without
+branching on exit codes.
+
+```bash
+modl run book-chapter-3.yaml --dry-run --json
+```
+
+```json
+{
+  "valid": true,
+  "workflow": { "name": "book-chapter-3", "model": "flux2-klein-4b", "lora": "my-son-v2" },
+  "total_planned_artifacts": 13,
+  "steps": [
+    {
+      "id": "scene-1",
+      "kind": "generate",
+      "prompt": "OHWX climbing a wooden ladder...",
+      "seeds": [10, 20, 30, 40],
+      "effective": { "width": 1024, "height": 1024, "steps": 4, "guidance": 1.0, "count": 1 },
+      "expected_artifacts": 4
+    }
+  ]
+}
+```
+
+On failure:
+
+```json
+{
+  "valid": false,
+  "error": {
+    "kind": "lora_not_found",
+    "message": "LoRA `my-son-v2` not found in local store",
+    "fix": "modl pull my-son-v2 or train it with `modl train`"
+  }
+}
+```
+
+### Error kinds (stable enum for agents)
+
+| Kind | What it means | Typical fix |
+|------|---------------|-------------|
+| `parse_error` | YAML doesn't parse or fails schema validation | Fix the YAML syntax / structure |
+| `model_not_installed` | Model declared in `model:` isn't pulled | `modl pull <model>` |
+| `lora_not_found` | LoRA declared in `lora:` isn't in the local store | `modl pull <lora>` or train it |
+| `other` | Anything else (network, IO, etc.) | Read the `message` |
+
+The `fix:` field is a human-readable suggestion — optional, present when modl
+knows a likely remediation. The `kind` values are stable; agents can depend
+on them.
+
+### Agent iteration loop
+
+Once `--dry-run --json` exists, an agent writing workflows has a complete
+tight loop:
+
+1. Agent writes `workflow.yaml` (one tool call)
+2. Agent runs `modl run workflow.yaml --dry-run --json` (~100ms)
+3. If `valid: true` → agent runs `modl run workflow.yaml` (executes on GPU)
+4. If `valid: false` → agent reads `error.kind`, fixes the YAML, back to step 2
+
+No GPU wasted on bad YAML. Agents can iterate 10 times before ever touching
+the runtime.
+
 ## Where outputs go
 
 Every artifact lands in `~/.modl/outputs/<YYYY-MM-DD>/`, flat. No per-workflow

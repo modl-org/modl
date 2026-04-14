@@ -1050,7 +1050,9 @@ EXAMPLE
         prompt: \"add heavy rain and puddles\"
         seed: 42
 
-Run with:  modl run book-chapter-3.yaml
+Run with:         modl run book-chapter-3.yaml
+Validate only:    modl run book-chapter-3.yaml --dry-run
+Agent JSON plan:  modl run book-chapter-3.yaml --dry-run --json
 
 See `modl/docs/guides/workflows.md` for the full reference.")]
     Run {
@@ -1059,6 +1061,15 @@ See `modl/docs/guides/workflows.md` for the full reference.")]
         /// Auto-pull missing models before running (not yet implemented)
         #[arg(long)]
         auto_pull: bool,
+        /// Validate the workflow and print the execution plan without running it.
+        /// Exits 0 if valid and ready to run, nonzero with an error otherwise.
+        /// Combine with --json for machine-readable output (agents).
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit machine-readable JSON instead of human-formatted output.
+        /// Only meaningful with --dry-run today; ignored otherwise.
+        #[arg(long)]
+        json: bool,
     },
 
     // ── Hidden ───────────────────────────────────────────────────────
@@ -1566,7 +1577,12 @@ pub async fn run(cli: Cli) -> Result<()> {
         },
 
         // ── Workflow ────────────────────────────────────────────────
-        Commands::Run { spec, auto_pull } => run::run(&spec, auto_pull).await,
+        Commands::Run {
+            spec,
+            auto_pull,
+            dry_run,
+            json,
+        } => run::run(&spec, auto_pull, dry_run, json).await,
 
         // ── Hidden ───────────────────────────────────────────────────
         Commands::Init { defaults, root } => init::run(defaults, root.as_deref()).await,
