@@ -29,6 +29,7 @@ mod popular;
 mod preprocess;
 mod push;
 mod remove_bg;
+mod run;
 mod runtime;
 mod score;
 mod search;
@@ -1016,10 +1017,46 @@ pub enum Commands {
 
     // ── Workflow ─────────────────────────────────────────────────────
     /// Execute a workflow from a YAML spec file
+    #[command(long_about = "\
+Execute a batch workflow of generate/edit steps from a YAML spec.
+
+A workflow declares a model, an optional LoRA, shared defaults, and an ordered \
+list of steps. Each step is a generate or edit job. Outputs of earlier steps \
+can be referenced by later steps via $step-id.outputs[N].
+
+All outputs land in ~/.modl/outputs/<date>/ alongside regular `modl generate` \
+results and are visible in `modl serve`. Each step is registered as a job \
+row tagged with the workflow name for later filtering.
+
+EXAMPLE
+
+    name: book-chapter-3
+    model: flux2-klein-4b
+    lora: my-son-v2
+
+    defaults:
+      width: 1024
+      height: 1024
+      steps: 4
+      guidance: 1.0
+
+    steps:
+      - id: scene-1
+        generate: \"OHWX reading a book under a tree\"
+        seeds: [42, 7, 99, 333]     # 4 variations for winner selection
+
+      - id: scene-1-rain
+        edit: \"$scene-1.outputs[0]\"  # reference first seed variation
+        prompt: \"add heavy rain and puddles\"
+        seed: 42
+
+Run with:  modl run book-chapter-3.yaml
+
+See `modl/docs/guides/workflows.md` for the full reference.")]
     Run {
         /// Workflow spec file (.yaml)
         spec: String,
-        /// Auto-pull missing models before running
+        /// Auto-pull missing models before running (not yet implemented)
         #[arg(long)]
         auto_pull: bool,
     },
@@ -1529,9 +1566,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         },
 
         // ── Workflow ────────────────────────────────────────────────
-        Commands::Run { spec, auto_pull: _ } => {
-            anyhow::bail!("modl run is not yet implemented (spec: {spec})")
-        }
+        Commands::Run { spec, auto_pull } => run::run(&spec, auto_pull).await,
 
         // ── Hidden ───────────────────────────────────────────────────
         Commands::Init { defaults, root } => init::run(defaults, root.as_deref()).await,
