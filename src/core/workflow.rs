@@ -38,6 +38,16 @@ pub enum StepKind {
 #[derive(Debug, Clone)]
 pub struct GenerateStep {
     pub prompt: String,
+    /// Per-step model override. If set, this step uses this model instead of
+    /// the workflow-level default. Only validated structurally at parse time —
+    /// existence in the local store is checked at plan-build time.
+    pub model: Option<String>,
+    /// Per-step LoRA override. Semantics when unset:
+    ///
+    /// - model not overridden → inherit workflow-level `lora`
+    /// - model overridden → no LoRA (auto-disabled; the workflow-level LoRA
+    ///   probably belongs to a different model family)
+    pub lora: Option<String>,
     pub seed: Option<u64>,
     /// Explicit seed list for variation exploration — one output per seed.
     /// Mutually exclusive with `seed` + `count`. Empty list is rejected at parse time.
@@ -53,6 +63,10 @@ pub struct GenerateStep {
 pub struct EditStep {
     pub source: ImageRef,
     pub prompt: String,
+    /// Per-step model override. See `GenerateStep::model`.
+    pub model: Option<String>,
+    /// Per-step LoRA override. See `GenerateStep::lora`.
+    pub lora: Option<String>,
     pub seed: Option<u64>,
     /// Explicit seed list for variation exploration — one output per seed.
     /// Mutually exclusive with `seed` + `count`. Empty list is rejected at parse time.
@@ -118,6 +132,10 @@ struct RawStep {
     edit: Option<String>,
     #[serde(default)]
     prompt: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    lora: Option<String>,
     #[serde(default)]
     seed: Option<u64>,
     #[serde(default)]
@@ -200,9 +218,29 @@ pub fn parse_str(yaml: &str, base_dir: &Path) -> Result<Workflow> {
         // --- seeds validation (shared between generate + edit kinds)
         validate_seeds(&raw_step.id, &raw_step.seeds, raw_step.seed, raw_step.count)?;
 
+        // --- per-step model/lora non-empty check (set but empty string is a user error)
+        if let Some(ref m) = raw_step.model
+            && m.trim().is_empty()
+        {
+            bail!(
+                "step `{}`: `model` is set but empty — remove the field or provide a model id",
+                raw_step.id
+            );
+        }
+        if let Some(ref l) = raw_step.lora
+            && l.trim().is_empty()
+        {
+            bail!(
+                "step `{}`: `lora` is set but empty — remove the field or provide a LoRA id",
+                raw_step.id
+            );
+        }
+
         let kind = if let Some(prompt) = &raw_step.generate {
             StepKind::Generate(GenerateStep {
                 prompt: prompt.clone(),
+                model: raw_step.model.clone(),
+                lora: raw_step.lora.clone(),
                 seed: raw_step.seed.or(raw.defaults.seed),
                 seeds: raw_step.seeds.clone(),
                 width: raw_step.width.or(raw.defaults.width),
@@ -223,6 +261,8 @@ pub fn parse_str(yaml: &str, base_dir: &Path) -> Result<Workflow> {
             StepKind::Edit(EditStep {
                 source,
                 prompt: edit_prompt.clone(),
+                model: raw_step.model.clone(),
+                lora: raw_step.lora.clone(),
                 seed: raw_step.seed.or(raw.defaults.seed),
                 seeds: raw_step.seeds.clone(),
                 width: raw_step.width.or(raw.defaults.width),
@@ -721,6 +761,105 @@ steps:
         match &wf.steps[0].kind {
             StepKind::Edit(e) => assert_eq!(e.seeds, Some(vec![1, 2, 3])),
             _ => panic!("expected edit"),
+        }
+    }
+
+    #[test]
+    fn per_step_model_parsed() {
+        let yaml = r#"
+name: test
+model: flux-dev
+steps:
+  - id: a
+    generate: "cat"
+  - id: b
+    model: qwen-image
+    generate: "dog"
+"#;
+        let wf = parse(yaml).unwrap();
+        match &wf.steps[0].kind {
+            StepKind::Generate(g) => assert_eq!(g.model, None),
+            _ => panic!("expected generate"),
+        }
+        match &wf.steps[1].kind {
+            StepKind::Generate(g) => assert_eq!(g.model.as_deref(), Some("qwen-image")),
+            _ => panic!("expected generate"),
+        }
+    }
+
+    #[test]
+    fn per_step_lora_parsed() {
+        let yaml = r#"
+name: test
+model: flux-dev
+lora: default-lora
+steps:
+  - id: a
+    generate: "cat"
+  - id: b
+    lora: override-lora
+    generate: "dog"
+"#;
+        let wf = parse(yaml).unwrap();
+        match &wf.steps[0].kind {
+            StepKind::Generate(g) => assert_eq!(g.lora, None),
+            _ => panic!(),
+        }
+        match &wf.steps[1].kind {
+            StepKind::Generate(g) => assert_eq!(g.lora.as_deref(), Some("override-lora")),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn empty_step_model_rejected() {
+        let yaml = r#"
+name: test
+model: flux-dev
+steps:
+  - id: a
+    model: ""
+    generate: "cat"
+"#;
+        let err = parse(yaml).unwrap_err().to_string();
+        assert!(err.contains("`model` is set but empty"), "got: {err}");
+    }
+
+    #[test]
+    fn empty_step_lora_rejected() {
+        let yaml = r#"
+name: test
+model: flux-dev
+steps:
+  - id: a
+    lora: ""
+    generate: "cat"
+"#;
+        let err = parse(yaml).unwrap_err().to_string();
+        assert!(err.contains("`lora` is set but empty"), "got: {err}");
+    }
+
+    #[test]
+    fn per_step_model_on_edit() {
+        let tmp = TempDir::new().unwrap();
+        let img = tmp.path().join("input.png");
+        std::fs::write(&img, b"fake").unwrap();
+        let yaml = r#"
+name: test
+model: flux-dev
+steps:
+  - id: a
+    model: qwen-image-edit-2511
+    edit: "input.png"
+    prompt: "add rain"
+"#;
+        let wf = parse_str(yaml, tmp.path()).unwrap();
+        match &wf.steps[0].kind {
+            StepKind::Edit(e) => {
+                assert_eq!(e.model.as_deref(), Some("qwen-image-edit-2511"));
+                assert_eq!(e.lora, None);
+            }
+            _ => panic!(),
         }
     }
 

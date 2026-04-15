@@ -37,14 +37,24 @@ use crate::core::{model_family, model_resolve, paths, registry, runtime};
 #[derive(Debug)]
 pub struct Plan {
     pub workflow: Workflow,
-    pub resolved_model_id: String,
-    pub base_model_path: String,
-    pub arch_key: Option<String>,
-    pub lora_ref: Option<LoraRef>,
+    /// Default model resolution from the workflow's top-level `model:`.
+    /// Individual steps may override via `PlannedStep::resolved_model`.
+    pub default_model: ResolvedModel,
+    /// Default LoRA resolution from the workflow's top-level `lora:`.
+    pub default_lora: Option<LoraRef>,
     pub run_id: String,
     pub output_dir: PathBuf,
     pub planned_steps: Vec<PlannedStep>,
     pub total_artifacts: usize,
+}
+
+/// Model fully resolved against the local store: canonical registry id,
+/// filesystem path to the weights directory, optional Python worker arch key.
+#[derive(Debug, Clone)]
+pub struct ResolvedModel {
+    pub id: String,
+    pub base_path: String,
+    pub arch_key: Option<String>,
 }
 
 #[derive(Debug)]
@@ -54,6 +64,17 @@ pub struct PlannedStep {
     #[allow(dead_code)]
     pub id: String,
     pub sub_jobs: Vec<(Option<u64>, u32)>,
+    /// Per-step effective model after override resolution. If the step
+    /// didn't override, this equals `Plan::default_model`.
+    pub resolved_model: ResolvedModel,
+    /// Per-step effective LoRA. `None` can mean either "inherited no lora"
+    /// or "auto-disabled because step overrides model". See the comment on
+    /// `build_plan` for the rules.
+    pub resolved_lora: Option<LoraRef>,
+    /// True when this step's effective model differs from `Plan::default_model`.
+    /// Used for display ("show the override in the plan print") and for
+    /// warm-worker accounting (model switches cost a reload).
+    pub model_overridden: bool,
 }
 
 impl PlannedStep {
@@ -159,27 +180,36 @@ fn run_dry_run(plan_result: Result<Plan, PlanError>, json: bool) -> Result<()> {
 // Used by both dry-run and normal execution.
 // ---------------------------------------------------------------------------
 
+/// Build the full execution plan for a workflow. Pure — no GPU work, no DB
+/// writes, no filesystem writes.
+///
+/// **Per-step model / LoRA resolution rules:**
+///
+/// 1. Workflow-level `model:` is always resolved to a `ResolvedModel`
+///    (`Plan::default_model`). This is the baseline.
+/// 2. Workflow-level `lora:` is always resolved if set (`Plan::default_lora`).
+/// 3. For each step:
+///    - If `step.model` is set, resolve it to its own `ResolvedModel` and
+///      flag `model_overridden = true`. Otherwise use `Plan::default_model`.
+///    - For LoRA:
+///      - If `step.lora` is set, resolve it and use it.
+///      - Else if `model_overridden`, use `None` (auto-disable — the
+///        workflow-level LoRA probably belongs to a different model).
+///      - Else inherit `Plan::default_lora`.
+///
+/// Auto-disabling LoRA on model override is a safe default, not a
+/// restriction: if the user wants to force a LoRA through anyway, they
+/// can set `lora:` explicitly on the step.
 pub fn build_plan(spec_path: &str, db: &Database) -> Result<Plan, PlanError> {
     // 1. Parse + validate YAML
     let wf = parse_file(Path::new(spec_path)).map_err(|e| PlanError::Parse(format!("{e:#}")))?;
 
-    // 2. Resolve model to canonical registry ID + local path
-    let resolved_model_id = resolve_registry_model_id(&wf.model);
-    let base_model_path = model_resolve::resolve_base_model_path(&resolved_model_id, db)
-        .ok_or_else(|| PlanError::ModelNotInstalled {
-            model: resolved_model_id.clone(),
-        })?;
-    let arch_key = model_family::find_model(&resolved_model_id).map(|m| m.arch_key.to_string());
+    // 2. Resolve workflow-level model (the default used by unoverridden steps)
+    let default_model = resolve_model(&wf.model, db)?;
 
-    // 3. Resolve LoRA if set
-    let lora_ref = match wf.lora.as_deref() {
-        Some(name) => Some(
-            model_resolve::resolve_lora(name, 1.0, db)
-                .map_err(|e| PlanError::Other(format!("LoRA resolution error: {e}")))?
-                .ok_or_else(|| PlanError::LoraNotFound {
-                    lora: name.to_string(),
-                })?,
-        ),
+    // 3. Resolve workflow-level LoRA if set
+    let default_lora = match wf.lora.as_deref() {
+        Some(name) => Some(resolve_lora(name, db)?),
         None => None,
     };
 
@@ -192,32 +222,108 @@ pub fn build_plan(spec_path: &str, db: &Database) -> Result<Plan, PlanError> {
         sanitize_for_path(&wf.name)
     );
 
-    // 5. Expand seeds per step + compute artifact totals
+    // 5. Per-step resolution: model override, lora override, seed expansion.
+    // We cache resolved models by ID so a workflow that uses the same model
+    // in N steps only does the DB lookup once.
+    let mut resolved_model_cache: std::collections::HashMap<String, ResolvedModel> =
+        std::collections::HashMap::new();
+    resolved_model_cache.insert(default_model.id.clone(), default_model.clone());
+
     let mut planned_steps = Vec::with_capacity(wf.steps.len());
     let mut total_artifacts = 0usize;
+
     for step in &wf.steps {
-        let sub_jobs = match &step.kind {
-            StepKind::Generate(g) => expand_seeds(g.seed, g.count, &g.seeds),
-            StepKind::Edit(e) => expand_seeds(e.seed, e.count, &e.seeds),
+        let (step_model_override, step_lora_override, sub_jobs) = match &step.kind {
+            StepKind::Generate(g) => (
+                g.model.clone(),
+                g.lora.clone(),
+                expand_seeds(g.seed, g.count, &g.seeds),
+            ),
+            StepKind::Edit(e) => (
+                e.model.clone(),
+                e.lora.clone(),
+                expand_seeds(e.seed, e.count, &e.seeds),
+            ),
         };
+
+        // Resolve effective model for this step
+        let (resolved_model, model_overridden) = match step_model_override {
+            Some(ref id) => {
+                let canonical = resolve_registry_model_id(id);
+                let resolved = if let Some(cached) = resolved_model_cache.get(&canonical) {
+                    cached.clone()
+                } else {
+                    let r = resolve_model(id, db)?;
+                    resolved_model_cache.insert(r.id.clone(), r.clone());
+                    r
+                };
+                let overridden = resolved.id != default_model.id;
+                (resolved, overridden)
+            }
+            None => (default_model.clone(), false),
+        };
+
+        // Resolve effective LoRA for this step
+        let resolved_lora = match step_lora_override {
+            Some(ref name) => Some(resolve_lora(name, db)?),
+            None => {
+                if model_overridden {
+                    // Auto-disable inherited LoRA on model override
+                    None
+                } else {
+                    default_lora.clone()
+                }
+            }
+        };
+
         total_artifacts += sub_jobs.iter().map(|(_, c)| *c as usize).sum::<usize>();
+
         planned_steps.push(PlannedStep {
             id: step.id.clone(),
             sub_jobs,
+            resolved_model,
+            resolved_lora,
+            model_overridden,
         });
     }
 
     Ok(Plan {
         workflow: wf,
-        resolved_model_id,
-        base_model_path,
-        arch_key,
-        lora_ref,
+        default_model,
+        default_lora,
         run_id,
         output_dir,
         planned_steps,
         total_artifacts,
     })
+}
+
+/// Resolve a model id to a `ResolvedModel` (canonical registry id + local
+/// path + arch key). Returns a `PlanError` if the model isn't installed
+/// locally.
+fn resolve_model(id: &str, db: &Database) -> Result<ResolvedModel, PlanError> {
+    let canonical = resolve_registry_model_id(id);
+    let base_path = model_resolve::resolve_base_model_path(&canonical, db).ok_or_else(|| {
+        PlanError::ModelNotInstalled {
+            model: canonical.clone(),
+        }
+    })?;
+    let arch_key = model_family::find_model(&canonical).map(|m| m.arch_key.to_string());
+    Ok(ResolvedModel {
+        id: canonical,
+        base_path,
+        arch_key,
+    })
+}
+
+/// Resolve a LoRA name to a `LoraRef`. Returns a `PlanError` if not in the
+/// local store.
+fn resolve_lora(name: &str, db: &Database) -> Result<LoraRef, PlanError> {
+    model_resolve::resolve_lora(name, 1.0, db)
+        .map_err(|e| PlanError::Other(format!("LoRA resolution error: {e}")))?
+        .ok_or_else(|| PlanError::LoraNotFound {
+            lora: name.to_string(),
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -239,6 +345,21 @@ pub async fn execute_plan(plan: Plan, db: &Database) -> Result<()> {
     if let Some(ref l) = wf.lora {
         println!("  LoRA:  {}", l);
     }
+    // Note if any step overrides the model — the warm worker won't be warm
+    // across those transitions.
+    let override_count = plan
+        .planned_steps
+        .iter()
+        .filter(|p| p.model_overridden)
+        .count();
+    if override_count > 0 {
+        println!(
+            "  {} {} step{} use a different model (worker reload per switch)",
+            style("ℹ").cyan(),
+            override_count,
+            if override_count == 1 { "" } else { "s" }
+        );
+    }
     std::fs::create_dir_all(&plan.output_dir)?;
     println!("  Output: {}", plan.output_dir.display());
     println!("  Run ID: {}\n", plan.run_id);
@@ -250,17 +371,29 @@ pub async fn execute_plan(plan: Plan, db: &Database) -> Result<()> {
     let total_steps = wf.steps.len();
 
     for (idx, (step, planned)) in wf.steps.iter().zip(plan.planned_steps.iter()).enumerate() {
+        let header_model_note = if planned.model_overridden {
+            format!(" [model={}]", planned.resolved_model.id)
+        } else {
+            String::new()
+        };
         println!(
-            "\n{} [{}/{}] {} ({})",
+            "\n{} [{}/{}] {} ({}){}",
             style("▸").cyan().bold(),
             idx + 1,
             total_steps,
             style(&step.id).bold(),
             step_kind_label(&step.kind),
+            style(header_model_note).dim(),
         );
 
         let step_labels = build_step_labels(&wf.name, &plan.run_id, &step.id);
         let sub_jobs = &planned.sub_jobs;
+        let resolved_model = &planned.resolved_model;
+        let resolved_lora = planned.resolved_lora.clone();
+        // Source key for `model_family::model_defaults` lookup: use the step's
+        // effective model, not the workflow default, so per-step overrides
+        // fall back to the right model-specific defaults.
+        let effective_model_key = resolved_model.id.as_str();
 
         let mut step_artifacts: Vec<PathBuf> = Vec::new();
 
@@ -279,11 +412,11 @@ pub async fn execute_plan(plan: Plan, db: &Database) -> Result<()> {
                         );
                     }
                     let spec = build_generate_spec(
-                        &wf.model,
-                        &plan.resolved_model_id,
-                        Some(plan.base_model_path.clone()),
-                        plan.arch_key.clone(),
-                        plan.lora_ref.clone(),
+                        effective_model_key,
+                        &resolved_model.id,
+                        Some(resolved_model.base_path.clone()),
+                        resolved_model.arch_key.clone(),
+                        resolved_lora.clone(),
                         g,
                         *seed,
                         *count,
@@ -309,11 +442,11 @@ pub async fn execute_plan(plan: Plan, db: &Database) -> Result<()> {
                         );
                     }
                     let spec = build_edit_spec(
-                        &wf.model,
-                        &plan.resolved_model_id,
-                        Some(plan.base_model_path.clone()),
-                        plan.arch_key.clone(),
-                        plan.lora_ref.clone(),
+                        effective_model_key,
+                        &resolved_model.id,
+                        Some(resolved_model.base_path.clone()),
+                        resolved_model.arch_key.clone(),
+                        resolved_lora.clone(),
                         e,
                         &source_path,
                         *seed,
@@ -367,12 +500,33 @@ fn print_plan_human(plan: &Plan) {
     println!("Workflow: {}", style(&wf.name).bold());
     println!(
         "  Model: {} ({})",
-        plan.resolved_model_id,
+        plan.default_model.id,
         style("installed ✓").green()
     );
-    if let Some(ref lora) = plan.lora_ref {
+    if let Some(ref lora) = plan.default_lora {
         println!("  LoRA:  {} ({})", lora.name, style("installed ✓").green());
     }
+
+    // Count + list unique per-step model overrides
+    let overrides: Vec<&str> = plan
+        .planned_steps
+        .iter()
+        .filter(|p| p.model_overridden)
+        .map(|p| p.resolved_model.id.as_str())
+        .collect();
+    if !overrides.is_empty() {
+        let mut unique: Vec<&str> = overrides.clone();
+        unique.sort();
+        unique.dedup();
+        println!(
+            "  {} {} step{} override the model: {}",
+            style("ℹ").cyan(),
+            overrides.len(),
+            if overrides.len() == 1 { "" } else { "s" },
+            unique.join(", ")
+        );
+    }
+
     println!(
         "  Total planned artifacts: {}",
         style(plan.total_artifacts.to_string()).bold()
@@ -382,7 +536,20 @@ fn print_plan_human(plan: &Plan) {
     for (i, (step, planned)) in wf.steps.iter().zip(plan.planned_steps.iter()).enumerate() {
         let kind_label = step_kind_label(&step.kind);
         let expected = planned.expected_artifacts();
-        let (default_steps, default_guidance) = model_family::model_defaults(&wf.model);
+        // Use the step's *effective* model for the defaults lookup, so per-step
+        // model overrides fall back to the overridden model's defaults.
+        let (default_steps, default_guidance) =
+            model_family::model_defaults(&planned.resolved_model.id);
+
+        let model_annotation = if planned.model_overridden {
+            format!(" [model={}]", planned.resolved_model.id)
+        } else {
+            String::new()
+        };
+        let lora_annotation = match &planned.resolved_lora {
+            Some(l) if planned.model_overridden => format!(" [lora={}]", l.name),
+            _ => String::new(),
+        };
 
         match &step.kind {
             StepKind::Generate(g) => {
@@ -398,7 +565,7 @@ fn print_plan_human(plan: &Plan) {
                     format!("count={}", g.count.unwrap_or(1))
                 };
                 println!(
-                    "  [{}] {:<12} {:<8} {}  {}×{}  {} steps  g={}",
+                    "  [{}] {:<12} {:<8} {}  {}×{}  {} steps  g={}{}{}",
                     i + 1,
                     style(&step.id).cyan(),
                     kind_label,
@@ -406,7 +573,9 @@ fn print_plan_human(plan: &Plan) {
                     width,
                     height,
                     steps,
-                    guidance
+                    guidance,
+                    style(&model_annotation).yellow(),
+                    style(&lora_annotation).magenta(),
                 );
                 println!("      {}", style(truncate(&g.prompt, 80)).italic());
             }
@@ -427,13 +596,15 @@ fn print_plan_human(plan: &Plan) {
                     format!("count={}", e.count.unwrap_or(1))
                 };
                 println!(
-                    "  [{}] {:<12} {:<8} {}  {} steps  g={}",
+                    "  [{}] {:<12} {:<8} {}  {} steps  g={}{}{}",
                     i + 1,
                     style(&step.id).cyan(),
                     kind_label,
                     seed_desc,
                     steps,
-                    guidance
+                    guidance,
+                    style(&model_annotation).yellow(),
+                    style(&lora_annotation).magenta(),
                 );
                 println!("      source: {}", source);
                 println!("      {}", style(truncate(&e.prompt, 80)).italic());
@@ -450,50 +621,71 @@ fn print_plan_human(plan: &Plan) {
 
 fn print_plan_json(plan: &Plan) -> Result<()> {
     let wf = &plan.workflow;
-    let (default_steps, default_guidance) = model_family::model_defaults(&wf.model);
 
     let steps: Vec<StepJson> = wf
         .steps
         .iter()
         .zip(plan.planned_steps.iter())
-        .map(|(step, planned)| match &step.kind {
-            StepKind::Generate(g) => StepJson {
-                id: step.id.clone(),
-                kind: "generate",
-                prompt: g.prompt.clone(),
-                source_ref: None,
-                seed: g.seed,
-                seeds: g.seeds.clone(),
-                effective: EffectiveJson {
-                    width: g.width.unwrap_or(1024),
-                    height: g.height.unwrap_or(1024),
-                    steps: g.steps.unwrap_or(default_steps),
-                    guidance: g.guidance.unwrap_or(default_guidance),
-                    count: g.count.unwrap_or(1),
+        .map(|(step, planned)| {
+            // Use the step's effective model for default lookups so per-step
+            // overrides see the right model-specific defaults.
+            let (default_steps, default_guidance) =
+                model_family::model_defaults(&planned.resolved_model.id);
+            let model_json = if planned.model_overridden {
+                Some(planned.resolved_model.id.clone())
+            } else {
+                None
+            };
+            let lora_json = if planned.model_overridden {
+                planned.resolved_lora.as_ref().map(|l| l.name.clone())
+            } else {
+                // Not overridden — omit from JSON (inherits workflow default)
+                None
+            };
+
+            match &step.kind {
+                StepKind::Generate(g) => StepJson {
+                    id: step.id.clone(),
+                    kind: "generate",
+                    prompt: g.prompt.clone(),
+                    source_ref: None,
+                    model: model_json,
+                    lora: lora_json,
+                    seed: g.seed,
+                    seeds: g.seeds.clone(),
+                    effective: EffectiveJson {
+                        width: g.width.unwrap_or(1024),
+                        height: g.height.unwrap_or(1024),
+                        steps: g.steps.unwrap_or(default_steps),
+                        guidance: g.guidance.unwrap_or(default_guidance),
+                        count: g.count.unwrap_or(1),
+                    },
+                    expected_artifacts: planned.expected_artifacts(),
                 },
-                expected_artifacts: planned.expected_artifacts(),
-            },
-            StepKind::Edit(e) => StepJson {
-                id: step.id.clone(),
-                kind: "edit",
-                prompt: e.prompt.clone(),
-                source_ref: Some(match &e.source {
-                    ImageRef::Local(p) => p.to_string_lossy().into_owned(),
-                    ImageRef::StepOutput { step_id, index } => {
-                        format!("${step_id}.outputs[{index}]")
-                    }
-                }),
-                seed: e.seed,
-                seeds: e.seeds.clone(),
-                effective: EffectiveJson {
-                    width: e.width.unwrap_or(0),
-                    height: e.height.unwrap_or(0),
-                    steps: e.steps.unwrap_or(default_steps),
-                    guidance: e.guidance.unwrap_or(default_guidance),
-                    count: e.count.unwrap_or(1),
+                StepKind::Edit(e) => StepJson {
+                    id: step.id.clone(),
+                    kind: "edit",
+                    prompt: e.prompt.clone(),
+                    source_ref: Some(match &e.source {
+                        ImageRef::Local(p) => p.to_string_lossy().into_owned(),
+                        ImageRef::StepOutput { step_id, index } => {
+                            format!("${step_id}.outputs[{index}]")
+                        }
+                    }),
+                    model: model_json,
+                    lora: lora_json,
+                    seed: e.seed,
+                    seeds: e.seeds.clone(),
+                    effective: EffectiveJson {
+                        width: e.width.unwrap_or(0),
+                        height: e.height.unwrap_or(0),
+                        steps: e.steps.unwrap_or(default_steps),
+                        guidance: e.guidance.unwrap_or(default_guidance),
+                        count: e.count.unwrap_or(1),
+                    },
+                    expected_artifacts: planned.expected_artifacts(),
                 },
-                expected_artifacts: planned.expected_artifacts(),
-            },
+            }
         })
         .collect();
 
@@ -501,8 +693,8 @@ fn print_plan_json(plan: &Plan) -> Result<()> {
         valid: true,
         workflow: WorkflowJson {
             name: wf.name.clone(),
-            model: plan.resolved_model_id.clone(),
-            lora: plan.lora_ref.as_ref().map(|l| l.name.clone()),
+            model: plan.default_model.id.clone(),
+            lora: plan.default_lora.as_ref().map(|l| l.name.clone()),
         },
         total_planned_artifacts: plan.total_artifacts,
         steps,
@@ -560,6 +752,14 @@ struct StepJson {
     prompt: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     source_ref: Option<String>,
+    /// Present only when the step overrides the workflow-level model.
+    /// Absent means "uses workflow default" (see `WorkflowJson::model`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    /// Present only when the step overrides the workflow-level LoRA
+    /// (explicit step-level lora on an overridden-model step).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lora: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     seed: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]

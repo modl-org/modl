@@ -314,8 +314,80 @@ The LoRA is resolved **once** at the start of the run. If it's not installed
 locally, the workflow fails immediately before any compute happens — you fix
 the problem and re-run, no wasted GPU time.
 
-Per-step LoRA override (different LoRAs for different steps) is not currently
-supported. If you need it, open an issue with the use case.
+## Multi-model workflows
+
+A single workflow can mix multiple models. Declare the primary model at the
+top level and override per step:
+
+```yaml
+name: book-scene-with-refine
+model: flux2-klein-4b       # default for every step
+lora: my-son-v2             # applies to steps that use the default model
+
+steps:
+  # Generate with Klein (uses workflow default model + lora)
+  - id: scene
+    generate: "OHWX reading under a tree, children's book style"
+    seeds: [10, 20, 30, 40]
+
+  # Refine with Qwen Image Edit (step-level model override)
+  - id: refine-winner
+    model: qwen-image-edit-2511   # override
+    edit: "$scene.outputs[0]"
+    prompt: "add soft morning light and a bird on a branch"
+    seed: 42
+```
+
+### Rules
+
+1. **Workflow-level `model:` is the default** for any step that doesn't set
+   its own.
+2. **Per-step `model:` overrides the default** for that step only.
+3. **LoRA auto-disable on model override:** if a step overrides `model:` and
+   doesn't explicitly set its own `lora:`, the workflow-level LoRA is
+   automatically dropped for that step. Rationale: a LoRA trained for Flux
+   won't work on Qwen, so inheriting it would silently break the step. If
+   you *do* want to force a LoRA through on an overridden-model step, set
+   `lora:` explicitly.
+4. **Each unique model is validated upfront** via `--dry-run`. An
+   uninstalled per-step model fails with `kind: model_not_installed` before
+   any GPU work.
+5. **Workers reload on model switches.** Consecutive same-model steps share
+   a warm worker. When the effective model changes step-to-step, Python
+   unloads the old model and loads the new one — same cost as a fresh
+   `modl generate` call. `modl run` shows this upfront via the
+   `ℹ N steps use a different model (worker reload per switch)` hint.
+
+### When to use per-step models
+
+Typical patterns:
+
+| Pipeline | Default model | Per-step override |
+|----------|---------------|-------------------|
+| Generate + Edit | Flux Dev / Klein (generate) | Qwen Image Edit for edit steps |
+| Character + fix | SDXL | Flux Fill on inpaint steps |
+| Scene + upscale | any | (coming: Real-ESRGAN — see Phase B.2) |
+| Concept + detail | SD 1.5 (rough) | Flux Dev (final) |
+
+If **every** step in your workflow needs the same model, don't use
+per-step overrides. Keep the top-level `model:` and you get the
+warm-worker benefit across every step.
+
+### Per-step LoRA override
+
+You can set `lora:` on an individual step, with or without a model override:
+
+```yaml
+steps:
+  - id: rough
+    generate: "..."                # uses workflow lora
+  - id: stylized
+    lora: watercolor-style         # step-level override, same workflow model
+    generate: "..."
+```
+
+Setting an empty string (`lora: ""`) is rejected at parse time — either
+omit the field or provide a valid LoRA id.
 
 ## Real example: KDP book chapter
 
@@ -424,8 +496,6 @@ open an issue before assuming something is coming.
   `docs/plans/workflow-run.md`.
 - **Upscale / analysis steps** — `upscale`, `face-restore`, `score`, etc. as
   first-class step kinds. Deferred to Phase B.2.
-- **Per-step LoRA or model override** — one workflow uses one model + one
-  LoRA for all steps. If this becomes a real blocker, we'll add it.
 - **Conditionals, variables, templating** — no `if:`, no `{{ }}`. If the spec
   can't be a flat ordered list, it's probably two workflows.
 - **Parallel step execution** — sequential only.
