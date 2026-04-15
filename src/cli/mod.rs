@@ -1070,6 +1070,13 @@ See `modl/docs/guides/workflows.md` for the full reference.")]
         /// Only meaningful with --dry-run today; ignored otherwise.
         #[arg(long)]
         json: bool,
+        /// Execute steps in YAML declaration order instead of the scheduler's
+        /// optimized order. Use when you need outputs in a specific sequence
+        /// for external tooling, or to debug scheduler behavior. Default is
+        /// optimized — the scheduler reorders independent steps to minimize
+        /// model reloads.
+        #[arg(long)]
+        in_order: bool,
     },
 
     // ── Hidden ───────────────────────────────────────────────────────
@@ -1582,7 +1589,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             auto_pull,
             dry_run,
             json,
-        } => run::run(&spec, auto_pull, dry_run, json).await,
+            in_order,
+        } => run::run(&spec, auto_pull, dry_run, json, in_order).await,
 
         // ── Hidden ───────────────────────────────────────────────────
         Commands::Init { defaults, root } => init::run(defaults, root.as_deref()).await,

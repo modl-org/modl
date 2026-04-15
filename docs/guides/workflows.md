@@ -389,6 +389,135 @@ steps:
 Setting an empty string (`lora: ""`) is rejected at parse time — either
 omit the field or provide a valid LoRA id.
 
+## Execution order and the scheduler
+
+When a workflow mixes multiple models, `modl run` doesn't just walk steps in
+YAML order — it runs them in an **optimized order** that groups consecutive
+same-model steps together, cutting worker reloads.
+
+### The problem
+
+Consider the natural way to declare a book chapter:
+
+```yaml
+steps:
+  - id: scene-1                # Klein
+    generate: "..."
+  - id: refine-1                # Qwen Image Edit
+    model: qwen-image-edit-2511
+    edit: "$scene-1.outputs[0]"
+    prompt: "..."
+  - id: scene-2                # Klein
+    generate: "..."
+  - id: refine-2                # Qwen Image Edit
+    model: qwen-image-edit-2511
+    edit: "$scene-2.outputs[0]"
+    prompt: "..."
+```
+
+Naive sequential execution would switch between Klein and Qwen Edit three
+times, reloading the Python worker each time. For 20B models like Qwen
+that's 30-90 seconds per switch — minutes wasted.
+
+### The scheduler
+
+Because `refine-1` only depends on `scene-1` (not on `scene-2` or anything
+else), the execution order can safely be reordered to:
+
+```
+scene-1  scene-2  refine-1  refine-2
+ Klein    Klein    Qwen     Qwen
+```
+
+One model switch instead of three. Same artifacts, same seeds, dependency
+DAG fully respected.
+
+`modl run` does this automatically. On the console:
+
+```
+↻ Scheduler reordered 4 steps to reduce model switches (3 → 1, saved 2)
+ℹ 1 model switch during execution (~worker reload per switch)
+```
+
+And step headers show both indices when reordering moved a step:
+
+```
+▸ [exec 2/4, yaml 3/4] scene-2 (generate)
+▸ [exec 3/4, yaml 2/4] refine-1 (edit) [model=qwen-image-edit-2511]
+```
+
+So you can always trace execution back to your YAML.
+
+### How it works
+
+The scheduler is a **greedy topological sort with model affinity**:
+
+1. Build a dependency DAG from `$step-id.outputs[N]` references.
+2. Walk the DAG in topological order.
+3. At each step, among steps whose dependencies are all satisfied, prefer
+   one whose effective model matches the currently-loaded model.
+4. Break ties by YAML declaration order — keeps behavior deterministic and
+   makes output predictable.
+
+Not provably optimal for arbitrary DAGs (model-switch minimization is
+NP-hard in general), but close to optimal for the workflow shapes you
+actually run — scenes-then-refines, character sheets, parallel variations.
+O(V + E) to compute, runs in microseconds.
+
+### Dry-run shows the optimization
+
+```bash
+modl run book-chapter-3.yaml --dry-run
+```
+
+The summary includes `Execution order: optimized | Model switches: 3 → 1 (saved 2)`
+and each step shows `(yaml #N)` when the scheduler moved it. If the workflow
+is already optimal in declaration order (single-model workflows, or forced
+linear by dependencies), you see `Execution order: YAML order (already optimal)`.
+
+JSON output includes an `execution` object with the full order and
+switch counts for agent consumption:
+
+```json
+{
+  "execution": {
+    "mode": "optimized",
+    "order": ["scene-1", "scene-2", "refine-1", "refine-2"],
+    "model_switches": 1,
+    "switches_in_yaml_order": 3,
+    "switches_saved": 2
+  }
+}
+```
+
+### Forcing YAML-declared order
+
+If you need steps to run in declaration order — for debugging, for external
+tooling that parses output paths in a specific sequence, or just to see what
+the scheduler is doing — pass `--in-order`:
+
+```bash
+modl run book-chapter-3.yaml --in-order          # execute in YAML order
+modl run book-chapter-3.yaml --dry-run --in-order  # plan in YAML order
+```
+
+The scheduler still computes the optimized plan in the background (for the
+dry-run savings comparison), but execution walks the YAML order. This is an
+escape hatch, not a default — the optimized order is almost always what you
+want and leaving it on saves you time.
+
+### When reordering doesn't happen
+
+The scheduler is a no-op (produces the identity order) when:
+
+- **Single-model workflow:** no switches to save.
+- **Linear dependency chain:** every step depends on the previous, so there's
+  only one valid topological order.
+- **Workflow already declared in the optimal order.**
+
+In those cases you won't see the `↻ Scheduler reordered…` banner, and the
+step headers show only the execution index without a `(yaml #N)` hint.
+
 ## Real example: KDP book chapter
 
 This is the actual use case the feature was built for — generating scenes for

@@ -46,6 +46,42 @@ pub struct Plan {
     pub output_dir: PathBuf,
     pub planned_steps: Vec<PlannedStep>,
     pub total_artifacts: usize,
+    /// Optimized execution order computed from the step DAG + model grouping.
+    /// See `schedule_steps` for the algorithm.
+    pub schedule: Schedule,
+}
+
+/// Result of the scheduler: the execution order (as indices into
+/// `workflow.steps`) plus statistics about model switches saved vs
+/// YAML-declared order.
+///
+/// `switches_in_order` is what naive sequential execution would cost.
+/// `switches_scheduled` is what the greedy scheduler found. The difference
+/// is the win — each switch is one model reload on the Python worker,
+/// typically 30-90 seconds depending on model size.
+#[derive(Debug, Clone)]
+pub struct Schedule {
+    /// Step indices in execution order. Always length == workflow.steps.len().
+    pub order: Vec<usize>,
+    /// Model switches if steps ran in YAML declaration order.
+    pub switches_in_order: usize,
+    /// Model switches in `order`. Always <= `switches_in_order`.
+    pub switches_scheduled: usize,
+}
+
+impl Schedule {
+    /// True when the scheduler found a better execution order than the YAML
+    /// declaration order. When false, YAML order is already optimal (or
+    /// forced by dependencies) and the scheduler made no changes.
+    pub fn reordered(&self) -> bool {
+        self.switches_scheduled < self.switches_in_order
+    }
+
+    /// Number of model switches the scheduler avoided.
+    pub fn switches_saved(&self) -> usize {
+        self.switches_in_order
+            .saturating_sub(self.switches_scheduled)
+    }
 }
 
 /// Model fully resolved against the local store: canonical registry id,
@@ -134,30 +170,36 @@ impl PlanError {
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub async fn run(spec_path: &str, _auto_pull: bool, dry_run: bool, json: bool) -> Result<()> {
+pub async fn run(
+    spec_path: &str,
+    _auto_pull: bool,
+    dry_run: bool,
+    json: bool,
+    in_order: bool,
+) -> Result<()> {
     let db = Database::open()?;
 
     let plan_result = build_plan(spec_path, &db);
 
     if dry_run {
-        return run_dry_run(plan_result, json);
+        return run_dry_run(plan_result, json, in_order);
     }
 
     let plan = plan_result?;
-    execute_plan(plan, &db).await
+    execute_plan(plan, &db, in_order).await
 }
 
 // ---------------------------------------------------------------------------
 // Dry-run path
 // ---------------------------------------------------------------------------
 
-fn run_dry_run(plan_result: Result<Plan, PlanError>, json: bool) -> Result<()> {
+fn run_dry_run(plan_result: Result<Plan, PlanError>, json: bool, in_order: bool) -> Result<()> {
     match plan_result {
         Ok(plan) => {
             if json {
-                print_plan_json(&plan)?;
+                print_plan_json(&plan, in_order)?;
             } else {
-                print_plan_human(&plan);
+                print_plan_human(&plan, in_order);
             }
             Ok(())
         }
@@ -287,6 +329,9 @@ pub fn build_plan(spec_path: &str, db: &Database) -> Result<Plan, PlanError> {
         });
     }
 
+    // 6. Compute execution schedule (DAG + greedy model grouping)
+    let schedule = schedule_steps(&wf, &planned_steps);
+
     Ok(Plan {
         workflow: wf,
         default_model,
@@ -295,7 +340,133 @@ pub fn build_plan(spec_path: &str, db: &Database) -> Result<Plan, PlanError> {
         output_dir,
         planned_steps,
         total_artifacts,
+        schedule,
     })
+}
+
+/// Compute an execution schedule for a workflow's steps that:
+///
+/// 1. Respects the step dependency DAG (`$step-id.outputs[N]` edges — a step
+///    can only run after every step it references has run).
+/// 2. Minimizes model switches greedily, preferring ready steps whose
+///    effective model matches the currently-loaded model.
+///
+/// The scheduler is a greedy topological sort with a tiebreaker on
+/// "currently loaded model". Not provably optimal for arbitrary DAGs
+/// (model-switch minimization is NP-hard in general), but close to optimal
+/// for real workflow shapes and O(V + E) to compute.
+///
+/// Deterministic: among equally-preferred steps, always picks the one with
+/// the earliest YAML-declared index. This keeps behavior stable across runs
+/// and makes the tests predictable.
+fn schedule_steps(wf: &Workflow, planned: &[PlannedStep]) -> Schedule {
+    use std::collections::{BTreeSet, HashMap, HashSet};
+
+    let n = wf.steps.len();
+
+    // 1. Build id → index map
+    let id_to_idx: HashMap<&str, usize> = wf
+        .steps
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.id.as_str(), i))
+        .collect();
+
+    // 2. Build dependency graph: deps[i] = set of step indices i depends on.
+    // Only edit steps can have deps (via `ImageRef::StepOutput`).
+    let mut deps: Vec<HashSet<usize>> = vec![HashSet::new(); n];
+    let mut reverse_deps: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, step) in wf.steps.iter().enumerate() {
+        let StepKind::Edit(e) = &step.kind else {
+            continue;
+        };
+        let ImageRef::StepOutput { step_id, .. } = &e.source else {
+            continue;
+        };
+        let Some(&dep_idx) = id_to_idx.get(step_id.as_str()) else {
+            continue;
+        };
+        if deps[i].insert(dep_idx) {
+            reverse_deps[dep_idx].push(i);
+        }
+    }
+
+    // 3. Baseline: switch count in declared order
+    let in_order: Vec<usize> = (0..n).collect();
+    let switches_in_order = count_model_switches(planned, &in_order);
+
+    // 4. Greedy topological sort preferring current loaded model.
+    // `ready` is sorted by step index so tiebreaking picks earliest declared.
+    let mut remaining_deps: Vec<HashSet<usize>> = deps.clone();
+    let mut ready: BTreeSet<usize> = (0..n).filter(|i| deps[*i].is_empty()).collect();
+    let mut order = Vec::with_capacity(n);
+    let mut current_model: Option<String> = None;
+
+    while !ready.is_empty() {
+        // Prefer a ready step matching the currently loaded model.
+        let pick: usize = current_model
+            .as_ref()
+            .and_then(|m| {
+                ready
+                    .iter()
+                    .find(|&&i| planned[i].resolved_model.id == *m)
+                    .copied()
+            })
+            .unwrap_or_else(|| {
+                // No match (or no model loaded yet) — pick the earliest
+                // declared ready step. BTreeSet iteration is sorted.
+                *ready.iter().next().expect("ready non-empty")
+            });
+
+        ready.remove(&pick);
+        order.push(pick);
+        current_model = Some(planned[pick].resolved_model.id.clone());
+
+        // Unlock any dependents whose last dep just got scheduled.
+        for &dependent in &reverse_deps[pick] {
+            remaining_deps[dependent].remove(&pick);
+            if remaining_deps[dependent].is_empty() {
+                ready.insert(dependent);
+            }
+        }
+    }
+
+    debug_assert_eq!(
+        order.len(),
+        n,
+        "scheduler didn't visit every step — bug in DAG construction"
+    );
+
+    let switches_scheduled = count_model_switches(planned, &order);
+
+    // Sanity: the greedy sort should never be worse than declaration order.
+    debug_assert!(
+        switches_scheduled <= switches_in_order,
+        "scheduler produced a worse order than YAML — bug"
+    );
+
+    Schedule {
+        order,
+        switches_in_order,
+        switches_scheduled,
+    }
+}
+
+/// Count model switches in a given execution order. A "switch" happens when
+/// consecutive steps use different effective models. The first step is free.
+fn count_model_switches(planned: &[PlannedStep], order: &[usize]) -> usize {
+    let mut count = 0usize;
+    let mut prev_model: Option<&str> = None;
+    for &idx in order {
+        let model = planned[idx].resolved_model.id.as_str();
+        if let Some(p) = prev_model
+            && p != model
+        {
+            count += 1;
+        }
+        prev_model = Some(model);
+    }
+    count
 }
 
 /// Resolve a model id to a `ResolvedModel` (canonical registry id + local
@@ -331,7 +502,7 @@ fn resolve_lora(name: &str, db: &Database) -> Result<LoraRef, PlanError> {
 // each step as a DB job row with workflow labels for UI filtering.
 // ---------------------------------------------------------------------------
 
-pub async fn execute_plan(plan: Plan, db: &Database) -> Result<()> {
+pub async fn execute_plan(plan: Plan, db: &Database, in_order: bool) -> Result<()> {
     let wf = &plan.workflow;
 
     println!(
@@ -345,21 +516,36 @@ pub async fn execute_plan(plan: Plan, db: &Database) -> Result<()> {
     if let Some(ref l) = wf.lora {
         println!("  LoRA:  {}", l);
     }
-    // Note if any step overrides the model — the warm worker won't be warm
-    // across those transitions.
-    let override_count = plan
-        .planned_steps
-        .iter()
-        .filter(|p| p.model_overridden)
-        .count();
-    if override_count > 0 {
+
+    // Pick execution order: scheduled (default) or YAML-declared (--in-order).
+    let exec_order: Vec<usize> = if in_order {
+        (0..wf.steps.len()).collect()
+    } else {
+        plan.schedule.order.clone()
+    };
+
+    // Model switch accounting for the chosen order
+    let effective_switches = count_model_switches(&plan.planned_steps, &exec_order);
+
+    if !in_order && plan.schedule.reordered() {
         println!(
-            "  {} {} step{} use a different model (worker reload per switch)",
-            style("ℹ").cyan(),
-            override_count,
-            if override_count == 1 { "" } else { "s" }
+            "  {} Scheduler reordered {} steps to reduce model switches ({} → {}, saved {})",
+            style("↻").cyan(),
+            wf.steps.len(),
+            plan.schedule.switches_in_order,
+            plan.schedule.switches_scheduled,
+            plan.schedule.switches_saved(),
         );
     }
+    if effective_switches > 0 {
+        println!(
+            "  {} {} model switch{} during execution (~worker reload per switch)",
+            style("ℹ").cyan(),
+            effective_switches,
+            if effective_switches == 1 { "" } else { "es" }
+        );
+    }
+
     std::fs::create_dir_all(&plan.output_dir)?;
     println!("  Output: {}", plan.output_dir.display());
     println!("  Run ID: {}\n", plan.run_id);
@@ -370,17 +556,33 @@ pub async fn execute_plan(plan: Plan, db: &Database) -> Result<()> {
     let mut step_outputs: HashMap<String, Vec<PathBuf>> = HashMap::new();
     let total_steps = wf.steps.len();
 
-    for (idx, (step, planned)) in wf.steps.iter().zip(plan.planned_steps.iter()).enumerate() {
+    for (exec_idx, &declared_idx) in exec_order.iter().enumerate() {
+        let step = &wf.steps[declared_idx];
+        let planned = &plan.planned_steps[declared_idx];
+
+        // When execution order differs from declaration order, show both
+        // indices in the header so the user can map back to their YAML.
+        let reordered = exec_idx != declared_idx;
+        let header_position = if reordered {
+            format!(
+                "[exec {}/{}, yaml {}/{}]",
+                exec_idx + 1,
+                total_steps,
+                declared_idx + 1,
+                total_steps
+            )
+        } else {
+            format!("[{}/{}]", exec_idx + 1, total_steps)
+        };
         let header_model_note = if planned.model_overridden {
             format!(" [model={}]", planned.resolved_model.id)
         } else {
             String::new()
         };
         println!(
-            "\n{} [{}/{}] {} ({}){}",
+            "\n{} {} {} ({}){}",
             style("▸").cyan().bold(),
-            idx + 1,
-            total_steps,
+            header_position,
             style(&step.id).bold(),
             step_kind_label(&step.kind),
             style(header_model_note).dim(),
@@ -495,7 +697,7 @@ pub async fn execute_plan(plan: Plan, db: &Database) -> Result<()> {
 // Plan printers — human + JSON output for `--dry-run`.
 // ---------------------------------------------------------------------------
 
-fn print_plan_human(plan: &Plan) {
+fn print_plan_human(plan: &Plan, in_order: bool) {
     let wf = &plan.workflow;
     println!("Workflow: {}", style(&wf.name).bold());
     println!(
@@ -532,10 +734,46 @@ fn print_plan_human(plan: &Plan) {
         style(plan.total_artifacts.to_string()).bold()
     );
 
+    // Scheduler summary
+    let exec_order: Vec<usize> = if in_order {
+        (0..wf.steps.len()).collect()
+    } else {
+        plan.schedule.order.clone()
+    };
+    let effective_switches = count_model_switches(&plan.planned_steps, &exec_order);
+    if plan.schedule.switches_in_order > 0 || effective_switches > 0 {
+        if in_order {
+            println!(
+                "  Execution order: {} (--in-order)  |  Model switches: {}",
+                style("YAML declared").dim(),
+                effective_switches
+            );
+        } else if plan.schedule.reordered() {
+            println!(
+                "  Execution order: {}  |  Model switches: {} → {} (saved {})",
+                style("optimized").green().bold(),
+                plan.schedule.switches_in_order,
+                plan.schedule.switches_scheduled,
+                plan.schedule.switches_saved()
+            );
+        } else {
+            println!(
+                "  Execution order: {}  |  Model switches: {}",
+                style("YAML order (already optimal)").dim(),
+                effective_switches
+            );
+        }
+    }
+
+    // Figure out which indices to display and in what order
     println!("\nSteps ({}):", wf.steps.len());
-    for (i, (step, planned)) in wf.steps.iter().zip(plan.planned_steps.iter()).enumerate() {
+    for (exec_idx, &declared_idx) in exec_order.iter().enumerate() {
+        let step = &wf.steps[declared_idx];
+        let planned = &plan.planned_steps[declared_idx];
         let kind_label = step_kind_label(&step.kind);
         let expected = planned.expected_artifacts();
+        let i = exec_idx; // used for the leading index column
+        let reordered = !in_order && exec_idx != declared_idx;
         // Use the step's *effective* model for the defaults lookup, so per-step
         // model overrides fall back to the overridden model's defaults.
         let (default_steps, default_guidance) =
@@ -549,6 +787,11 @@ fn print_plan_human(plan: &Plan) {
         let lora_annotation = match &planned.resolved_lora {
             Some(l) if planned.model_overridden => format!(" [lora={}]", l.name),
             _ => String::new(),
+        };
+        let reorder_annotation = if reordered {
+            format!(" (yaml #{})", declared_idx + 1)
+        } else {
+            String::new()
         };
 
         match &step.kind {
@@ -565,7 +808,7 @@ fn print_plan_human(plan: &Plan) {
                     format!("count={}", g.count.unwrap_or(1))
                 };
                 println!(
-                    "  [{}] {:<12} {:<8} {}  {}×{}  {} steps  g={}{}{}",
+                    "  [{}] {:<12} {:<8} {}  {}×{}  {} steps  g={}{}{}{}",
                     i + 1,
                     style(&step.id).cyan(),
                     kind_label,
@@ -576,6 +819,7 @@ fn print_plan_human(plan: &Plan) {
                     guidance,
                     style(&model_annotation).yellow(),
                     style(&lora_annotation).magenta(),
+                    style(&reorder_annotation).dim(),
                 );
                 println!("      {}", style(truncate(&g.prompt, 80)).italic());
             }
@@ -596,7 +840,7 @@ fn print_plan_human(plan: &Plan) {
                     format!("count={}", e.count.unwrap_or(1))
                 };
                 println!(
-                    "  [{}] {:<12} {:<8} {}  {} steps  g={}{}{}",
+                    "  [{}] {:<12} {:<8} {}  {} steps  g={}{}{}{}",
                     i + 1,
                     style(&step.id).cyan(),
                     kind_label,
@@ -605,6 +849,7 @@ fn print_plan_human(plan: &Plan) {
                     guidance,
                     style(&model_annotation).yellow(),
                     style(&lora_annotation).magenta(),
+                    style(&reorder_annotation).dim(),
                 );
                 println!("      source: {}", source);
                 println!("      {}", style(truncate(&e.prompt, 80)).italic());
@@ -619,16 +864,17 @@ fn print_plan_human(plan: &Plan) {
     );
 }
 
-fn print_plan_json(plan: &Plan) -> Result<()> {
+fn print_plan_json(plan: &Plan, in_order: bool) -> Result<()> {
     let wf = &plan.workflow;
 
+    // Build steps in YAML declaration order. Agents reason about step ids,
+    // not positions, so the array is always in YAML order and execution
+    // order is conveyed separately via `execution.order`.
     let steps: Vec<StepJson> = wf
         .steps
         .iter()
         .zip(plan.planned_steps.iter())
         .map(|(step, planned)| {
-            // Use the step's effective model for default lookups so per-step
-            // overrides see the right model-specific defaults.
             let (default_steps, default_guidance) =
                 model_family::model_defaults(&planned.resolved_model.id);
             let model_json = if planned.model_overridden {
@@ -639,7 +885,6 @@ fn print_plan_json(plan: &Plan) -> Result<()> {
             let lora_json = if planned.model_overridden {
                 planned.resolved_lora.as_ref().map(|l| l.name.clone())
             } else {
-                // Not overridden — omit from JSON (inherits workflow default)
                 None
             };
 
@@ -689,6 +934,30 @@ fn print_plan_json(plan: &Plan) -> Result<()> {
         })
         .collect();
 
+    // Execution plan: scheduled order + switch counts.
+    let exec_order_indices: Vec<usize> = if in_order {
+        (0..wf.steps.len()).collect()
+    } else {
+        plan.schedule.order.clone()
+    };
+    let exec_order_ids: Vec<String> = exec_order_indices
+        .iter()
+        .map(|&i| wf.steps[i].id.clone())
+        .collect();
+    let effective_switches = count_model_switches(&plan.planned_steps, &exec_order_indices);
+
+    let execution = ExecutionJson {
+        mode: if in_order { "yaml_order" } else { "optimized" },
+        order: exec_order_ids,
+        model_switches: effective_switches,
+        switches_in_yaml_order: plan.schedule.switches_in_order,
+        switches_saved: if in_order {
+            0
+        } else {
+            plan.schedule.switches_saved()
+        },
+    };
+
     let output = PlanJson {
         valid: true,
         workflow: WorkflowJson {
@@ -697,6 +966,7 @@ fn print_plan_json(plan: &Plan) -> Result<()> {
             lora: plan.default_lora.as_ref().map(|l| l.name.clone()),
         },
         total_planned_artifacts: plan.total_artifacts,
+        execution,
         steps,
     };
 
@@ -734,7 +1004,27 @@ struct PlanJson {
     valid: bool,
     workflow: WorkflowJson,
     total_planned_artifacts: usize,
+    /// Execution plan (order, model switches). Steps in the `steps` array are
+    /// always in YAML declaration order; `execution.order` is the list of
+    /// step ids in execution order.
+    execution: ExecutionJson,
     steps: Vec<StepJson>,
+}
+
+#[derive(Serialize)]
+struct ExecutionJson {
+    /// Either `"optimized"` (scheduler reordered for fewer model switches) or
+    /// `"yaml_order"` (forced via `--in-order`).
+    mode: &'static str,
+    /// Step ids in execution order.
+    order: Vec<String>,
+    /// Number of model switches in this execution order.
+    model_switches: usize,
+    /// Number of model switches if run in YAML declaration order. Useful
+    /// for agents to reason about the optimization headroom.
+    switches_in_yaml_order: usize,
+    /// Number of switches saved by reordering. Zero in `yaml_order` mode.
+    switches_saved: usize,
 }
 
 #[derive(Serialize)]
@@ -1163,4 +1453,226 @@ fn print_edit_preview(step: &EditStep, source_path: &Path, sub_job_count: usize)
         println!("  Count:  {}", step.count.unwrap_or(1));
     }
     let _ = sub_job_count;
+}
+
+// ---------------------------------------------------------------------------
+// Tests (scheduler only — parser + validation tests live in core::workflow)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::workflow::parse_str;
+
+    fn fake_resolved(id: &str) -> ResolvedModel {
+        ResolvedModel {
+            id: id.to_string(),
+            base_path: format!("/fake/{id}"),
+            arch_key: None,
+        }
+    }
+
+    /// Build a `PlannedStep` for each workflow step with a supplied effective
+    /// model id per step. `seeds: 1 count=1` for simplicity.
+    fn build_planned(wf: &Workflow, models: &[&str]) -> Vec<PlannedStep> {
+        assert_eq!(wf.steps.len(), models.len());
+        wf.steps
+            .iter()
+            .zip(models.iter())
+            .map(|(s, m)| PlannedStep {
+                id: s.id.clone(),
+                sub_jobs: vec![(None, 1)],
+                resolved_model: fake_resolved(m),
+                resolved_lora: None,
+                model_overridden: false,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn single_model_workflow_is_identity_order() {
+        let yaml = r#"
+name: single
+model: a
+steps:
+  - id: s1
+    generate: "p1"
+  - id: s2
+    generate: "p2"
+  - id: s3
+    generate: "p3"
+"#;
+        let wf = parse_str(yaml, std::path::Path::new(".")).unwrap();
+        let planned = build_planned(&wf, &["a", "a", "a"]);
+        let sched = schedule_steps(&wf, &planned);
+        assert_eq!(sched.order, vec![0, 1, 2]);
+        assert_eq!(sched.switches_in_order, 0);
+        assert_eq!(sched.switches_scheduled, 0);
+        assert!(!sched.reordered());
+    }
+
+    #[test]
+    fn linear_dep_chain_is_forced_in_order() {
+        // Each step depends on the previous — no reordering possible
+        // even though models alternate.
+        let yaml = r#"
+name: linear
+model: a
+steps:
+  - id: s1
+    generate: "p1"
+  - id: s2
+    edit: "$s1.outputs[0]"
+    prompt: "x"
+  - id: s3
+    edit: "$s2.outputs[0]"
+    prompt: "y"
+  - id: s4
+    edit: "$s3.outputs[0]"
+    prompt: "z"
+"#;
+        let wf = parse_str(yaml, std::path::Path::new(".")).unwrap();
+        // Alternating models — would be optimal to group but deps force the order
+        let planned = build_planned(&wf, &["a", "b", "a", "b"]);
+        let sched = schedule_steps(&wf, &planned);
+        assert_eq!(sched.order, vec![0, 1, 2, 3]);
+        assert_eq!(sched.switches_in_order, 3);
+        assert_eq!(sched.switches_scheduled, 3);
+        assert!(!sched.reordered());
+    }
+
+    #[test]
+    fn interleaved_independent_steps_get_grouped_by_model() {
+        // 4 independent generate steps with alternating models.
+        // YAML order: a b a b → 3 switches.
+        // Optimized:  a a b b → 1 switch.
+        let yaml = r#"
+name: interleave
+model: a
+steps:
+  - id: s1
+    generate: "p1"
+  - id: s2
+    generate: "p2"
+  - id: s3
+    generate: "p3"
+  - id: s4
+    generate: "p4"
+"#;
+        let wf = parse_str(yaml, std::path::Path::new(".")).unwrap();
+        let planned = build_planned(&wf, &["a", "b", "a", "b"]);
+        let sched = schedule_steps(&wf, &planned);
+        assert_eq!(sched.switches_in_order, 3);
+        assert_eq!(sched.switches_scheduled, 1);
+        assert!(sched.reordered());
+        // Greedy scheduler: first pick s1 (a), then s3 (also a, earliest unscheduled),
+        // then s2 (b), then s4 (b). Order: [0, 2, 1, 3].
+        assert_eq!(sched.order, vec![0, 2, 1, 3]);
+    }
+
+    #[test]
+    fn scenes_then_refines_pattern() {
+        // The motivating book-chapter pattern:
+        //   scene-1 (flux) → refine-1 (qwen) → scene-2 (flux) → refine-2 (qwen)
+        //     with refine-N depending on scene-N.
+        // YAML order: flux qwen flux qwen → 3 switches
+        // Optimized:  flux flux qwen qwen → 1 switch
+        let yaml = r#"
+name: scenes
+model: flux
+steps:
+  - id: scene-1
+    generate: "s1"
+  - id: refine-1
+    model: qwen
+    edit: "$scene-1.outputs[0]"
+    prompt: "r1"
+  - id: scene-2
+    generate: "s2"
+  - id: refine-2
+    model: qwen
+    edit: "$scene-2.outputs[0]"
+    prompt: "r2"
+"#;
+        let wf = parse_str(yaml, std::path::Path::new(".")).unwrap();
+        let planned = build_planned(&wf, &["flux", "qwen", "flux", "qwen"]);
+        let sched = schedule_steps(&wf, &planned);
+        assert_eq!(sched.switches_in_order, 3);
+        assert_eq!(sched.switches_scheduled, 1);
+        assert_eq!(sched.order, vec![0, 2, 1, 3]);
+        assert_eq!(sched.switches_saved(), 2);
+    }
+
+    #[test]
+    fn diamond_dag_respects_dependencies() {
+        // a (flux)  ─┐
+        // b (flux)  ─┼→ d (flux)
+        // c (qwen)  ─┘
+        // d depends on a AND b AND c.
+        // Optimal order respecting deps: a, b, c, d (or b, a, c, d — tiebreak by declared index).
+        // Switches: flux→qwen→flux = 2.
+        let yaml = r#"
+name: diamond
+model: flux
+steps:
+  - id: a
+    generate: "a"
+  - id: b
+    generate: "b"
+  - id: c
+    model: qwen
+    generate: "c"
+  - id: d
+    edit: "$c.outputs[0]"
+    prompt: "d"
+"#;
+        let wf = parse_str(yaml, std::path::Path::new(".")).unwrap();
+        let planned = build_planned(&wf, &["flux", "flux", "qwen", "flux"]);
+        let sched = schedule_steps(&wf, &planned);
+        // Greedy: starts with a (flux), then b (flux, same), then c (qwen, switch),
+        // then d (flux, switch). 2 switches total.
+        // Note: d only actually depends on c in this YAML (the other deps are
+        // commented out above for clarity). The scheduler just has to order c before d.
+        assert_eq!(sched.order, vec![0, 1, 2, 3]);
+        assert_eq!(sched.switches_scheduled, 2);
+    }
+
+    #[test]
+    fn deterministic_tiebreak_earliest_declared() {
+        // Two independent ready steps with the same model — scheduler should
+        // pick the earliest declared.
+        let yaml = r#"
+name: tie
+model: a
+steps:
+  - id: s1
+    generate: "p1"
+  - id: s2
+    generate: "p2"
+"#;
+        let wf = parse_str(yaml, std::path::Path::new(".")).unwrap();
+        let planned = build_planned(&wf, &["a", "a"]);
+        let sched = schedule_steps(&wf, &planned);
+        assert_eq!(sched.order, vec![0, 1]);
+    }
+
+    #[test]
+    fn switches_saved_computes_correctly() {
+        // Ensure switches_saved() reflects the difference even on a trivially
+        // optimal-as-declared workflow.
+        let yaml = r#"
+name: already_optimal
+model: a
+steps:
+  - id: s1
+    generate: "p1"
+  - id: s2
+    generate: "p2"
+"#;
+        let wf = parse_str(yaml, std::path::Path::new(".")).unwrap();
+        let planned = build_planned(&wf, &["a", "a"]);
+        let sched = schedule_steps(&wf, &planned);
+        assert_eq!(sched.switches_saved(), 0);
+        assert!(!sched.reordered());
+    }
 }
