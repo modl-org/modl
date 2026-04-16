@@ -508,6 +508,54 @@ ARCH_CONFIGS: dict[str, dict] = {
         "sample": {"sampler": "flowmatch", "steps": 50, "guidance": 4.0, "neg": ""},
         "inference": {"extra_call_kwargs": {"use_pe": True}},
     },
+    "ernie_image_turbo": {
+        "pipeline_class": "ErnieImagePipeline",
+        "gen_components": {
+            "transformer": {
+                "model_class": "ErnieImageTransformer2DModel",
+                "config_dir": "ernie-image-transformer",
+            },
+            "text_encoder": {
+                "model_id": "ernie-image-text-encoder",
+                "model_class": "Mistral3Model",
+                "config_dir": "ernie-image-text-encoder",
+            },
+            "tokenizer": {
+                "model_class": "AutoTokenizer",
+                "config_dir": "ernie-image-tokenizer",
+            },
+            "pe": {
+                "model_class": "Ministral3ForCausalLM",
+                "config_dir": "ernie-image-pe",
+            },
+            "pe_tokenizer": {
+                "model_class": "AutoTokenizer",
+                "config_dir": "ernie-image-pe-tokenizer",
+            },
+            "vae": {
+                "model_id": "ernie-image-vae",
+                "model_class": "AutoencoderKLFlux2",
+                "config_dir": "ernie-image-vae",
+            },
+            "scheduler": {
+                "model_class": "FlowMatchEulerDiscreteScheduler",
+                "config_dir": "ernie-image-scheduler",
+            },
+        },
+        "model_flags": {
+            "arch": "ernie_image",
+            "quantize": True,
+            "quantize_te": True,
+            "low_vram": True,
+        },
+        "noise_scheduler": "flowmatch",
+        "dtype": "bf16",
+        "train_text_encoder": False,
+        "resolutions": [768, 896, 1024, 1200, 1264, 1376],
+        "default_resolution": 1024,
+        "sample": {"sampler": "flowmatch", "steps": 8, "guidance": 1.0, "neg": ""},
+        "inference": {"extra_call_kwargs": {"use_pe": True}},
+    },
     "qwen_image": {
         "pipeline_class": "QwenImagePipeline",
         "gen_components": {
@@ -776,7 +824,7 @@ MODEL_REGISTRY: dict[str, tuple[str, str]] = {
     "flux2-klein-base-4b": ("flux2_klein_base", "black-forest-labs/FLUX.2-klein-base-4B"),
     "flux2-klein-base-9b": ("flux2_klein_base_9b", "black-forest-labs/FLUX.2-klein-base-9B"),
     "ernie-image":        ("ernie_image",  "baidu/ERNIE-Image"),
-    "ernie-image-turbo":  ("ernie_image",  "baidu/ERNIE-Image-Turbo"),
+    "ernie-image-turbo":  ("ernie_image_turbo",  "baidu/ERNIE-Image-Turbo"),
     "flux-dev":       ("flux",          "black-forest-labs/FLUX.1-dev"),
     "flux-schnell":   ("flux_schnell",  "black-forest-labs/FLUX.1-schnell"),
     "z-image-turbo":  ("zimage_turbo",  "Tongyi-MAI/Z-Image-Turbo"),
@@ -825,6 +873,8 @@ def detect_arch(base_model_id: str, arch_key: str | None = None) -> str:
             return "qwen_image_edit_2511"
         return "qwen_image_edit"
     if "ernie" in bid and "image" in bid:
+        if "turbo" in bid:
+            return "ernie_image_turbo"
         return "ernie_image"
     if "qwen-image" in bid or "qwen_image" in bid:
         return "qwen_image"

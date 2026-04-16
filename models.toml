@@ -253,7 +253,7 @@ defaults = { steps = 50, guidance = 4.0, resolution = 1024 }
 
 [families.ernie.models.ernie-image-turbo]
 name = "ERNIE-Image Turbo"
-arch_key = "ernie_image"
+arch_key = "ernie_image_turbo"
 description = "Distilled ERNIE-Image, 8 steps, fast and aesthetic"
 transformer_b = 8.0
 text_encoder = "Ministral 3B (Mistral3Model)"
