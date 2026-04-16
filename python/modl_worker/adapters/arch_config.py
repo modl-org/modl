@@ -539,7 +539,7 @@ ARCH_CONFIGS: dict[str, dict] = {
             },
             "scheduler": {
                 "model_class": "FlowMatchEulerDiscreteScheduler",
-                "config_dir": "ernie-image-scheduler",
+                "config_dir": "ernie-image-turbo-scheduler",
             },
         },
         "model_flags": {
