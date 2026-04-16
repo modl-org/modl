@@ -301,6 +301,9 @@ def run_generate_with_pipeline(
         elif neg:
             gen_kwargs["negative_prompt"] = neg
 
+    extra_call = inf_cfg.get("extra_call_kwargs", {})
+    gen_kwargs.update(extra_call)
+
     if mode == "txt2img":
         gen_kwargs["width"] = width
         gen_kwargs["height"] = height
