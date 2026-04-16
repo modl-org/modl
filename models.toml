@@ -228,6 +228,45 @@ default_strength = 0.6
 default_end = 0.8
 min_steps = 8
 
+# ─── ERNIE-Image ────────────────────────────────────────────────────
+
+[families.ernie]
+name = "ERNIE-Image"
+vendor = "Baidu"
+year = 2026
+
+[families.ernie.models.ernie-image]
+name = "ERNIE-Image"
+arch_key = "ernie_image"
+description = "8B DiT, strong text rendering and instruction following, 50 steps"
+transformer_b = 8.0
+text_encoder = "Ministral 3B (Mistral3Model)"
+text_encoder_b = 3.0
+total_b = 11.0
+vram_bf16 = 28
+vram_fp8 = 16
+capabilities = ["txt2img"]
+quality = 4
+speed = 2
+text_rendering = true
+defaults = { steps = 50, guidance = 4.0, resolution = 1024 }
+
+[families.ernie.models.ernie-image-turbo]
+name = "ERNIE-Image Turbo"
+arch_key = "ernie_image_turbo"
+description = "Distilled ERNIE-Image, 8 steps, fast and aesthetic"
+transformer_b = 8.0
+text_encoder = "Ministral 3B (Mistral3Model)"
+text_encoder_b = 3.0
+total_b = 11.0
+vram_bf16 = 28
+vram_fp8 = 16
+capabilities = ["txt2img"]
+quality = 4
+speed = 4
+text_rendering = true
+defaults = { steps = 8, guidance = 1.0, resolution = 1024 }
+
 # ─── Qwen Image (generation) ─────────────────────────────────────────
 
 [families.qwen_image]

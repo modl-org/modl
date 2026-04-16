@@ -514,13 +514,15 @@ fn write_profile_requirements_if_missing(root: &Path, profile: &str) -> Result<(
 
     let content = match profile {
         "trainer-cu124" => {
-            "# Additional trainer-cu124 requirements (base torch + ai-toolkit are installed by bootstrap logic)\naccelerate>=0.33\nsafetensors>=0.5\ntransformers>=4.51\ndiffusers>=0.37.0\npillow>=10.0\nspandrel>=0.4\ngguf>=0.10.0\n"
+            // TODO: pin diffusers to a stable version once ErnieImagePipeline ships in a release
+            "# Additional trainer-cu124 requirements (base torch + ai-toolkit are installed by bootstrap logic)\naccelerate>=0.33\nsafetensors>=0.5\ntransformers>=4.51\ndiffusers @ git+https://github.com/huggingface/diffusers.git@main\npillow>=10.0\nspandrel>=0.4\ngguf>=0.10.0\n"
         }
         "inference-cu124" => {
             "# Runtime profile requirements for inference-cu124\nspandrel>=0.4\ninsightface>=0.7\n"
         }
         "generator" => {
-            "# Lightweight generation profile (no ai-toolkit, MPS-compatible on macOS)\naccelerate>=0.33\nsafetensors>=0.5\ntransformers>=4.51\ndiffusers>=0.37.0\npillow>=10.0\nspandrel>=0.4\nsentencepiece>=0.2\nprotobuf>=5.0\ngguf>=0.10.0\n"
+            // TODO: pin diffusers to a stable version once ErnieImagePipeline ships in a release
+            "# Lightweight generation profile (no ai-toolkit, MPS-compatible on macOS)\naccelerate>=0.33\nsafetensors>=0.5\ntransformers>=4.51\ndiffusers @ git+https://github.com/huggingface/diffusers.git@main\npillow>=10.0\nspandrel>=0.4\nsentencepiece>=0.2\nprotobuf>=5.0\ngguf>=0.10.0\n"
         }
         _ => "# Runtime profile requirements\n\n",
     };

@@ -108,12 +108,14 @@ modl is a local-first CLI for AI image generation: pull models, generate images,
 **For quick iterations / drafts:**
 - `flux-schnell` — 4 steps, fast, good quality. The default.
 - `z-image-turbo` — 8 steps, good for stylized images.
+- `ernie-image-turbo` — 8 steps, best for structured layouts and text-heavy images.
 
 **For high quality finals:**
 - `flux-dev` — 28 steps, excellent quality, most LoRA support.
 - `z-image` — 20 steps, strong on realistic/artistic styles.
 - `chroma` — 40 steps, Apache 2.0 Flux fork, supports negative prompts.
 - `qwen-image` — 25 steps, best text rendering in images.
+- `ernie-image` — 50 steps, best for complex structured content (posters, infographics, multi-panel, character sheets). Needs long, detailed prompts.
 
 **For editing (instruction-based):**
 - `qwen-image-edit` — Best edit quality, 50 steps, needs 30GB+ VRAM.
@@ -148,6 +150,8 @@ modl is a local-first CLI for AI image generation: pull models, generate images,
 | z-image-turbo | 8 | 0.0 | 14 GB | Y | Y | Y | | Y |
 | qwen-image | 25 | 3.0 | 30 GB | Y | | | | Y |
 | qwen-image-edit | 50 | 4.0 | 30 GB | | | | Y | |
+| ernie-image | 50 | 4.0 | 14 GB | Y | Y | Y | | |
+| ernie-image-turbo | 8 | 1.0 | 14 GB | Y | Y | Y | | |
 | sdxl | 30 | 7.5 | 5 GB | Y | Y | Y | | Y |
 | sd-1.5 | 30 | 7.5 | 3 GB | Y | Y | Y | | Y |
 
@@ -163,6 +167,45 @@ Default steps and guidance are shown — override with `--steps` and `--guidance
 | `4:3` | 1152x896 |
 | `3:4` | 896x1152 |
 | Custom | `WxH` (e.g. `1920x1080`) |
+
+### ERNIE Image Prompting Guide
+
+ERNIE-Image (`ernie-image`, `ernie-image-turbo`) is an 8B DiT model from Baidu. #1 open-weights model on GenEval, #2 on LongTextBench. Requires a different prompting style than Flux or Z-Image — long, structured prompts (200-600 words) produce dramatically better results than short ones.
+
+**When to choose ERNIE over other models:**
+- Infographics, flowcharts, posters with embedded readable text
+- Multi-panel compositions (sticker sheets, expression grids, contact sheets, triptychs)
+- Character design sheets with annotated callouts and color palettes
+- Anime storyboards and manga pages with panel organization
+- Technical diagrams with leader lines and dimension annotations
+- Images requiring accurate text rendering (titles, labels, hex codes)
+- Structured recipe cards, tutorials, step-by-step visual guides
+
+**When NOT to use ERNIE:**
+- Quick single-image generations with short prompts (use flux-schnell or z-image-turbo)
+- LoRA-based character consistency (no LoRA ecosystem yet)
+- Speed-critical workflows (50 steps base, 8 turbo)
+
+**ERNIE prompting rules (critical — these differ from other models):**
+
+1. **Write long, structured prompts.** ERNIE thrives on 200-600 word prompts that read like detailed art direction briefs. Short prompts produce mediocre results. Describe composition, spatial layout, materials, lighting, and typography explicitly.
+
+2. **Specify spatial layout explicitly.** Use phrases like "upper-left corner contains X", "the lower-center shows Y", "right side features Z". ERNIE places elements where told.
+
+3. **Embed exact text strings in quotes.** For text rendering, include literal strings: `reading 'CAFE & ROASTERY'`, `with the title 'ECO-CITY HORIZON'`, `labeled '#C84B31'`. ERNIE renders quoted text faithfully.
+
+4. **Use specific technique vocabulary.** Not "anime style" but "high-quality cel-shading flat coloring with clean outlines and crisp shadow boundaries." Not "old painting" but "gongbi brushwork with iron-wire line drawing (tiexianmiao)."
+
+5. **Use camera/lens language as precise instructions.** "85mm lens", "f/2.8 macro", "tilt-shift", "direct frontal flash" — ERNIE treats these as structural directives, not vibes.
+
+6. **State exclusions explicitly.** "No gradients, no 3D effects, no atmospheric perspective" — ERNIE respects negative constraints better than most models.
+
+7. **Describe each panel/section for multi-panel work.** For sticker sheets, expression grids, or multi-panel compositions, describe every panel individually: "First sticker: character waves hello with text 'Hi!' beside her. Second sticker: character sits crying with text 'Uwaaa'."
+
+**Example — ERNIE-style prompt for a character expression sheet:**
+```
+modl generate "An illustration presenting a collection of 8 expression stickers arranged in a 2-row by 4-column grid layout. The background is light yellow. The protagonist of all stickers is the same chibi-style girl with pink twin-tail hair, large emerald-green eyes, light blue sailor uniform with a red bow. Each sticker has a thick white outline and faint gray drop shadow. First row from left to right: (1) bright smile with eyes closed, waving, yellow stars around head, pink text 'Hi!'; (2) sitting on ground crying, fists rubbing eyes, blue text 'Uwaaa'; (3) arms crossed, cheeks puffed in anger, red vein mark, red text 'Hmph!'; (4) heart gesture with both hands, blushing, pink hearts floating, text 'Love'. Second row: (5) shocked expression, white dot eyes, hands clutching head, yellow lightning bolts, text 'What?!'; (6) winking, thumbs up, green text 'Good!'; (7) lying face down sleeping, sleep bubble with 'Zzz'; (8) chin on hand thinking, furrowed brows, black question mark above head. Bright saturated colors, cute art style, smooth rounded linework, flat coloring, even lighting." --base ernie-image-turbo --size 16:9
+```
 
 ## Command Reference
 

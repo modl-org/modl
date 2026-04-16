@@ -671,13 +671,30 @@ def _load_gguf_pipeline(
 
     from diffusers import GGUFQuantizationConfig
     emitter.info(f"Loading GGUF transformer: {filename}")
-    transformer = TransformerClass.from_single_file(
-        gguf_path,
-        quantization_config=GGUFQuantizationConfig(compute_dtype=dtype),
-        config=str(config_dir),
-        torch_dtype=dtype,
-    )
-    emitter.info(f"  → GGUF transformer loaded")
+
+    if hasattr(TransformerClass, "from_single_file"):
+        transformer = TransformerClass.from_single_file(
+            gguf_path,
+            quantization_config=GGUFQuantizationConfig(compute_dtype=dtype),
+            config=str(config_dir),
+            torch_dtype=dtype,
+        )
+        emitter.info(f"  → GGUF transformer loaded via from_single_file")
+    else:
+        # Fallback for models that lack FromSingleFileMixin (e.g. ErnieImage):
+        # use Pipeline.from_pretrained with transformer_gguf_file kwarg.
+        hf_repo = resolve_model_path(base_model_id)
+        emitter.info(f"  → Using pipeline-level GGUF loading from {hf_repo}")
+        quantization_config = GGUFQuantizationConfig(compute_dtype=dtype)
+        pipe = PipelineClass.from_pretrained(
+            hf_repo,
+            transformer_gguf_file=gguf_path,
+            transformer_quantization_config=quantization_config,
+            torch_dtype=dtype,
+        )
+        from modl_worker.device import move_pipe_to_device
+        move_pipe_to_device(pipe)
+        return pipe
 
     # 2. Load remaining components from local configs/weights
     components = {"transformer": transformer}
