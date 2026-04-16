@@ -22,7 +22,7 @@ pub async fn run(type_filter: Option<AssetType>, for_model: Option<&str>) -> Res
     }
 
     // Sort by downloads (descending)
-    items.sort_by(|a, b| b.downloads.unwrap_or(0).cmp(&a.downloads.unwrap_or(0)));
+    items.sort_by_key(|b| std::cmp::Reverse(b.downloads.unwrap_or(0)));
 
     // Take top 20
     items.truncate(20);

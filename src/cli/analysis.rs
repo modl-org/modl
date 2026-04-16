@@ -201,13 +201,12 @@ pub async fn spawn_analysis_worker(
             EventPayload::Result { data, .. } => {
                 result_data = Some(data);
             }
-            EventPayload::Log { message, .. } => {
+            EventPayload::Log { message, .. }
                 if message.contains("Loading")
                     || message.contains("loaded")
-                    || message.contains("Downloading")
-                {
-                    pb.set_message(message);
-                }
+                    || message.contains("Downloading") =>
+            {
+                pb.set_message(message);
             }
             EventPayload::Warning { message, .. } => {
                 pb.println(format!("  {} {}", style("⚠").yellow(), message));
