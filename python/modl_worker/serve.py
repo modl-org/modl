@@ -177,6 +177,11 @@ class ModelCache:
             if len(self._cache) >= self._max_models:
                 self._evict_lru(emitter)
 
+            # VRAM-aware eviction: loading a fresh model while a large one is
+            # already resident OOMs even within the max_models count limit.
+            # Evict LRU models until there's headroom before attempting load.
+            self._ensure_vram_headroom(emitter)
+
             # Load fresh pipeline
             emitter.info(f"Model cache MISS: loading {base_model_id}...")
             cls_name = _resolve_pipeline_class(base_model_id)
@@ -187,7 +192,9 @@ class ModelCache:
             is_native_inpaint = "Fill" in cls_name
 
             if is_native_inpaint:
-                pipe = load_pipeline(base_model_id, base_model_path, cls_name, emitter)
+                pipe = self._load_with_oom_recovery(
+                    base_model_id, base_model_path, cls_name, emitter
+                )
                 now = time.time()
                 cached = CachedPipeline(
                     pipeline=pipe,
@@ -201,7 +208,9 @@ class ModelCache:
                 return pipe, cls_name
 
             # Standard model: load txt2img base first, then switch if needed
-            pipe = load_pipeline(base_model_id, base_model_path, cls_name, emitter)
+            pipe = self._load_with_oom_recovery(
+                base_model_id, base_model_path, cls_name, emitter
+            )
             now = time.time()
 
             cached = CachedPipeline(
@@ -342,6 +351,84 @@ class ModelCache:
         del self._cache[lru_key]
         gc.collect()
         torch.cuda.empty_cache()
+
+    # Minimum free VRAM (MB) we want before attempting to load a new model.
+    # Diffusion pipelines need a few GB of headroom for activations on top
+    # of weights; 4 GB covers small/quantized models. Bigger models still
+    # get a second chance via _load_with_oom_recovery.
+    _VRAM_HEADROOM_MB = 4096
+
+    def _free_vram_mb(self) -> int | None:
+        """Return currently free VRAM in MB, or None when unprobeable
+        (CPU-only host, CUDA driver missing, nvml failure). None disables
+        the pre-flight check so CPU/MPS paths still work."""
+        try:
+            import torch
+            if not torch.cuda.is_available():
+                return None
+            free, _total = torch.cuda.mem_get_info()
+            return int(free // (1024 * 1024))
+        except Exception:
+            return None
+
+    def _ensure_vram_headroom(self, emitter: EventEmitter) -> None:
+        """Evict LRU diffusion models until free VRAM >= headroom or cache empty.
+
+        Called before loading a fresh pipeline so a big model sitting in
+        VRAM doesn't cause the new load to OOM inside diffusers (where the
+        error is harder to recover from cleanly)."""
+        free_mb = self._free_vram_mb()
+        if free_mb is None:
+            return
+        while self._cache and free_mb < self._VRAM_HEADROOM_MB:
+            emitter.info(
+                f"Low VRAM ({free_mb} MB free, need {self._VRAM_HEADROOM_MB} MB) — evicting LRU"
+            )
+            self._evict_lru(emitter)
+            free_mb = self._free_vram_mb()
+            if free_mb is None:
+                return
+
+    def _load_with_oom_recovery(
+        self,
+        base_model_id: str,
+        base_model_path: Any,
+        cls_name: str,
+        emitter: EventEmitter,
+    ) -> Any:
+        """Load a pipeline; on CUDA OOM, evict everything and retry once.
+
+        Covers the case where _ensure_vram_headroom's static threshold
+        wasn't enough for a particularly large model, by falling back to
+        a cold cache before giving up."""
+        import gc
+        import torch
+        from modl_worker.adapters.pipeline_loader import load_pipeline
+
+        try:
+            return load_pipeline(base_model_id, base_model_path, cls_name, emitter)
+        except torch.cuda.OutOfMemoryError as exc:
+            if not self._cache:
+                # Nothing left to evict — propagate with a clearer message.
+                raise RuntimeError(
+                    f"CUDA out of memory loading {base_model_id}: {exc}. "
+                    f"Try a smaller variant (fp8/GGUF) or run with --no-worker."
+                ) from exc
+            emitter.warning(
+                "VRAM_RETRY",
+                f"CUDA OOM loading {base_model_id} — evicting all cached models and retrying.",
+            )
+            self.evict_all(emitter)
+            gc.collect()
+            torch.cuda.empty_cache()
+            try:
+                return load_pipeline(base_model_id, base_model_path, cls_name, emitter)
+            except torch.cuda.OutOfMemoryError as exc2:
+                raise RuntimeError(
+                    f"CUDA out of memory loading {base_model_id} even after evicting "
+                    f"cached models: {exc2}. Try a smaller variant (fp8/GGUF) or a "
+                    f"larger GPU."
+                ) from exc2
 
     @staticmethod
     def _estimate_vram(pipeline: Any) -> int:
