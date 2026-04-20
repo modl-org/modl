@@ -303,6 +303,8 @@ async fn run_single_edit(sender: &broadcast::Sender<String>, req: EditRequest) {
     let run_result = crate::cli::edit::run(crate::cli::edit::EditArgs {
         prompt: &req.prompt,
         images: &images,
+        mask: None,
+        blend: "pixel",
         lora: None,
         lora_strength: 1.0,
         base: Some(&req.model_id),
