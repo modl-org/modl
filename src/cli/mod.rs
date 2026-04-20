@@ -456,7 +456,7 @@ pub enum ProcessCommands {
     ///   modl edit "photorealistic integration, unified lighting" --image composite.png --base klein-9b
     Compose {
         /// Background image path, or "transparent"/"white"/"black" for solid color
-        #[arg(long)]
+        #[arg(long, alias = "bg")]
         background: String,
         /// Layer image(s) to composite (repeat for multiple layers; order = bottom to top)
         #[arg(long, required = true)]

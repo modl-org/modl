@@ -338,15 +338,15 @@ pub struct RemoveBgJobSpec {
 pub struct ComposeLayer {
     pub path: String,
     #[serde(default = "default_center")]
-    pub position: Vec<f64>,
+    pub position: [f64; 2],
     #[serde(default = "default_one")]
     pub scale: f64,
     #[serde(default = "default_one")]
     pub opacity: f64,
 }
 
-fn default_center() -> Vec<f64> {
-    vec![0.5, 0.5]
+fn default_center() -> [f64; 2] {
+    [0.5, 0.5]
 }
 
 fn default_one() -> f64 {
@@ -359,7 +359,7 @@ pub struct ComposeJobSpec {
     pub layers: Vec<ComposeLayer>,
     pub output_dir: String,
     #[serde(default)]
-    pub canvas_size: Option<Vec<u32>>,
+    pub canvas_size: Option<[u32; 2]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

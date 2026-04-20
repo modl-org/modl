@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use crate::core::job::{ComposeJobSpec, ComposeLayer};
 
-/// Parse a "0.5,0.7" string into [f64, f64], enforcing 0.0–1.0 range.
-fn parse_position(s: &str) -> Result<Vec<f64>> {
+/// Parse a "0.5,0.7" string into [f64; 2], enforcing 0.0–1.0 range.
+fn parse_position(s: &str) -> Result<[f64; 2]> {
     let parts: Vec<&str> = s.split(',').collect();
     if parts.len() != 2 {
         anyhow::bail!("Position must be x,y (e.g. 0.5,0.7)");
@@ -17,11 +17,11 @@ fn parse_position(s: &str) -> Result<Vec<f64>> {
             "Position values must be between 0.0 and 1.0 (fractional canvas coordinates), got {x},{y}"
         );
     }
-    Ok(vec![x, y])
+    Ok([x, y])
 }
 
-/// Parse a "1024x768" or "1024,768" string into [u32, u32].
-fn parse_canvas_size(s: &str) -> Result<Vec<u32>> {
+/// Parse a "1024x768" or "1024,768" string into [u32; 2].
+fn parse_canvas_size(s: &str) -> Result<[u32; 2]> {
     let sep = if s.contains('x') { 'x' } else { ',' };
     let parts: Vec<&str> = s.split(sep).collect();
     if parts.len() != 2 {
@@ -29,7 +29,7 @@ fn parse_canvas_size(s: &str) -> Result<Vec<u32>> {
     }
     let w: u32 = parts[0].trim().parse().context("Invalid width")?;
     let h: u32 = parts[1].trim().parse().context("Invalid height")?;
-    Ok(vec![w, h])
+    Ok([w, h])
 }
 
 pub struct ComposeArgs<'a> {
@@ -99,6 +99,32 @@ pub async fn run(args: ComposeArgs<'_>) -> Result<()> {
         }
     }
 
+    // Warn on parameter count mismatches
+    if !positions.is_empty() && positions.len() != layers.len() {
+        eprintln!(
+            "{} {} --position value(s) for {} layer(s); unmatched layers default to center (0.5,0.5)",
+            style("warning:").yellow(),
+            positions.len(),
+            layers.len(),
+        );
+    }
+    if !scales.is_empty() && scales.len() != layers.len() {
+        eprintln!(
+            "{} {} --scale value(s) for {} layer(s); unmatched layers default to 1.0",
+            style("warning:").yellow(),
+            scales.len(),
+            layers.len(),
+        );
+    }
+    if !opacities.is_empty() && opacities.len() != layers.len() {
+        eprintln!(
+            "{} {} --opacity value(s) for {} layer(s); unmatched layers default to 1.0",
+            style("warning:").yellow(),
+            opacities.len(),
+            layers.len(),
+        );
+    }
+
     // Build layers with position/scale/opacity
     let compose_layers: Vec<ComposeLayer> = layers
         .iter()
@@ -107,7 +133,7 @@ pub async fn run(args: ComposeArgs<'_>) -> Result<()> {
             let position = if i < positions.len() {
                 parse_position(&positions[i]).expect("already validated")
             } else {
-                vec![0.5, 0.5]
+                [0.5, 0.5]
             };
             let scale = if i < scales.len() { scales[i] } else { 1.0 };
             let opacity = if i < opacities.len() {
@@ -129,11 +155,7 @@ pub async fn run(args: ComposeArgs<'_>) -> Result<()> {
         .collect();
 
     // Resolve canvas size
-    let canvas_size_vec = if let Some(cs) = canvas_size {
-        Some(parse_canvas_size(cs)?)
-    } else {
-        None
-    };
+    let canvas_size_vec = canvas_size.map(parse_canvas_size).transpose()?;
 
     // Resolve background path
     let bg_resolved = if ["transparent", "white", "black"].contains(&background) {
