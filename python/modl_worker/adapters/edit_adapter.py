@@ -141,6 +141,8 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
             emitter.info(f"[DEBUG SIGMAS] shifted sigmas (static shift={s}): {shifted.tolist()}")
 
     image_paths = params.get("image_paths", [])
+    mask_path = params.get("mask_path")
+    blend_mode = params.get("blend_mode", "pixel")
 
     if not image_paths:
         emitter.error("NO_IMAGES", "No input images provided", recoverable=False)
@@ -157,6 +159,13 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
             emitter.error("IMAGE_LOAD_FAILED", f"Failed to load {p}: {exc}", recoverable=False)
             return 1
 
+    # Load or derive mask image (white=edit, black=preserve)
+    mask_image = None
+    if mask_path:
+        mask_image = _resolve_mask(mask_path, source_images, emitter)
+        if mask_image is None and mask_path not in ("auto",):
+            return 1  # _resolve_mask already emitted the error
+
     output_dir = output_info.get("output_dir", ".")
     os.makedirs(output_dir, exist_ok=True)
 
@@ -167,6 +176,7 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
 
     # Build inference kwargs — different pipelines need different params
     inf_cfg = ARCH_CONFIGS.get(arch, {}).get("inference", {})
+    use_native_inpaint = False
     if inf_cfg.get("editing_mode") == "native":
         # Native editing via the `image` parameter (e.g. Klein).
         # Supports multiple input images (e.g. source + reference).
@@ -174,6 +184,17 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
         # Explicit --size overrides the first image's dimensions.
         out_h = params.get("height") or source_images[0].size[1]
         out_w = params.get("width") or source_images[0].size[0]
+
+        # Latent-space blend: swap to Flux2KleinInpaintPipeline if available
+        if mask_image is not None and blend_mode == "latent":
+            try:
+                from diffusers import Flux2KleinInpaintPipeline
+                pipeline = Flux2KleinInpaintPipeline.from_pipe(pipeline)
+                use_native_inpaint = True
+                emitter.info("Loaded Flux2KleinInpaintPipeline for latent-space mask blending")
+            except ImportError:
+                emitter.info("Flux2KleinInpaintPipeline not available (diffusers too old), will fall back to pixel blend")
+
         gen_kwargs = {
             "image": source_images if len(source_images) > 1 else source_images[0],
             "prompt": prompt,
@@ -182,6 +203,10 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
             "width": out_w,
             "generator": generator,
         }
+
+        if use_native_inpaint and mask_image is not None:
+            gen_kwargs["mask_image"] = mask_image
+            gen_kwargs["strength"] = 0.8
     else:
         # Qwen-Image-Edit: instruction-based editing with true CFG.
         # true_cfg_scale controls actual classifier-free guidance (default 4.0).
@@ -227,6 +252,13 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
             )
             continue
 
+        # Masked blend: preserve source pixels outside the mask region.
+        # Skip if the inpaint pipeline already handled blending natively.
+        if mask_image is not None and not use_native_inpaint:
+            if blend_mode == "latent":
+                emitter.info("Latent blend not available for this pipeline, falling back to pixel blend")
+            image = _pixel_blend(source_images[0], image, mask_image)
+
         elapsed = time.time() - t0
 
         if seed is not None:
@@ -248,6 +280,8 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
             "lora_strength": lora_info.get("weight") if lora_info else None,
             "image_index": i,
             "count": count,
+            "mask": mask_path,
+            "blend_mode": blend_mode if mask_path else None,
         }
 
         filepath = save_and_emit_artifact(
@@ -264,6 +298,71 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
         emitter.error("NO_IMAGES_GENERATED", "All edit attempts failed.", recoverable=False)
 
     return 0 if artifact_paths else 1
+
+
+def _resolve_mask(mask_path: str, source_images: list, emitter: EventEmitter):
+    """Load or derive a mask image. Returns a PIL Image in 'L' mode, or None on error.
+
+    White pixels = edit region, black pixels = preserve.
+    """
+    from PIL import Image
+
+    from modl_worker.image_util import load_image
+
+    if mask_path == "from-alpha":
+        # Derive mask from the first source image's alpha channel
+        src = source_images[0]
+        if src.mode not in ("RGBA", "LA", "PA"):
+            emitter.error(
+                "NO_ALPHA",
+                "--mask from-alpha requires an image with an alpha channel (PNG with transparency)",
+                recoverable=False,
+            )
+            return None
+        # Alpha > 0 means subject is present → invert: we want to edit *around* the subject
+        # Actually: alpha = where the image exists. For "from-alpha", white = where alpha exists = edit there.
+        # User intent: "edit the region defined by the alpha". White = edit.
+        alpha = source_images[0].getchannel("A")
+        emitter.info(f"Derived mask from alpha channel ({alpha.size[0]}x{alpha.size[1]})")
+        return alpha
+
+    if mask_path == "auto":
+        # "auto" is deferred to step 3 (image_reference).
+        # For now, skip mask — will be wired when --reference lands.
+        emitter.info("--mask auto: no reference image provided, skipping mask")
+        return None
+
+    # Load mask from file path
+    try:
+        mask = load_image(mask_path, mode="L")
+        emitter.info(f"Loaded mask: {mask_path} ({mask.size[0]}x{mask.size[1]})")
+        return mask
+    except Exception as exc:
+        emitter.error("MASK_LOAD_FAILED", f"Failed to load mask {mask_path}: {exc}", recoverable=False)
+        return None
+
+
+def _pixel_blend(source: "Image.Image", edited: "Image.Image", mask: "Image.Image") -> "Image.Image":
+    """Blend edited result with source using a mask (white=edit, black=preserve).
+
+    Resizes mask and source to match the edited image dimensions if needed,
+    then pastes source pixels where mask is black (preserve region).
+    """
+    from PIL import ImageOps
+
+    w, h = edited.size
+
+    # Resize source and mask to match output if pipeline changed dimensions
+    if source.size != (w, h):
+        source = source.resize((w, h), resample=3)  # LANCZOS
+    if mask.size != (w, h):
+        mask = mask.resize((w, h), resample=0)  # NEAREST for binary mask
+
+    # Invert mask: we need white=preserve for paste
+    preserve_mask = ImageOps.invert(mask.convert("L"))
+    result = edited.copy()
+    result.paste(source.convert("RGB"), mask=preserve_mask)
+    return result
 
 
 def _apply_lora(pipeline, spec: dict, emitter: EventEmitter) -> None:

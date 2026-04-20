@@ -183,6 +183,12 @@ const EDIT_EXAMPLES: &str = "\
   # Use a faster/smaller model
   modl edit \"replace the chair with a sofa\" --image room.png --base klein-4b
 
+  # Masked edit — only modify a specific region
+  modl edit \"fix the shadow\" --image composite.png --mask shadow_region.png
+
+  # Masked edit with latent-space blending (Klein only, smoother seams)
+  modl edit \"change lighting to dusk\" --image photo.png --mask sky.png --blend latent --base klein-4b
+
   # Generate multiple edit variants
   modl edit \"add sunglasses\" --image portrait.png --count 3
 
@@ -654,18 +660,19 @@ pub enum Commands {
         json: bool,
     },
 
-    /// Edit images using natural language instructions (no mask needed)
+    /// Edit images using natural language instructions
     ///
-    /// Unlike generate --mask (pixel-level inpainting), edit uses instruction-following
-    /// models that understand "change X to Y" without needing a mask.
+    /// Instruction-following models understand "change X to Y". Optionally add
+    /// --mask to constrain the edit to a specific region (pixels outside the mask
+    /// are preserved exactly).
     ///
     /// To see available edit models: `modl ls` (installed), `modl search edit`
     /// (registry), or `modl info <id>` (details for one model).
     ///
     /// Examples:
     ///   modl edit "make the sky sunset orange" --image photo.png
-    ///   modl edit "replace the chair with a sofa" --image room.png --base klein-4b
-    ///   modl edit "add sunglasses" --image portrait.png --count 3
+    ///   modl edit "fix the shadow" --image composite.png --mask shadow.png
+    ///   modl edit "change lighting to dusk" --image photo.png --mask sky.png --blend latent --base klein-4b
     #[command(verbatim_doc_comment, after_help = EDIT_EXAMPLES)]
     Edit {
         /// Natural language edit instruction (e.g. "make the sky sunset orange")
@@ -673,6 +680,15 @@ pub enum Commands {
         /// Source image(s) — local path or URL (can be repeated)
         #[arg(long, required = true)]
         image: Vec<String>,
+        /// Mask image — white pixels = edit region, black = preserve.
+        /// Accepts a file path, URL, "auto" (derive from --image-reference alpha),
+        /// or "from-alpha" (derive from first --image alpha channel).
+        #[arg(long)]
+        mask: Option<String>,
+        /// Blend mode for masked edits: "pixel" (default, fast, works everywhere)
+        /// or "latent" (smoother seams, Klein only — blends in latent space each step)
+        #[arg(long, default_value = "pixel")]
+        blend: String,
         /// LoRA name or path to apply (combine with reference images for multi-character scenes)
         #[arg(long)]
         lora: Option<String>,
@@ -1224,6 +1240,8 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Edit {
             prompt,
             image,
+            mask,
+            blend,
             lora,
             lora_strength,
             base,
@@ -1243,6 +1261,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             edit::run(edit::EditArgs {
                 prompt: &prompt,
                 images: &image,
+                mask: mask.as_deref(),
+                blend: &blend,
                 lora: lora.as_deref(),
                 lora_strength,
                 base: base.as_deref(),

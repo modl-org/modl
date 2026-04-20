@@ -1346,6 +1346,8 @@ fn build_edit_spec(
             count,
             width: step.width,
             height: step.height,
+            mask_path: None,
+            blend_mode: "pixel".to_string(),
             scheduler_overrides: HashMap::new(),
         },
         runtime: RuntimeRef {

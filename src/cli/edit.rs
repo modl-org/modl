@@ -19,6 +19,8 @@ use crate::core::runtime;
 pub struct EditArgs<'a> {
     pub prompt: &'a str,
     pub images: &'a [String],
+    pub mask: Option<&'a str>,
+    pub blend: &'a str,
     pub lora: Option<&'a str>,
     pub lora_strength: f32,
     pub base: Option<&'a str>,
@@ -102,6 +104,8 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
     let EditArgs {
         prompt,
         images,
+        mask,
+        blend,
         lora,
         lora_strength,
         base,
@@ -124,6 +128,11 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
     // -------------------------------------------------------------------
     if images.is_empty() {
         anyhow::bail!("At least one --image is required for editing");
+    }
+
+    // Validate --blend
+    if blend != "pixel" && blend != "latent" {
+        anyhow::bail!("--blend must be 'pixel' or 'latent', got '{}'", blend);
     }
 
     // -------------------------------------------------------------------
@@ -223,6 +232,25 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
     }
 
     // -------------------------------------------------------------------
+    // Resolve mask input
+    // -------------------------------------------------------------------
+    let resolved_mask: Option<String> = if let Some(m) = mask {
+        match m {
+            // Special values passed through — Python side handles derivation
+            "auto" | "from-alpha" => Some(m.to_string()),
+            // File path or URL
+            _ => Some(resolve_image_input(m).await?),
+        }
+    } else {
+        None
+    };
+
+    // Validate --blend latent requires a mask
+    if blend == "latent" && resolved_mask.is_none() {
+        anyhow::bail!("--blend latent requires --mask");
+    }
+
+    // -------------------------------------------------------------------
     // Build output directory
     // -------------------------------------------------------------------
     let date = chrono::Local::now().format("%Y-%m-%d");
@@ -269,6 +297,8 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
             count,
             width: output_size.map(|(w, _)| w),
             height: output_size.map(|(_, h)| h),
+            mask_path: resolved_mask.clone(),
+            blend_mode: blend.to_string(),
             scheduler_overrides,
         },
         runtime: RuntimeRef {
@@ -303,6 +333,12 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
         }
         for (i, path) in resolved_paths.iter().enumerate() {
             println!("  Image {}: {}", i + 1, path);
+        }
+        if let Some(ref m) = resolved_mask {
+            println!("  Mask:   {}", m);
+            if blend == "latent" {
+                println!("  Blend:  {}", style("latent").yellow());
+            }
         }
         println!("  Steps:  {}", steps);
         if let Some(s) = seed {

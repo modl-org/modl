@@ -390,9 +390,24 @@ pub struct EditParams {
     pub width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
+    /// Mask image path — white pixels = edit region, black = preserve.
+    /// Special values: "auto" (derive from reference alpha), "from-alpha" (from first image alpha).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_path: Option<String>,
+    /// Blend mode for masked edits: "pixel" (default) or "latent" (Klein only)
+    #[serde(default = "default_blend_mode", skip_serializing_if = "is_pixel_blend")]
+    pub blend_mode: String,
     /// Scheduler overrides for Lightning mode
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub scheduler_overrides: std::collections::HashMap<String, serde_json::Value>,
+}
+
+fn default_blend_mode() -> String {
+    "pixel".to_string()
+}
+
+fn is_pixel_blend(s: &String) -> bool {
+    s == "pixel"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
