@@ -195,6 +195,14 @@ Full CLI reference: **[modl.run/docs](https://modl.run/docs)**
 
 ---
 
+## Privacy & Network Access
+
+modl sets `HF_HUB_OFFLINE=1` by default — the Python worker does not contact HuggingFace during normal use. Models are downloaded explicitly via `modl pull` and served from local storage.
+
+Some vision models (Florence-2, BiRefNet) require `trust_remote_code` from HuggingFace transformers. This means model-specific Python code is downloaded from their HF repos on first use. These are well-known models from Microsoft and verified researchers, and the code is only fetched once and cached locally. Affected commands: `modl describe`, `modl vl-tag`, `modl segment`, `modl remove-bg`.
+
+---
+
 ## Author
 
 Created by [Pedro Alonso](https://github.com/pedropaf).
