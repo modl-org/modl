@@ -45,6 +45,23 @@ curl -fsSL https://modl.run/install.sh | sh -s -- --quick
 
 This installs modl, pulls a starter model, and launches the web UI.
 
+### Other install methods
+
+You can [inspect the install script](https://github.com/modl-org/modl/blob/main/install.sh) before running it, or skip it entirely:
+
+```bash
+# Download binary directly from GitHub Releases
+# https://github.com/modl-org/modl/releases
+tar -xzf modl-*.tar.gz
+sudo mv modl /usr/local/bin/
+
+# Or build from source (Rust 1.85+, Python 3.11+)
+git clone https://github.com/modl-org/modl.git
+cd modl
+cargo build --release
+# Binary at target/release/modl
+```
+
 ---
 
 ## Web UI
@@ -175,6 +192,14 @@ Set `MODEL=flux-schnell` to auto-pull a model on first boot. Models persist on t
 Single Rust binary for speed and distribution. Managed Python runtime for GPU compute. No external dependencies to install.
 
 Full CLI reference: **[modl.run/docs](https://modl.run/docs)**
+
+---
+
+## Privacy & Network Access
+
+modl sets `HF_HUB_OFFLINE=1` by default — the Python worker does not contact HuggingFace during normal use. Models are downloaded explicitly via `modl pull` and served from local storage.
+
+Some vision models (Florence-2, BiRefNet) require `trust_remote_code` from HuggingFace transformers. This means model-specific Python code is downloaded from their HF repos on first use. These are well-known models from Microsoft and verified researchers, and the code is only fetched once and cached locally. Affected commands: `modl describe`, `modl vl-tag`, `modl segment`, `modl remove-bg`.
 
 ---
 
