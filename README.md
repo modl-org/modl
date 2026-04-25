@@ -152,11 +152,34 @@ Every command supports `--json` for scripting and agent pipelines.
 ## Already Have Models?
 
 ```bash
-modl link --comfyui ~/ComfyUI
-modl link --a1111 ~/stable-diffusion-webui
+modl system link --comfyui ~/ComfyUI
+modl system link --a1111 ~/stable-diffusion-webui
 ```
 
 modl scans your model folders, hashes files, and moves recognized models into the store — replacing them with symlinks. Your tools keep working, nothing breaks.
+
+---
+
+## Storage Location
+
+By default, models live in `~/modl/store/`. To put them on a bigger disk:
+
+```bash
+modl config storage.root /srv/disk2/modl-store
+```
+
+Existing models are not moved automatically — set this before pulling, or move the directory and update the config.
+
+---
+
+## Uninstall
+
+```bash
+sudo rm -rf /usr/local/bin/modl /usr/local/bin/python   # binary + bundled Python runtime
+rm -rf ~/modl                                           # model store, configs, DB
+```
+
+If you set a custom `storage.root`, remove that path too.
 
 ---
 
