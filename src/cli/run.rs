@@ -15,7 +15,7 @@
 use anyhow::{Result, anyhow, bail};
 use console::style;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use thiserror::Error;
@@ -27,6 +27,9 @@ use crate::core::job::{
     GenerateParams, JobEvent, LoraRef, ModelRef, RuntimeRef,
 };
 use crate::core::outputs::{SidecarMetadata, write_sidecar_yaml};
+
+/// Key used for the skip-existing completion index: (prompt, seed, base_model_id).
+type CompletionKey = (String, u64, String);
 use crate::core::workflow::{EditStep, GenerateStep, ImageRef, StepKind, Workflow, parse_file};
 use crate::core::{model_family, model_resolve, paths, registry, runtime};
 
@@ -191,6 +194,7 @@ pub async fn run(
     dry_run: bool,
     json: bool,
     in_order: bool,
+    skip_existing: bool,
 ) -> Result<()> {
     let db = Database::open()?;
 
@@ -201,7 +205,7 @@ pub async fn run(
     }
 
     let plan = plan_result?;
-    execute_plan(plan, &db, in_order).await
+    execute_plan(plan, &db, in_order, skip_existing).await
 }
 
 // ---------------------------------------------------------------------------
@@ -547,7 +551,12 @@ fn resolve_lora(name: &str, db: &Database) -> Result<LoraRef, PlanError> {
 // each step as a DB job row with workflow labels for UI filtering.
 // ---------------------------------------------------------------------------
 
-pub async fn execute_plan(plan: Plan, db: &Database, in_order: bool) -> Result<()> {
+pub async fn execute_plan(
+    plan: Plan,
+    db: &Database,
+    in_order: bool,
+    skip_existing: bool,
+) -> Result<()> {
     let wf = &plan.workflow;
 
     println!(
@@ -595,11 +604,30 @@ pub async fn execute_plan(plan: Plan, db: &Database, in_order: bool) -> Result<(
     println!("  Output: {}", plan.output_dir.display());
     println!("  Run ID: {}\n", plan.run_id);
 
+    // Build the completion index once before any GPU work so we can skip
+    // sub-jobs whose (prompt, seed, model) triple was already generated.
+    let completion_index: HashSet<CompletionKey> = if skip_existing {
+        let outputs_root = paths::modl_root().join("outputs");
+        let index = build_completion_index(&outputs_root);
+        if !index.is_empty() {
+            println!(
+                "  {} --skip-existing: {} prior artifact{} indexed",
+                style("ℹ").cyan(),
+                index.len(),
+                if index.len() == 1 { "" } else { "s" }
+            );
+        }
+        index
+    } else {
+        HashSet::new()
+    };
+
     println!("{} Preparing runtime...", style("→").cyan());
     let mut executor = LocalExecutor::for_generation().await?;
 
     let mut step_outputs: HashMap<String, Vec<PathBuf>> = HashMap::new();
     let total_steps = wf.steps.len();
+    let mut total_skipped_sub_jobs = 0usize;
 
     for (exec_idx, &declared_idx) in exec_order.iter().enumerate() {
         let step = &wf.steps[declared_idx];
@@ -643,11 +671,37 @@ pub async fn execute_plan(plan: Plan, db: &Database, in_order: bool) -> Result<(
         let effective_model_key = resolved_model.id.as_str();
 
         let mut step_artifacts: Vec<PathBuf> = Vec::new();
+        let mut step_skipped = 0usize;
 
         match &step.kind {
             StepKind::Generate(g) => {
                 print_generate_preview(g, sub_jobs.len());
                 for (sub_idx, (seed, count)) in sub_jobs.iter().enumerate() {
+                    // --skip-existing: skip sub-jobs already in the completion index.
+                    // Random-seed sub-jobs (seed == None) are never skipped.
+                    if skip_existing && let Some(s) = seed {
+                        let all_done = (0..*count).all(|i| {
+                            completion_index.contains(&(
+                                g.prompt.clone(),
+                                s + i as u64,
+                                resolved_model.id.clone(),
+                            ))
+                        });
+                        if all_done {
+                            println!(
+                                "  {} [{}/{}] seed={} — {}",
+                                style("↷").yellow(),
+                                sub_idx + 1,
+                                sub_jobs.len(),
+                                s,
+                                style("already generated, skipping").dim(),
+                            );
+                            step_skipped += 1;
+                            total_skipped_sub_jobs += 1;
+                            continue;
+                        }
+                    }
+
                     if sub_jobs.len() > 1 {
                         println!(
                             "  {} [{}/{}] seed={}",
@@ -794,16 +848,26 @@ pub async fn execute_plan(plan: Plan, db: &Database, in_order: bool) -> Result<(
             }
         };
 
-        if step_artifacts.is_empty() {
+        let fully_skipped = step_skipped == sub_jobs.len();
+        if step_artifacts.is_empty() && !fully_skipped {
             bail!("step `{}` produced no artifacts", step.id);
         }
 
-        println!(
-            "  {} {} artifact{}",
-            style("✓").green(),
-            step_artifacts.len(),
-            if step_artifacts.len() == 1 { "" } else { "s" }
-        );
+        if fully_skipped {
+            println!(
+                "  {} all {} sub-job{} already generated",
+                style("↷").yellow(),
+                sub_jobs.len(),
+                if sub_jobs.len() == 1 { "" } else { "s" },
+            );
+        } else {
+            println!(
+                "  {} {} artifact{}",
+                style("✓").green(),
+                step_artifacts.len(),
+                if step_artifacts.len() == 1 { "" } else { "s" }
+            );
+        }
         step_outputs.insert(step.id.clone(), step_artifacts);
     }
 
@@ -811,18 +875,70 @@ pub async fn execute_plan(plan: Plan, db: &Database, in_order: bool) -> Result<(
     // Summary
     // -------------------------------------------------------------------
     let total_artifacts: usize = step_outputs.values().map(|v| v.len()).sum();
+    let skip_note = if total_skipped_sub_jobs > 0 {
+        format!(
+            ", {} sub-job{} skipped",
+            total_skipped_sub_jobs,
+            if total_skipped_sub_jobs == 1 { "" } else { "s" }
+        )
+    } else {
+        String::new()
+    };
     println!(
-        "\n{} workflow {} complete: {} step{}, {} artifact{}",
+        "\n{} workflow {} complete: {} step{}, {} artifact{}{}",
         style("✓").green().bold(),
         style(&wf.name).bold(),
         total_steps,
         if total_steps == 1 { "" } else { "s" },
         total_artifacts,
         if total_artifacts == 1 { "" } else { "s" },
+        skip_note,
     );
     println!("  {}", plan.output_dir.display());
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Completion index — for --skip-existing
+// ---------------------------------------------------------------------------
+
+/// Scan ~/.modl/outputs/ and build a set of (prompt, seed, base_model_id)
+/// triples that have already been generated. Used by --skip-existing to avoid
+/// re-running sub-jobs that are already on disk.
+///
+/// Reads every sidecar `.yaml` file it finds. Non-fatal on any I/O or parse
+/// error — a missing or corrupt sidecar simply means the image isn't indexed.
+fn build_completion_index(outputs_root: &Path) -> HashSet<CompletionKey> {
+    let mut index = HashSet::new();
+    let Ok(dates) = std::fs::read_dir(outputs_root) else {
+        return index;
+    };
+    for date_entry in dates.filter_map(|e| e.ok()) {
+        let date_path = date_entry.path();
+        if !date_path.is_dir() {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(&date_path) else {
+            continue;
+        };
+        for file_entry in files.filter_map(|e| e.ok()) {
+            let path = file_entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(meta) = serde_yaml::from_str::<SidecarMetadata>(&content) else {
+                continue;
+            };
+            if let Some(seed) = meta.seed {
+                index.insert((meta.prompt, seed, meta.base_model));
+            }
+        }
+    }
+    index
 }
 
 // ---------------------------------------------------------------------------

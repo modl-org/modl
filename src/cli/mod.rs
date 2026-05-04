@@ -1103,6 +1103,12 @@ See `modl/docs/guides/workflows.md` for the full reference.")]
         /// model reloads.
         #[arg(long)]
         in_order: bool,
+        /// Skip sub-jobs whose (prompt, seed, model) combination already has a
+        /// sidecar YAML in ~/.modl/outputs/. Useful for resuming interrupted
+        /// runs or adding new steps to an existing workflow without
+        /// regenerating images you have already picked.
+        #[arg(long)]
+        skip_existing: bool,
     },
 
     // ── Hidden ───────────────────────────────────────────────────────
@@ -1638,7 +1644,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             dry_run,
             json,
             in_order,
-        } => run::run(&spec, auto_pull, dry_run, json, in_order).await,
+            skip_existing,
+        } => run::run(&spec, auto_pull, dry_run, json, in_order, skip_existing).await,
 
         // ── Hidden ───────────────────────────────────────────────────
         Commands::Init { defaults, root } => init::run(defaults, root.as_deref()).await,
