@@ -304,7 +304,7 @@ async fn run_single_edit(sender: &broadcast::Sender<String>, req: EditRequest) {
         prompt: &req.prompt,
         images: &images,
         mask: None,
-        blend: "pixel",
+        blend: crate::core::job::BlendMode::Pixel,
         lora: None,
         lora_strength: 1.0,
         base: Some(&req.model_id),

@@ -20,7 +20,7 @@ pub struct EditArgs<'a> {
     pub prompt: &'a str,
     pub images: &'a [String],
     pub mask: Option<&'a str>,
-    pub blend: &'a str,
+    pub blend: BlendMode,
     pub lora: Option<&'a str>,
     pub lora_strength: f32,
     pub base: Option<&'a str>,
@@ -128,11 +128,6 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
     // -------------------------------------------------------------------
     if images.is_empty() {
         anyhow::bail!("At least one --image is required for editing");
-    }
-
-    // Validate --blend
-    if blend != "pixel" && blend != "latent" {
-        anyhow::bail!("--blend must be 'pixel' or 'latent', got '{}'", blend);
     }
 
     // -------------------------------------------------------------------
@@ -246,7 +241,7 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
     };
 
     // Validate --blend latent requires a mask
-    if blend == "latent" && resolved_mask.is_none() {
+    if blend == BlendMode::Latent && resolved_mask.is_none() {
         anyhow::bail!("--blend latent requires --mask");
     }
 
@@ -298,7 +293,7 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
             width: output_size.map(|(w, _)| w),
             height: output_size.map(|(_, h)| h),
             mask_path: resolved_mask.clone(),
-            blend_mode: blend.to_string(),
+            blend_mode: blend,
             scheduler_overrides,
         },
         runtime: RuntimeRef {
@@ -336,7 +331,7 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
         }
         if let Some(ref m) = resolved_mask {
             println!("  Mask:   {}", m);
-            if blend == "latent" {
+            if blend == BlendMode::Latent {
                 println!("  Blend:  {}", style("latent").yellow());
             }
         }

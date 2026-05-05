@@ -163,7 +163,7 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
     mask_image = None
     if mask_path:
         mask_image = _resolve_mask(mask_path, source_images, emitter)
-        if mask_image is None and mask_path not in ("auto",):
+        if mask_image is None and mask_path != "auto":
             return 1  # _resolve_mask already emitted the error
 
     output_dir = output_info.get("output_dir", ".")
@@ -324,9 +324,7 @@ def _resolve_mask(mask_path: str, source_images: list, emitter: EventEmitter):
                 recoverable=False,
             )
             return None
-        # Alpha > 0 means subject is present → invert: we want to edit *around* the subject
-        # Actually: alpha = where the image exists. For "from-alpha", white = where alpha exists = edit there.
-        # User intent: "edit the region defined by the alpha". White = edit.
+        # Alpha channel becomes the mask: white where alpha > 0 (subject present) = edit region.
         alpha = source_images[0].getchannel("A")
         emitter.info(f"Derived mask from alpha channel ({alpha.size[0]}x{alpha.size[1]})")
         return alpha

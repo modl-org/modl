@@ -52,7 +52,7 @@ use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use console::style;
 
 use crate::core::cloud::CloudProvider;
-use crate::core::job::{LoraType, Optimizer, Preset};
+use crate::core::job::{BlendMode, LoraType, Optimizer, Preset};
 use crate::core::manifest::AssetType;
 
 /// Extended help text for `modl train` with recommended settings per model.
@@ -685,10 +685,9 @@ pub enum Commands {
         /// or "from-alpha" (derive from first --image alpha channel).
         #[arg(long)]
         mask: Option<String>,
-        /// Blend mode for masked edits: "pixel" (default, fast, works everywhere)
-        /// or "latent" (smoother seams, Klein only — blends in latent space each step)
+        /// Blend mode for masked edits (default: pixel)
         #[arg(long, default_value = "pixel")]
-        blend: String,
+        blend: BlendMode,
         /// LoRA name or path to apply (combine with reference images for multi-character scenes)
         #[arg(long)]
         lora: Option<String>,
@@ -1271,7 +1270,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 prompt: &prompt,
                 images: &image,
                 mask: mask.as_deref(),
-                blend: &blend,
+                blend,
                 lora: lora.as_deref(),
                 lora_strength,
                 base: base.as_deref(),

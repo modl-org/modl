@@ -1478,7 +1478,7 @@ fn build_edit_spec(
             width: step.width,
             height: step.height,
             mask_path: None,
-            blend_mode: "pixel".to_string(),
+            blend_mode: crate::core::job::BlendMode::Pixel,
             scheduler_overrides: HashMap::new(),
         },
         runtime: RuntimeRef {
