@@ -611,7 +611,7 @@ pub async fn execute_plan(
         let index = build_completion_index(&outputs_root);
         if !index.is_empty() {
             println!(
-                "  {} --skip-existing: {} prior artifact{} indexed",
+                "  {} {} prior artifact{} indexed — use --force to regenerate",
                 style("ℹ").cyan(),
                 index.len(),
                 if index.len() == 1 { "" } else { "s" }
@@ -677,7 +677,7 @@ pub async fn execute_plan(
             StepKind::Generate(g) => {
                 print_generate_preview(g, sub_jobs.len());
                 for (sub_idx, (seed, count)) in sub_jobs.iter().enumerate() {
-                    // --skip-existing: skip sub-jobs already in the completion index.
+                    // Skip sub-jobs already in the completion index (default behaviour).
                     // Random-seed sub-jobs (seed == None) are never skipped.
                     if skip_existing && let Some(s) = seed {
                         let all_done = (0..*count).all(|i| {
