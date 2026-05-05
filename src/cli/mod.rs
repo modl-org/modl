@@ -1103,6 +1103,12 @@ See `modl/docs/guides/workflows.md` for the full reference.")]
         /// model reloads.
         #[arg(long)]
         in_order: bool,
+        /// Regenerate all sub-jobs even if a matching sidecar YAML already
+        /// exists in ~/.modl/outputs/. By default, sub-jobs whose
+        /// (prompt, seed, model) triple was already generated are skipped so
+        /// interrupted runs resume cleanly without duplicating work.
+        #[arg(long)]
+        force: bool,
     },
 
     // ── Hidden ───────────────────────────────────────────────────────
@@ -1638,7 +1644,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             dry_run,
             json,
             in_order,
-        } => run::run(&spec, auto_pull, dry_run, json, in_order).await,
+            force,
+        } => run::run(&spec, auto_pull, dry_run, json, in_order, !force).await,
 
         // ── Hidden ───────────────────────────────────────────────────
         Commands::Init { defaults, root } => init::run(defaults, root.as_deref()).await,
