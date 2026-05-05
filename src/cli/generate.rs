@@ -769,6 +769,7 @@ async fn execute_generate(
         &spec_json,
         target_str.trim_matches('"'),
         None,
+        None,
     )?;
 
     // -------------------------------------------------------------------

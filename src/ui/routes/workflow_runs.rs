@@ -58,8 +58,9 @@ fn build_zip(run_id: &str) -> Result<(Vec<u8>, String), String> {
         return Err(run_id.to_string());
     }
 
-    let buf = Vec::new();
-    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(buf));
+    // Stream into a tempfile to avoid holding all images in RAM.
+    let tmp = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipWriter::new(tmp);
     let options = zip::write::FileOptions::<()>::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
@@ -76,8 +77,8 @@ fn build_zip(run_id: &str) -> Result<(Vec<u8>, String), String> {
         }
     }
 
-    let cursor = zip.finish().map_err(|e| e.to_string())?;
-    let bytes = cursor.into_inner();
+    let tmp_done = zip.finish().map_err(|e| e.to_string())?;
+    let bytes = std::fs::read(tmp_done.path()).map_err(|e| e.to_string())?;
     let filename = format!("{run_id}.zip");
     Ok((bytes, filename))
 }

@@ -1,6 +1,44 @@
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 
+/// Fast reconciliation from the shared store index.yaml instead of a directory scan.
+///
+/// For new users with a symlinked store, this populates the local SQLite from
+/// the YAML that install operations maintain. O(index entries), not O(files).
+/// Returns the number of newly-registered entries.
+pub fn reconcile_from_index(db: &Database) -> Result<usize> {
+    let entries = crate::core::store_index::load();
+    if entries.is_empty() {
+        return Ok(0);
+    }
+    let tracked: HashSet<String> = db
+        .list_installed(None)?
+        .into_iter()
+        .map(|m| m.store_path)
+        .collect();
+
+    let mut registered = 0;
+    for entry in &entries {
+        if !tracked.contains(&entry.store_path)
+            && db
+                .insert_installed(&crate::core::db::InstalledModelRecord {
+                    id: &entry.id,
+                    name: &entry.name,
+                    asset_type: &entry.asset_type,
+                    variant: entry.variant.as_deref(),
+                    sha256: &entry.sha256,
+                    size: entry.size,
+                    file_name: &entry.file_name,
+                    store_path: &entry.store_path,
+                })
+                .is_ok()
+        {
+            registered += 1;
+        }
+    }
+    Ok(registered)
+}
+
 use crate::core::config::Config;
 use crate::core::db::Database;
 use crate::core::registry::RegistryIndex;

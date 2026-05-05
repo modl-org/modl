@@ -4,7 +4,9 @@ use rusqlite::params;
 use super::Database;
 
 impl Database {
-    /// Insert a new training job
+    /// Insert a new job. Pass `workflow_run_id` for workflow steps so the
+    /// indexed column is populated and `list_jobs_by_run_id` avoids a LIKE scan.
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_job(
         &self,
         job_id: &str,
@@ -13,12 +15,13 @@ impl Database {
         spec_json: &str,
         target: &str,
         provider: Option<&str>,
+        workflow_run_id: Option<&str>,
     ) -> Result<()> {
         self.conn
             .execute(
-                "INSERT INTO jobs (job_id, kind, status, spec_json, target, provider)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![job_id, kind, status, spec_json, target, provider],
+                "INSERT INTO jobs (job_id, kind, status, spec_json, target, provider, workflow_run_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![job_id, kind, status, spec_json, target, provider, workflow_run_id],
             )
             .context("Failed to insert job")?;
         Ok(())
@@ -155,18 +158,35 @@ impl Database {
         Ok(())
     }
 
-    /// Find all step-jobs belonging to a workflow run (matched via spec_json label).
+    /// Find all step-jobs belonging to a workflow run.
+    /// Uses the indexed `workflow_run_id` column; falls back to a spec_json LIKE
+    /// scan for older rows created before the column was added.
     pub fn list_jobs_by_run_id(&self, run_id: &str) -> Result<Vec<JobRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT job_id, kind, status, spec_json, target, provider, created_at, started_at, completed_at \
+             FROM jobs WHERE workflow_run_id = ?1 ORDER BY created_at ASC"
+        ).context("Failed to prepare indexed query")?;
+
+        let rows = stmt
+            .query_map(params![run_id], JobRecord::from_row)
+            .context("Failed to query jobs by run_id")?;
+        let results: Vec<JobRecord> = rows
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("Failed to collect job results")?;
+
+        if !results.is_empty() {
+            return Ok(results);
+        }
+
+        // Fallback: LIKE scan for rows pre-dating the workflow_run_id column.
         let pattern = format!("%{run_id}%");
         let mut stmt = self.conn.prepare(
             "SELECT job_id, kind, status, spec_json, target, provider, created_at, started_at, completed_at \
-             FROM jobs WHERE spec_json LIKE ?1 ORDER BY created_at ASC"
-        ).context("Failed to prepare query")?;
-
+             FROM jobs WHERE workflow_run_id IS NULL AND spec_json LIKE ?1 ORDER BY created_at ASC"
+        ).context("Failed to prepare fallback query")?;
         let rows = stmt
             .query_map(params![pattern], JobRecord::from_row)
-            .context("Failed to query jobs by run_id")?;
-
+            .context("Failed to query jobs by run_id (fallback)")?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .context("Failed to collect job results")
     }

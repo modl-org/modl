@@ -32,6 +32,7 @@ pub mod resolver;
 pub mod run_manifest;
 pub mod runtime;
 pub mod store;
+pub mod store_index;
 pub mod symlink;
 pub mod training;
 pub mod training_status;

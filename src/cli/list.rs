@@ -45,10 +45,13 @@ const INTERNAL_TYPES: &[&str] = &[
 pub async fn run(type_filter: Option<AssetType>, show_all: bool) -> Result<()> {
     let db = Database::open()?;
 
-    // Silently register any store files not yet tracked (supports symlinked stores).
-    if let Ok(n) = reconcile::reconcile_store(&db)
-        && n > 0
-    {
+    // Sync any store entries not yet in the local DB from the shared index.yaml.
+    // This is an O(index-size) read — no directory walking. Falls back to a full
+    // scan only when the index doesn't exist yet (first run on a bare store).
+    let n = reconcile::reconcile_from_index(&db)
+        .or_else(|_| reconcile::reconcile_store(&db))
+        .unwrap_or(0);
+    if n > 0 {
         println!(
             "  {} Auto-registered {} model{} found on disk",
             style("ℹ").dim(),

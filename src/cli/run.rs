@@ -747,7 +747,7 @@ pub async fn execute_plan(
                         step_labels.clone(),
                     );
                     let (job_id, artifacts) =
-                        execute_generate_step(&mut executor, &spec, &step.id, db)?;
+                        execute_generate_step(&mut executor, &spec, &step.id, &plan.run_id, db)?;
                     for (i, artifact) in artifacts.iter().enumerate() {
                         let artifact_id = format!("{}-img-{}", job_id, i);
                         let image_seed = spec.params.seed.map(|s| s + i as u64);
@@ -823,7 +823,7 @@ pub async fn execute_plan(
                         step_labels.clone(),
                     );
                     let (job_id, artifacts) =
-                        execute_edit_step(&mut executor, &spec, &step.id, db)?;
+                        execute_edit_step(&mut executor, &spec, &step.id, &plan.run_id, db)?;
                     for (i, artifact) in artifacts.iter().enumerate() {
                         let artifact_id = format!("{}-img-{}", job_id, i);
                         let image_seed = spec.params.seed.map(|s| s + i as u64);
@@ -1505,11 +1505,12 @@ fn execute_generate_step(
     executor: &mut LocalExecutor,
     spec: &GenerateJobSpec,
     step_id: &str,
+    run_id: &str,
     db: &Database,
 ) -> Result<(String, Vec<PathBuf>)> {
     let handle = executor.submit_generate(spec)?;
     let job_id = handle.job_id.clone();
-    register_job(db, &job_id, "generate", spec)?;
+    register_job(db, &job_id, "generate", spec, run_id)?;
     let rx = executor.events(&job_id)?;
     let result = consume_events(rx, step_id, db, &job_id);
     match &result {
@@ -1527,11 +1528,12 @@ fn execute_edit_step(
     executor: &mut LocalExecutor,
     spec: &EditJobSpec,
     step_id: &str,
+    run_id: &str,
     db: &Database,
 ) -> Result<(String, Vec<PathBuf>)> {
     let handle = executor.submit_edit(spec)?;
     let job_id = handle.job_id.clone();
-    register_job(db, &job_id, "edit", spec)?;
+    register_job(db, &job_id, "edit", spec, run_id)?;
     let rx = executor.events(&job_id)?;
     let result = consume_events(rx, step_id, db, &job_id);
     match &result {
@@ -1545,17 +1547,23 @@ fn execute_edit_step(
     result.map(|paths| (job_id, paths))
 }
 
-/// Insert a job row so the UI can discover workflow outputs alongside
-/// regular `modl generate` / `modl edit` results. Mirrors what those CLI
-/// handlers do directly.
 fn register_job<S: serde::Serialize>(
     db: &Database,
     job_id: &str,
     kind: &str,
     spec: &S,
+    run_id: &str,
 ) -> Result<()> {
     let spec_json = serde_json::to_string(spec).unwrap_or_else(|_| "{}".to_string());
-    db.insert_job(job_id, kind, "running", &spec_json, "local", None)?;
+    db.insert_job(
+        job_id,
+        kind,
+        "running",
+        &spec_json,
+        "local",
+        None,
+        Some(run_id),
+    )?;
     Ok(())
 }
 

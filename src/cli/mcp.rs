@@ -940,25 +940,53 @@ fn tool_run_workflow(args: &Value) -> Result<Value, (i32, String)> {
         .join(format!("{run_id}.log"));
     let _ = std::fs::create_dir_all(log_path.parent().unwrap());
 
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .map_err(|e| (-32603, format!("Failed to create log file: {e}")))?;
-
     let bin = modl_bin().map_err(|e| (-32603, e.to_string()))?;
 
-    std::process::Command::new(bin)
+    // Capture stderr via pipe for a short window so we can detect immediate
+    // failures (bad YAML, missing model, etc.) before returning run_id.
+    let mut child = std::process::Command::new(&bin)
         .args(["run", tmp_path.to_str().unwrap_or(""), "--run-id", &run_id])
         .stdin(std::process::Stdio::null())
-        .stdout(
-            std::fs::File::open(&log_path)
-                .map(std::process::Stdio::from)
-                .unwrap_or(std::process::Stdio::null()),
-        )
-        .stderr(std::process::Stdio::from(log_file))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| (-32603, format!("Failed to spawn modl run: {e}")))?;
+
+    // Wait up to 500 ms — enough to catch YAML parse errors and missing files
+    // without blocking for the actual GPU work.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    if let Ok(Some(status)) = child.try_wait() {
+        // Process already exited — read stderr to report what went wrong.
+        let stderr_text = child
+            .stderr
+            .take()
+            .and_then(|mut r| {
+                let mut buf = String::new();
+                std::io::Read::read_to_string(&mut r, &mut buf).ok()?;
+                Some(buf)
+            })
+            .unwrap_or_default();
+        if !status.success() {
+            return Err((
+                -32603,
+                format!("modl run failed immediately: {}", stderr_text.trim()),
+            ));
+        }
+    }
+
+    // Forward remaining stderr to the log file (best-effort).
+    if let Some(mut stderr_pipe) = child.stderr.take() {
+        let log_path_clone = log_path.clone();
+        std::thread::spawn(move || {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path_clone)
+            {
+                let _ = std::io::copy(&mut stderr_pipe, &mut f);
+            }
+        });
+    }
 
     Ok(json!({
         "content": [{

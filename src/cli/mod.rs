@@ -1690,7 +1690,18 @@ pub async fn run(cli: Cli) -> Result<()> {
             in_order,
             force,
             run_id,
-        } => run::run(&specs, auto_pull, dry_run, json, in_order, !force, run_id.as_deref()).await,
+        } => {
+            run::run(
+                &specs,
+                auto_pull,
+                dry_run,
+                json,
+                in_order,
+                !force,
+                run_id.as_deref(),
+            )
+            .await
+        }
         Commands::Status { run_id, json } => run_status::run(&run_id, json).await,
 
         // ── Hidden ───────────────────────────────────────────────────

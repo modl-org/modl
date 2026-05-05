@@ -22,6 +22,8 @@ impl Database {
                 ],
             )
             .context("Failed to insert installed model")?;
+        // Keep the shared store index in sync (best-effort — errors ignored).
+        crate::core::store_index::upsert(record);
         Ok(())
     }
 
@@ -43,6 +45,7 @@ impl Database {
         self.conn
             .execute("DELETE FROM installed WHERE id = ?1", params![id])
             .context("Failed to remove installed model")?;
+        crate::core::store_index::remove_by_id(id);
         Ok(())
     }
 

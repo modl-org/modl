@@ -412,6 +412,7 @@ async fn execute_edit(
         &spec_json,
         target_str.trim_matches('"'),
         None,
+        None,
     )?;
 
     // Event loop
