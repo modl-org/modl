@@ -1477,6 +1477,8 @@ fn build_edit_spec(
             count,
             width: step.width,
             height: step.height,
+            mask_path: None,
+            blend_mode: crate::core::job::BlendMode::Pixel,
             scheduler_overrides: HashMap::new(),
         },
         runtime: RuntimeRef {
