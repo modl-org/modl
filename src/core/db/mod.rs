@@ -12,7 +12,8 @@ pub use lora_library::LibraryLoraRecord;
 pub use models::{InstalledModel, InstalledModelRecord};
 
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, ErrorCode};
+use std::path::Path;
 use std::path::PathBuf;
 
 /// Local database for tracking installed models
@@ -27,18 +28,36 @@ impl Database {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).context("Failed to create database directory")?;
         }
-        let conn = Connection::open(&path).context("Failed to open database")?;
-        // WAL mode allows concurrent reads and reduces lock contention when
-        // multiple requests open short-lived connections (e.g., web UI routes).
-        let _ = conn.pragma_update(None, "journal_mode", "WAL");
-        let db = Self { conn };
-        db.migrate()?;
-        Ok(db)
+        Self::open_resilient(&path)
     }
 
     #[allow(dead_code)]
-    pub fn open_at(path: &std::path::Path) -> Result<Self> {
+    pub fn open_at(path: &Path) -> Result<Self> {
+        Self::open_resilient(path)
+    }
+
+    /// Try opening with WAL (concurrent reads, used by web UI). If WAL setup
+    /// or migrations fail with an I/O error — typically a full disk preventing
+    /// SQLite from allocating its shared-memory file — fall back to DELETE
+    /// journaling so destructive commands like `modl rm` can still run.
+    fn open_resilient(path: &Path) -> Result<Self> {
+        match Self::try_open(path, "WAL") {
+            Ok(db) => Ok(db),
+            Err(e) if is_sqlite_io_error(&e) => {
+                eprintln!(
+                    "warning: SQLite WAL setup failed ({}); falling back to legacy journaling. \
+                     Free disk space to restore normal mode.",
+                    short_error(&e)
+                );
+                Self::try_open(path, "DELETE")
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn try_open(path: &Path, journal_mode: &str) -> Result<Self> {
         let conn = Connection::open(path).context("Failed to open database")?;
+        let _ = conn.pragma_update(None, "journal_mode", journal_mode);
         let db = Self { conn };
         db.migrate()?;
         Ok(db)
@@ -166,6 +185,29 @@ impl Database {
     }
 }
 
+fn is_sqlite_io_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|e| {
+        e.downcast_ref::<rusqlite::Error>()
+            .and_then(|sqlite_err| match sqlite_err {
+                rusqlite::Error::SqliteFailure(f, _) => Some(f.code),
+                _ => None,
+            })
+            .is_some_and(|code| {
+                matches!(
+                    code,
+                    ErrorCode::SystemIoFailure | ErrorCode::DiskFull | ErrorCode::CannotOpen
+                )
+            })
+    })
+}
+
+fn short_error(err: &anyhow::Error) -> String {
+    err.chain()
+        .last()
+        .map(|e| e.to_string())
+        .unwrap_or_else(|| err.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,5 +238,35 @@ mod tests {
 
         db.remove_installed("test-model").unwrap();
         assert!(!db.is_installed("test-model").unwrap());
+    }
+
+    #[test]
+    fn is_sqlite_io_error_recognizes_disk_full() {
+        let err = anyhow::Error::from(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),
+            Some("database or disk is full".to_string()),
+        ))
+        .context("Failed to run database migrations");
+        assert!(is_sqlite_io_error(&err));
+    }
+
+    #[test]
+    fn is_sqlite_io_error_recognizes_shmmap_failure() {
+        // SQLITE_IOERR_SHMMAP — the exact error users hit when the disk is
+        // full and SQLite can't grow the WAL shared-memory segment.
+        let err = anyhow::Error::from(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR_SHMMAP),
+            Some("I/O error within the xShmMap method".to_string()),
+        ));
+        assert!(is_sqlite_io_error(&err));
+    }
+
+    #[test]
+    fn is_sqlite_io_error_ignores_unrelated_errors() {
+        let err = anyhow::Error::from(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+            Some("constraint failed".to_string()),
+        ));
+        assert!(!is_sqlite_io_error(&err));
     }
 }
