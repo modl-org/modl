@@ -171,17 +171,22 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
         # Native editing via the `image` parameter (e.g. Klein).
         # Supports multiple input images (e.g. source + reference).
         # No guidance (distilled), no negative prompt.
-        # Explicit --size overrides the first image's dimensions.
-        out_h = params.get("height") or source_images[0].size[1]
-        out_w = params.get("width") or source_images[0].size[0]
+        # Explicit --size overrides output dimensions; otherwise let the pipeline
+        # derive dimensions from the (internally resized) condition image so that
+        # noise latents and condition latents stay the same spatial size. Passing
+        # the raw source dimensions here when the source exceeds 1M px causes the
+        # pipeline to create noise latents at full resolution while condition latents
+        # are capped at ~1M px — a patch-count mismatch that produces blurry output.
         gen_kwargs = {
             "image": source_images if len(source_images) > 1 else source_images[0],
             "prompt": prompt,
             "num_inference_steps": steps,
-            "height": out_h,
-            "width": out_w,
             "generator": generator,
         }
+        if params.get("height"):
+            gen_kwargs["height"] = params["height"]
+        if params.get("width"):
+            gen_kwargs["width"] = params["width"]
     else:
         # Qwen-Image-Edit: instruction-based editing with true CFG.
         # true_cfg_scale controls actual classifier-free guidance (default 4.0).
