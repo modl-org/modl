@@ -189,7 +189,7 @@ impl PlanError {
 // ---------------------------------------------------------------------------
 
 pub async fn run(
-    spec_path: &str,
+    spec_paths: &[String],
     _auto_pull: bool,
     dry_run: bool,
     json: bool,
@@ -197,15 +197,30 @@ pub async fn run(
     skip_existing: bool,
 ) -> Result<()> {
     let db = Database::open()?;
+    let multi = spec_paths.len() > 1;
 
-    let plan_result = build_plan(spec_path, &db);
+    for (i, spec_path) in spec_paths.iter().enumerate() {
+        if multi && !json {
+            if i > 0 {
+                println!();
+            }
+            println!("── {}/{}: {} ──", i + 1, spec_paths.len(), spec_path);
+        }
 
-    if dry_run {
-        return run_dry_run(plan_result, json, in_order);
+        let plan_result = build_plan(spec_path, &db);
+
+        if dry_run {
+            run_dry_run(plan_result, json, in_order)?;
+            // In dry-run mode keep going even if one file is invalid so the
+            // caller sees all errors in one pass.
+            continue;
+        }
+
+        let plan = plan_result?;
+        execute_plan(plan, &db, in_order, skip_existing).await?;
     }
 
-    let plan = plan_result?;
-    execute_plan(plan, &db, in_order, skip_existing).await
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

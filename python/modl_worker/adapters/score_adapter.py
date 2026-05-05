@@ -141,6 +141,8 @@ def run_score(config_path: Path, emitter: EventEmitter, model_cache: dict | None
 
             with torch.no_grad():
                 image_features = clip_model.get_image_features(**inputs)
+                if not isinstance(image_features, torch.Tensor):
+                    image_features = image_features.pooler_output
                 image_features = image_features / image_features.norm(dim=-1, keepdim=True)
                 score = predictor(image_features).item()
 

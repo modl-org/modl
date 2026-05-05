@@ -1082,8 +1082,11 @@ Agent JSON plan:  modl run book-chapter-3.yaml --dry-run --json
 
 See `modl/docs/guides/workflows.md` for the full reference.")]
     Run {
-        /// Workflow spec file (.yaml)
-        spec: String,
+        /// Workflow spec file(s) (.yaml). Multiple files run sequentially in the
+        /// order given. Glob expansion is handled by your shell, so
+        /// `modl run *.yaml` works as expected.
+        #[arg(num_args(1..))]
+        specs: Vec<String>,
         /// Auto-pull missing models before running (not yet implemented)
         #[arg(long)]
         auto_pull: bool,
@@ -1639,13 +1642,13 @@ pub async fn run(cli: Cli) -> Result<()> {
 
         // ── Workflow ────────────────────────────────────────────────
         Commands::Run {
-            spec,
+            specs,
             auto_pull,
             dry_run,
             json,
             in_order,
             force,
-        } => run::run(&spec, auto_pull, dry_run, json, in_order, !force).await,
+        } => run::run(&specs, auto_pull, dry_run, json, in_order, !force).await,
 
         // ── Hidden ───────────────────────────────────────────────────
         Commands::Init { defaults, root } => init::run(defaults, root.as_deref()).await,

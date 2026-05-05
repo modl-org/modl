@@ -59,7 +59,8 @@ def _remove_background(image_path: Path, model, emitter: EventEmitter) -> Image.
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
     from modl_worker.device import get_device
-    input_tensor = transform(img).unsqueeze(0).to(get_device())
+    device = get_device()
+    input_tensor = transform(img).unsqueeze(0).to(device=device, dtype=next(model.parameters()).dtype)
 
     with torch.no_grad():
         preds = model(input_tensor)[-1].sigmoid().cpu()
