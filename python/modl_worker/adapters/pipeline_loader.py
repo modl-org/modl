@@ -59,6 +59,30 @@ def _get_pipeline(cls_name: str):
 
 
 # ---------------------------------------------------------------------------
+# Bundled pipeline configs for single-file checkpoints (fully offline)
+# ---------------------------------------------------------------------------
+
+_CHECKPOINT_CONFIG_MAP = {
+    "StableDiffusionXLPipeline": "sdxl-pipeline",
+    "StableDiffusionXLImg2ImgPipeline": "sdxl-pipeline",
+    "StableDiffusionXLInpaintPipeline": "sdxl-pipeline",
+    "StableDiffusionPipeline": "sd15-pipeline",
+    "StableDiffusionImg2ImgPipeline": "sd15-pipeline",
+    "StableDiffusionInpaintPipeline": "sd15-pipeline",
+}
+
+
+def _resolve_checkpoint_config(cls_name: str) -> str:
+    """Return path to bundled pipeline config for single-file checkpoint loading."""
+    dirname = _CHECKPOINT_CONFIG_MAP.get(cls_name)
+    if dirname:
+        config_path = str(CONFIGS_DIR / dirname)
+        if os.path.isdir(config_path):
+            return config_path
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Model format detection
 # ---------------------------------------------------------------------------
 
@@ -821,20 +845,14 @@ def load_pipeline(
         weight_dtype = _detect_weight_dtype(model_source)
         filename = Path(model_source).name
         emitter.info(f"Loading checkpoint: {filename} (weights={weight_dtype})")
-        # full_checkpoint (e.g. SDXL) needs HF Hub access for component config
-        # resolution during from_single_file(). Temporarily allow it.
-        # TODO: bundle pipeline configs in modl-registry manifests so we can
-        # load single-file checkpoints fully offline without hitting HF Hub.
-        from huggingface_hub import constants as hf_constants
-        was_offline = hf_constants.HF_HUB_OFFLINE
-        hf_constants.HF_HUB_OFFLINE = False
-        try:
-            pipe = PipelineClass.from_single_file(
-                model_source,
-                torch_dtype=dtype,
-            )
-        finally:
-            hf_constants.HF_HUB_OFFLINE = was_offline
+        # Use bundled pipeline configs so from_single_file works fully offline
+        # without needing to fetch component configs from HuggingFace Hub.
+        local_config = _resolve_checkpoint_config(cls_name)
+        pipe = PipelineClass.from_single_file(
+            model_source,
+            config=local_config,
+            torch_dtype=dtype,
+        )
         pipe._modl_loaded_files = {
             "checkpoint": {"file": filename, "path": model_source, "weight_dtype": weight_dtype},
         }
