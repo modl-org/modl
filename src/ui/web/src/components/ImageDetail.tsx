@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import {
   Dialog,
   DialogContent,
+  DialogTitle,
 } from '@/components/ui/dialog'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { modelColor } from '@/lib/utils'
@@ -127,6 +128,7 @@ export function ImageDetail({ image, onClose, allImages, onNavigate, onToggleFav
   return (
     <Dialog open={Boolean(image)} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="max-w-[96vw] gap-0 overflow-hidden rounded-xl border border-white/[0.06] bg-[#0c0c12] p-0 shadow-2xl sm:max-w-5xl [&>button]:hidden">
+        <DialogTitle className="sr-only">{image?.filename ?? 'Image'}</DialogTitle>
         {image ? (
           <div className="flex max-h-[92vh]">
             {/* ── Image area ─────────────────────────────────────── */}
@@ -160,7 +162,7 @@ export function ImageDetail({ image, onClose, allImages, onNavigate, onToggleFav
 
               <img
                 key={image.path}
-                src={`/files/${image.path}`}
+                src={`/files/${image.path}?w=1920`}
                 alt={image.filename}
                 onLoad={() => setImageLoaded(true)}
                 className={`max-h-[88vh] max-w-full rounded object-contain p-2 transition-opacity duration-200 ${

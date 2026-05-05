@@ -630,9 +630,10 @@ export const TrainingRunCard = memo(function TrainingRunCard({
                           src={`/files/${image}`}
                           alt={`Prompt ${row.id + 1} - step ${runDetail.samples[idx]?.step}`}
                           className="aspect-square"
+                          thumbWidth={300}
                           onClick={() =>
                             onSetLightboxImage({
-                              src: `/files/${image}`,
+                              src: `/files/${image}?w=1920`,
                               step: runDetail.samples[idx]?.step ?? 0,
                               promptIndex: row.id,
                               prompt: row.label,

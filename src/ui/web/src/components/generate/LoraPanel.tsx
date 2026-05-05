@@ -219,7 +219,7 @@ export function LoraPanel({ models, families, form, setForm }: Props) {
                       <span className="flex items-center gap-2 truncate">
                         {sampleUrl && (
                           <img
-                            src={`/files/${sampleUrl}`}
+                            src={`/files/${sampleUrl}?w=64`}
                             alt=""
                             className="size-5 flex-shrink-0 rounded object-cover"
                           />
@@ -242,7 +242,7 @@ export function LoraPanel({ models, families, form, setForm }: Props) {
                           <span className="flex items-center gap-2">
                             {model.sample_image_url && (
                               <img
-                                src={`/files/${model.sample_image_url}`}
+                                src={`/files/${model.sample_image_url}?w=64`}
                                 alt=""
                                 className={`size-5 rounded object-cover ${!compatible ? 'opacity-40 grayscale' : ''}`}
                               />

@@ -129,6 +129,7 @@ export function SessionStrip({
                   src={`/files/${img.path}`}
                   alt={img.prompt ?? img.filename}
                   className="h-full w-full"
+                  thumbWidth={THUMB * 2}
                 />
               </button>
             </div>

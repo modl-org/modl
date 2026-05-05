@@ -211,7 +211,7 @@ export function LoraLibrary() {
                 {lora.thumbnail ? (
                   <div className="aspect-video w-full overflow-hidden rounded-t-lg border-b border-border/40">
                     <img
-                      src={`/files/${lora.thumbnail}`}
+                      src={`/files/${lora.thumbnail}?w=400`}
                       alt={lora.name}
                       className="h-full w-full object-cover"
                     />

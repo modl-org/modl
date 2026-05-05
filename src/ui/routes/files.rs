@@ -33,13 +33,14 @@ pub async fn serve_file(
 
     // If ?w= is requested, serve a cached thumbnail
     if let Some(w) = params.w {
-        let w = w.clamp(32, 800);
+        let w = w.clamp(32, 1920);
         return serve_thumbnail(&canonical, w).await;
     }
 
     match tokio::fs::read(&canonical).await {
         Ok(bytes) => {
-            let content_type = match canonical.extension().and_then(|e| e.to_str()).unwrap_or("") {
+            let ext = canonical.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let content_type = match ext {
                 "jpg" | "jpeg" => "image/jpeg",
                 "png" => "image/png",
                 "webp" => "image/webp",
@@ -48,7 +49,18 @@ pub async fn serve_file(
                 "safetensors" => "application/octet-stream",
                 _ => "application/octet-stream",
             };
-            ([(header::CONTENT_TYPE, content_type)], bytes).into_response()
+            let cache = match ext {
+                "jpg" | "jpeg" | "png" | "webp" => "public, max-age=86400",
+                _ => "no-cache",
+            };
+            (
+                [
+                    (header::CONTENT_TYPE, content_type),
+                    (header::CACHE_CONTROL, cache),
+                ],
+                bytes,
+            )
+                .into_response()
         }
         Err(_) => (StatusCode::NOT_FOUND, "Not found").into_response(),
     }

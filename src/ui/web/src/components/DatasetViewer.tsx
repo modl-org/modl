@@ -144,7 +144,7 @@ export function DatasetViewer() {
                 className="overflow-hidden rounded-lg border border-border/50"
               >
                 <LazyImage
-                  src={`/files/${image.image_url}`}
+                  src={`/files/${image.image_url}?w=400`}
                   alt={image.filename}
                   className="aspect-square"
                   onClick={() => setLightbox({ ...image, datasetName: overview.name })}
@@ -197,7 +197,7 @@ export function DatasetViewer() {
           <div className="grid max-h-[90vh] gap-0 lg:grid-cols-[minmax(0,1fr)_280px]">
             <div className="flex items-center justify-center overflow-auto bg-black/70 p-4">
               <img
-                src={`/files/${lightbox.image_url}`}
+                src={`/files/${lightbox.image_url}?w=1920`}
                 alt={lightbox.filename}
                 className="max-h-[80vh] rounded object-contain"
               />
