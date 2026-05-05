@@ -195,6 +195,7 @@ pub async fn run(
     json: bool,
     in_order: bool,
     skip_existing: bool,
+    run_id_override: Option<&str>,
 ) -> Result<()> {
     let db = Database::open()?;
     let multi = spec_paths.len() > 1;
@@ -207,7 +208,7 @@ pub async fn run(
             println!("── {}/{}: {} ──", i + 1, spec_paths.len(), spec_path);
         }
 
-        let plan_result = build_plan(spec_path, &db);
+        let plan_result = build_plan(spec_path, &db, run_id_override);
 
         if dry_run {
             run_dry_run(plan_result, json, in_order)?;
@@ -276,7 +277,11 @@ fn run_dry_run(plan_result: Result<Plan, PlanError>, json: bool, in_order: bool)
 /// Auto-disabling LoRA on model override is a safe default, not a
 /// restriction: if the user wants to force a LoRA through anyway, they
 /// can set `lora:` explicitly on the step.
-pub fn build_plan(spec_path: &str, db: &Database) -> Result<Plan, PlanError> {
+pub fn build_plan(
+    spec_path: &str,
+    db: &Database,
+    run_id_override: Option<&str>,
+) -> Result<Plan, PlanError> {
     // 1. Parse + validate YAML
     let wf = parse_file(Path::new(spec_path)).map_err(|e| PlanError::Parse(format!("{e:#}")))?;
 
@@ -292,11 +297,13 @@ pub fn build_plan(spec_path: &str, db: &Database) -> Result<Plan, PlanError> {
     // 4. Compute run id + output dir (dry-run uses these only for display)
     let date = chrono::Local::now().format("%Y-%m-%d").to_string();
     let output_dir = paths::modl_root().join("outputs").join(&date);
-    let run_id = format!(
-        "{}-{}",
-        chrono::Local::now().format("%Y%m%d-%H%M%S"),
-        sanitize_for_path(&wf.name)
-    );
+    let run_id = run_id_override.map(|s| s.to_string()).unwrap_or_else(|| {
+        format!(
+            "{}-{}",
+            chrono::Local::now().format("%Y%m%d-%H%M%S"),
+            sanitize_for_path(&wf.name)
+        )
+    });
 
     // 5. Per-step resolution: model override, lora override, seed expansion.
     // We cache resolved models by ID so a workflow that uses the same model

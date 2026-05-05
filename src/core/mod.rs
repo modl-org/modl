@@ -25,6 +25,7 @@ pub mod outputs;
 pub mod paths;
 pub mod preflight;
 pub mod presets;
+pub mod reconcile;
 pub mod registry;
 pub mod remote_executor;
 pub mod resolver;

@@ -5,6 +5,7 @@
 //! each tool call spawns the appropriate `modl` subcommand.
 
 use anyhow::{Context, Result};
+use chrono::Local;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
@@ -379,6 +380,48 @@ fn tool_definitions() -> Value {
                     }
                 },
                 "required": ["prompt"]
+            }
+        },
+        {
+            "name": "run_workflow",
+            "description": "Submit a batch workflow YAML to modl run. Returns immediately with a run_id — the job continues in the background. Use job_status to poll for completion. Useful for fire-and-forget batch runs: submit from laptop, close lid, check back later.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "spec_yaml": {
+                        "type": "string",
+                        "description": "Full YAML content of the workflow spec (the contents of a .yaml file)"
+                    }
+                },
+                "required": ["spec_yaml"]
+            }
+        },
+        {
+            "name": "job_status",
+            "description": "Check the status of a workflow run submitted via run_workflow. Returns aggregate status (pending/running/completed/partial_failure) and artifact URLs. Set MODL_BASE_URL env var on the server for HTTP URLs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": "string",
+                        "description": "Run ID returned by run_workflow"
+                    }
+                },
+                "required": ["run_id"]
+            }
+        },
+        {
+            "name": "list_run_outputs",
+            "description": "List artifact paths or URLs for a completed workflow run. If MODL_BASE_URL is set on the server, returns HTTP URLs downloadable over Tailscale.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": "string",
+                        "description": "Run ID to list outputs for"
+                    }
+                },
+                "required": ["run_id"]
             }
         }
     ])
@@ -873,6 +916,121 @@ fn tool_remove_bg(args: &Value) -> Result<Value, (i32, String)> {
     }
 }
 
+fn tool_run_workflow(args: &Value) -> Result<Value, (i32, String)> {
+    let spec_yaml = args
+        .get("spec_yaml")
+        .and_then(|v| v.as_str())
+        .ok_or((-32602, "Missing required parameter: spec_yaml".to_string()))?;
+
+    // Write the YAML to a tempfile.
+    let tmp_path = std::env::temp_dir().join(format!(
+        "modl-workflow-{}.yaml",
+        Local::now().format("%Y%m%d-%H%M%S-%f")
+    ));
+    std::fs::write(&tmp_path, spec_yaml)
+        .map_err(|e| (-32603, format!("Failed to write workflow tempfile: {e}")))?;
+
+    // Pre-generate the run_id using the same timestamp format as run.rs.
+    // We pass it explicitly so the background process uses the same ID we return.
+    let run_id = format!("mcp-{}", Local::now().format("%Y%m%d-%H%M%S"));
+
+    // Log file for background output — useful for debugging.
+    let log_path = crate::core::paths::modl_root()
+        .join("run-logs")
+        .join(format!("{run_id}.log"));
+    let _ = std::fs::create_dir_all(log_path.parent().unwrap());
+
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| (-32603, format!("Failed to create log file: {e}")))?;
+
+    let bin = modl_bin().map_err(|e| (-32603, e.to_string()))?;
+
+    std::process::Command::new(bin)
+        .args(["run", tmp_path.to_str().unwrap_or(""), "--run-id", &run_id])
+        .stdin(std::process::Stdio::null())
+        .stdout(
+            std::fs::File::open(&log_path)
+                .map(std::process::Stdio::from)
+                .unwrap_or(std::process::Stdio::null()),
+        )
+        .stderr(std::process::Stdio::from(log_file))
+        .spawn()
+        .map_err(|e| (-32603, format!("Failed to spawn modl run: {e}")))?;
+
+    Ok(json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::to_string_pretty(&json!({
+                "run_id": run_id,
+                "status": "submitted",
+                "log": log_path.to_string_lossy(),
+            })).unwrap_or_default()
+        }]
+    }))
+}
+
+fn tool_job_status(args: &Value) -> Result<Value, (i32, String)> {
+    let run_id = args
+        .get("run_id")
+        .and_then(|v| v.as_str())
+        .ok_or((-32602, "Missing required parameter: run_id".to_string()))?;
+
+    let (stdout, stderr, success) =
+        run_modl(&["status", "--json", run_id]).map_err(|e| (-32603, e))?;
+
+    if !success {
+        let msg = if stderr.is_empty() { &stdout } else { &stderr };
+        return Err((-32603, format!("Status check failed: {}", msg.trim())));
+    }
+
+    if let Ok(result) = serde_json::from_str::<Value>(&stdout) {
+        Ok(json!({
+            "content": [{"type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_else(|_| stdout.clone())}]
+        }))
+    } else {
+        Ok(json!({
+            "content": [{"type": "text", "text": stdout.trim()}]
+        }))
+    }
+}
+
+fn tool_list_run_outputs(args: &Value) -> Result<Value, (i32, String)> {
+    let run_id = args
+        .get("run_id")
+        .and_then(|v| v.as_str())
+        .ok_or((-32602, "Missing required parameter: run_id".to_string()))?;
+
+    let (stdout, stderr, success) =
+        run_modl(&["status", "--json", run_id]).map_err(|e| (-32603, e))?;
+
+    if !success {
+        let msg = if stderr.is_empty() { &stdout } else { &stderr };
+        return Err((-32603, format!("Failed to list outputs: {}", msg.trim())));
+    }
+
+    if let Ok(result) = serde_json::from_str::<Value>(&stdout) {
+        let artifacts = result
+            .get("artifacts")
+            .cloned()
+            .unwrap_or_else(|| json!([]));
+        let count = artifacts.as_array().map(|a| a.len()).unwrap_or(0);
+        let text = format!(
+            "{count} artifact(s) for run {run_id}:\n{}",
+            serde_json::to_string_pretty(&artifacts).unwrap_or_default()
+        );
+        Ok(json!({
+            "content": [{"type": "text", "text": text}]
+        }))
+    } else {
+        Ok(json!({
+            "content": [{"type": "text", "text": stdout.trim()}]
+        }))
+    }
+}
+
 fn tool_enhance(args: &Value) -> Result<Value, (i32, String)> {
     let prompt = args
         .get("prompt")
@@ -956,6 +1114,9 @@ fn handle_request(request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
                 "upscale" => tool_upscale(&arguments),
                 "remove_bg" => tool_remove_bg(&arguments),
                 "enhance" => tool_enhance(&arguments),
+                "run_workflow" => tool_run_workflow(&arguments),
+                "job_status" => tool_job_status(&arguments),
+                "list_run_outputs" => tool_list_run_outputs(&arguments),
                 _ => Err((-32601, format!("Unknown tool: {}", name))),
             }
         }
@@ -1127,7 +1288,10 @@ mod tests {
         assert!(names.contains(&"upscale"));
         assert!(names.contains(&"remove_bg"));
         assert!(names.contains(&"enhance"));
-        assert_eq!(tool_list.len(), 12);
+        assert!(names.contains(&"run_workflow"));
+        assert!(names.contains(&"job_status"));
+        assert!(names.contains(&"list_run_outputs"));
+        assert_eq!(tool_list.len(), 15);
     }
 
     #[test]

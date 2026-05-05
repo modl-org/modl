@@ -155,6 +155,22 @@ impl Database {
         Ok(())
     }
 
+    /// Find all step-jobs belonging to a workflow run (matched via spec_json label).
+    pub fn list_jobs_by_run_id(&self, run_id: &str) -> Result<Vec<JobRecord>> {
+        let pattern = format!("%{run_id}%");
+        let mut stmt = self.conn.prepare(
+            "SELECT job_id, kind, status, spec_json, target, provider, created_at, started_at, completed_at \
+             FROM jobs WHERE spec_json LIKE ?1 ORDER BY created_at ASC"
+        ).context("Failed to prepare query")?;
+
+        let rows = stmt
+            .query_map(params![pattern], JobRecord::from_row)
+            .context("Failed to query jobs by run_id")?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("Failed to collect job results")
+    }
+
     /// Count total jobs in the database.
     pub fn count_jobs(&self) -> Result<usize> {
         let count: i64 = self
