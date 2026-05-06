@@ -932,9 +932,13 @@ fn tool_run_workflow(args: &Value) -> Result<Value, (i32, String)> {
         .map_err(|e| (-32603, format!("Failed to write workflow tempfile: {e}")))?;
     let tmp_path = tmp.path().to_path_buf();
 
-    // Pre-generate the run_id using the same timestamp format as run.rs.
-    // We pass it explicitly so the background process uses the same ID we return.
-    let run_id = format!("mcp-{}", Local::now().format("%Y%m%d-%H%M%S"));
+    // Pre-generate the run_id. Includes a short random suffix to prevent
+    // collisions when two workflows are submitted within the same second.
+    let run_id = format!(
+        "mcp-{}-{}",
+        Local::now().format("%Y%m%d-%H%M%S"),
+        &uuid::Uuid::new_v4().to_string()[..6]
+    );
 
     // Log file for background output — useful for debugging.
     let log_path = crate::core::paths::modl_root()

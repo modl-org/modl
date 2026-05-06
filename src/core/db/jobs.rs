@@ -133,29 +133,21 @@ impl Database {
         Ok(updated)
     }
 
-    /// Delete all jobs and their events for a given LoRA name
-    pub fn delete_jobs_by_lora_name(&self, lora_name: &str) -> Result<()> {
+    /// Delete all jobs and their events for a given LoRA name.
+    /// Returns the number of deleted job rows so the caller can display feedback.
+    pub fn delete_jobs_by_lora_name(&self, lora_name: &str) -> Result<usize> {
         let pattern = format!("job-{lora_name}-%");
-        // Delete events first (child records)
         self.conn
             .execute(
                 "DELETE FROM job_events WHERE job_id LIKE ?1",
                 params![pattern],
             )
             .context("Failed to delete job events")?;
-        // Delete the jobs themselves
         let deleted = self
             .conn
             .execute("DELETE FROM jobs WHERE job_id LIKE ?1", params![pattern])
             .context("Failed to delete jobs")?;
-        if deleted > 0 {
-            println!(
-                "  {} Removed {} job record(s)",
-                console::style("×").red(),
-                deleted
-            );
-        }
-        Ok(())
+        Ok(deleted)
     }
 
     /// Find all step-jobs belonging to a workflow run.
@@ -180,10 +172,14 @@ impl Database {
 
         // Fallback: LIKE scan for rows pre-dating the workflow_run_id column.
         // TODO: remove this once all users have migrated past DB version 1.
-        let pattern = format!("%{run_id}%");
+        let escaped = run_id
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("%{escaped}%");
         let mut stmt = self.conn.prepare(
             "SELECT job_id, kind, status, spec_json, target, provider, created_at, started_at, completed_at \
-             FROM jobs WHERE workflow_run_id IS NULL AND spec_json LIKE ?1 ORDER BY created_at ASC"
+             FROM jobs WHERE workflow_run_id IS NULL AND spec_json LIKE ?1 ESCAPE '\\' ORDER BY created_at ASC"
         ).context("Failed to prepare fallback query")?;
         let rows = stmt
             .query_map(params![pattern], JobRecord::from_row)

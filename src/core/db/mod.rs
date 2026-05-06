@@ -209,6 +209,14 @@ impl Database {
             let _ = self.conn.execute_batch("PRAGMA user_version = 1;");
         }
 
+        if version < 2 {
+            let _ = self.conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_artifacts_job_id
+                 ON artifacts (job_id) WHERE job_id IS NOT NULL;",
+            );
+            let _ = self.conn.execute_batch("PRAGMA user_version = 2;");
+        }
+
         Ok(())
     }
 }

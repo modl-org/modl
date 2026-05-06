@@ -267,7 +267,12 @@ pub fn parse_str(yaml: &str, base_dir: &Path) -> Result<Workflow> {
                 count: raw_step.count.or(raw.defaults.count),
             })
         } else {
-            let source_str = raw_step.edit.as_ref().unwrap();
+            let source_str = raw_step.edit.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "step `{}`: expected `generate:` or `edit:` field",
+                    raw_step.id
+                )
+            })?;
             let edit_prompt = raw_step.prompt.as_ref().ok_or_else(|| {
                 anyhow!(
                     "step `{}`: edit steps require a `prompt:` field",

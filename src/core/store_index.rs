@@ -47,11 +47,20 @@ pub fn load() -> Vec<IndexEntry> {
 
 fn save(entries: &[IndexEntry]) {
     let path = index_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(yaml) = serde_yaml::to_string(entries) {
-        let _ = std::fs::write(&path, yaml);
+    let Some(parent) = path.parent() else { return };
+    let _ = std::fs::create_dir_all(parent);
+    let Ok(yaml) = serde_yaml::to_string(entries) else {
+        return;
+    };
+    // Write to a sibling tempfile then rename atomically so concurrent writers
+    // on different OS users never produce a partial or interleaved index.
+    if let Ok(mut tmp) = tempfile::Builder::new()
+        .prefix(".index-")
+        .suffix(".yaml.tmp")
+        .tempfile_in(parent)
+        && std::io::Write::write_all(&mut tmp, yaml.as_bytes()).is_ok()
+    {
+        let _ = tmp.persist(&path);
     }
 }
 

@@ -27,21 +27,35 @@ pub async fn api_export_run_zip(Path(run_id): Path<String>) -> Response {
             ];
             (headers, Body::from(bytes)).into_response()
         }
-        Ok(Err(e)) => (
+        Ok(Err(ZipError::NotFound(id))) => (
             StatusCode::NOT_FOUND,
-            format!("No artifacts found for run '{e}'"),
+            format!("No workflow run found: '{id}'"),
         )
             .into_response(),
+        Ok(Err(ZipError::NoArtifacts(id))) => (
+            StatusCode::ACCEPTED,
+            format!("Run '{id}' exists but has no artifacts yet — try again later"),
+        )
+            .into_response(),
+        Ok(Err(ZipError::Other(e))) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "ZIP generation failed").into_response(),
     }
 }
 
-fn build_zip(run_id: &str) -> Result<(Vec<u8>, String), String> {
-    let db = Database::open().map_err(|e| e.to_string())?;
-    let jobs = db.list_jobs_by_run_id(run_id).map_err(|e| e.to_string())?;
+enum ZipError {
+    NotFound(String),
+    NoArtifacts(String),
+    Other(String),
+}
+
+fn build_zip(run_id: &str) -> Result<(Vec<u8>, String), ZipError> {
+    let db = Database::open().map_err(|e| ZipError::Other(e.to_string()))?;
+    let jobs = db
+        .list_jobs_by_run_id(run_id)
+        .map_err(|e| ZipError::Other(e.to_string()))?;
 
     if jobs.is_empty() {
-        return Err(run_id.to_string());
+        return Err(ZipError::NotFound(run_id.to_string()));
     }
 
     let mut artifact_paths: Vec<String> = Vec::new();
@@ -55,12 +69,12 @@ fn build_zip(run_id: &str) -> Result<(Vec<u8>, String), String> {
     }
 
     if artifact_paths.is_empty() {
-        return Err(run_id.to_string());
+        return Err(ZipError::NoArtifacts(run_id.to_string()));
     }
 
     // Build ZIP in a tempfile; the finished archive is read into memory before
     // sending. Acceptable for typical run sizes; revisit if >1 GB runs appear.
-    let tmp = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
+    let tmp = tempfile::NamedTempFile::new().map_err(|e| ZipError::Other(e.to_string()))?;
     let mut zip = zip::ZipWriter::new(tmp);
     let options = zip::write::FileOptions::<()>::default()
         .compression_method(zip::CompressionMethod::Deflated);
@@ -81,8 +95,8 @@ fn build_zip(run_id: &str) -> Result<(Vec<u8>, String), String> {
         }
     }
 
-    let tmp_done = zip.finish().map_err(|e| e.to_string())?;
-    let bytes = std::fs::read(tmp_done.path()).map_err(|e| e.to_string())?;
+    let tmp_done = zip.finish().map_err(|e| ZipError::Other(e.to_string()))?;
+    let bytes = std::fs::read(tmp_done.path()).map_err(|e| ZipError::Other(e.to_string()))?;
     let filename = format!("{run_id}.zip");
     Ok((bytes, filename))
 }

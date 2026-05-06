@@ -106,11 +106,8 @@ pub async fn run(command: OutputCommands) -> Result<()> {
 async fn run_list(limit: usize, kind_filter: Option<&str>, favorites_only: bool) -> Result<()> {
     let db = Database::open()?;
     let artifacts = db.list_artifacts(None)?;
-    let favorite_paths = if favorites_only {
-        db.get_favorite_paths()?
-    } else {
-        std::collections::HashSet::new()
-    };
+    // Single query used both for the ⭐ column and the --favorites filter.
+    let all_favorites = db.get_favorite_paths()?;
 
     if artifacts.is_empty() {
         println!("No outputs yet.");
@@ -121,9 +118,6 @@ async fn run_list(limit: usize, kind_filter: Option<&str>, favorites_only: bool)
         return Ok(());
     }
 
-    // Collect all favorite paths for the ⭐ column
-    let all_favorites = db.get_favorite_paths()?;
-
     // Filter by kind if requested
     let filtered: Vec<&ArtifactRecord> = artifacts
         .iter()
@@ -133,7 +127,7 @@ async fn run_list(limit: usize, kind_filter: Option<&str>, favorites_only: bool)
             {
                 return false;
             }
-            if favorites_only && !favorite_paths.contains(&a.path) {
+            if favorites_only && !all_favorites.contains(&a.path) {
                 return false;
             }
             true
@@ -634,7 +628,7 @@ async fn run_export(
 
         let mut copied = 0usize;
         for job in &jobs {
-            let arts = db.list_artifacts(Some(&job.job_id)).unwrap_or_default();
+            let arts = db.list_artifacts(Some(&job.job_id))?;
             for a in arts {
                 let src = std::path::Path::new(&a.path);
                 if !src.is_file() {

@@ -18,14 +18,18 @@ pub async fn run(run_id: &str, json: bool) -> Result<()> {
     let failed = jobs.iter().filter(|j| j.status == "error").count();
     let running = jobs.iter().filter(|j| j.status == "running").count();
 
-    // partial_failure: all steps have terminated, at least one errored.
-    // A run with pending steps and failures stays "pending" until all settle.
-    let aggregate = if failed > 0 && running == 0 && completed + failed == total {
+    let cancelled = jobs.iter().filter(|j| j.status == "cancelled").count();
+    // partial_failure / cancelled: all steps terminated, none still running.
+    // Runs with pending steps and failures stay "pending" until all settle.
+    let is_terminal = running == 0 && completed + failed + cancelled == total;
+    let aggregate = if failed > 0 && is_terminal {
         "partial_failure"
     } else if running > 0 {
         "running"
     } else if completed == total {
         "completed"
+    } else if cancelled > 0 && is_terminal {
+        "cancelled"
     } else {
         "pending"
     };
@@ -62,6 +66,7 @@ pub async fn run(run_id: &str, json: bool) -> Result<()> {
                 "completed": completed,
                 "failed": failed,
                 "running": running,
+                "cancelled": cancelled,
             },
             "artifacts": artifacts.iter().map(|(path, url)| serde_json::json!({
                 "path": path,
@@ -83,6 +88,7 @@ pub async fn run(run_id: &str, json: bool) -> Result<()> {
             "completed" => style(aggregate).green().to_string(),
             "running" => style(aggregate).yellow().to_string(),
             "partial_failure" => style(aggregate).red().to_string(),
+            "cancelled" => style(aggregate).yellow().to_string(),
             _ => style(aggregate).dim().to_string(),
         }
     );
@@ -115,7 +121,7 @@ pub async fn run(run_id: &str, json: bool) -> Result<()> {
         }
     }
 
-    if aggregate != "completed" && aggregate != "partial_failure" {
+    if aggregate != "completed" && aggregate != "partial_failure" && aggregate != "cancelled" {
         println!();
         println!(
             "  {} Re-run {} to refresh.",
