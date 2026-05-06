@@ -1,6 +1,10 @@
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 
+use crate::core::config::Config;
+use crate::core::db::Database;
+use crate::core::registry::RegistryIndex;
+
 /// Fast reconciliation from the shared store index.yaml instead of a directory scan.
 ///
 /// For new users with a symlinked store, this populates the local SQLite from
@@ -38,10 +42,6 @@ pub fn reconcile_from_index(db: &Database) -> Result<usize> {
     }
     Ok(registered)
 }
-
-use crate::core::config::Config;
-use crate::core::db::Database;
-use crate::core::registry::RegistryIndex;
 
 /// Scan store directories and register any files not already tracked in the DB.
 ///

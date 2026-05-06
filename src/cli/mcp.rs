@@ -922,13 +922,15 @@ fn tool_run_workflow(args: &Value) -> Result<Value, (i32, String)> {
         .and_then(|v| v.as_str())
         .ok_or((-32602, "Missing required parameter: spec_yaml".to_string()))?;
 
-    // Write the YAML to a tempfile.
-    let tmp_path = std::env::temp_dir().join(format!(
-        "modl-workflow-{}.yaml",
-        Local::now().format("%Y%m%d-%H%M%S-%f")
-    ));
-    std::fs::write(&tmp_path, spec_yaml)
+    // Write the YAML to a tempfile. NamedTempFile auto-deletes on drop,
+    // so we keep `tmp` alive past the 500ms early-exit check then let it drop.
+    let mut tmp = tempfile::Builder::new()
+        .suffix(".yaml")
+        .tempfile()
+        .map_err(|e| (-32603, format!("Failed to create tempfile: {e}")))?;
+    std::io::Write::write_all(&mut tmp, spec_yaml.as_bytes())
         .map_err(|e| (-32603, format!("Failed to write workflow tempfile: {e}")))?;
+    let tmp_path = tmp.path().to_path_buf();
 
     // Pre-generate the run_id using the same timestamp format as run.rs.
     // We pass it explicitly so the background process uses the same ID we return.
@@ -973,6 +975,10 @@ fn tool_run_workflow(args: &Value) -> Result<Value, (i32, String)> {
             ));
         }
     }
+
+    // Child has started and survived the early-exit window; the tempfile is no
+    // longer needed (modl run has already opened it).
+    drop(tmp);
 
     // Forward remaining stderr to the log file (best-effort).
     if let Some(mut stderr_pipe) = child.stderr.take() {

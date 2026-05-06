@@ -583,17 +583,22 @@ async fn run_export(
             style(&url).underlined()
         );
 
-        let response = reqwest::blocking::get(&url).context("Failed to connect to server")?;
+        let response = reqwest::get(&url)
+            .await
+            .context("Failed to connect to server")?;
 
         if !response.status().is_success() {
             bail!(
                 "Server returned {}: {}",
                 response.status(),
-                response.text().unwrap_or_default()
+                response.text().await.unwrap_or_default()
             );
         }
 
-        let bytes = response.bytes().context("Failed to read response body")?;
+        let bytes = response
+            .bytes()
+            .await
+            .context("Failed to read response body")?;
         std::fs::create_dir_all(&dest_dir).context("Failed to create destination directory")?;
 
         let cursor = std::io::Cursor::new(bytes);
@@ -602,9 +607,11 @@ async fn run_export(
 
         for i in 0..archive.len() {
             let mut file = archive.by_index(i)?;
-            let out_path = dest_dir.join(file.name());
-            let mut out = std::fs::File::create(&out_path)?;
-            std::io::copy(&mut file, &mut out)?;
+            if let Some(safe_name) = file.enclosed_name() {
+                let out_path = dest_dir.join(safe_name);
+                let mut out = std::fs::File::create(&out_path)?;
+                std::io::copy(&mut file, &mut out)?;
+            }
         }
 
         println!(

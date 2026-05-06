@@ -179,6 +179,7 @@ impl Database {
         }
 
         // Fallback: LIKE scan for rows pre-dating the workflow_run_id column.
+        // TODO: remove this once all users have migrated past DB version 1.
         let pattern = format!("%{run_id}%");
         let mut stmt = self.conn.prepare(
             "SELECT job_id, kind, status, spec_json, target, provider, created_at, started_at, completed_at \

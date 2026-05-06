@@ -58,21 +58,25 @@ fn build_zip(run_id: &str) -> Result<(Vec<u8>, String), String> {
         return Err(run_id.to_string());
     }
 
-    // Stream into a tempfile to avoid holding all images in RAM.
+    // Build ZIP in a tempfile; the finished archive is read into memory before
+    // sending. Acceptable for typical run sizes; revisit if >1 GB runs appear.
     let tmp = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
     let mut zip = zip::ZipWriter::new(tmp);
     let options = zip::write::FileOptions::<()>::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
-    for path in &artifact_paths {
+    for (idx, path) in artifact_paths.iter().enumerate() {
         let p = std::path::Path::new(path);
-        let name = p
+        let base_name = p
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "file".to_string());
+        // Prefix with index to avoid collisions when multiple steps produce
+        // identically-named files.
+        let entry_name = format!("{idx:03}_{base_name}");
 
         if let Ok(data) = std::fs::read(p) {
-            let _ = zip.start_file(&name, options);
+            let _ = zip.start_file(&entry_name, options);
             let _ = zip.write_all(&data);
         }
     }

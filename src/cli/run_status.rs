@@ -18,6 +18,8 @@ pub async fn run(run_id: &str, json: bool) -> Result<()> {
     let failed = jobs.iter().filter(|j| j.status == "error").count();
     let running = jobs.iter().filter(|j| j.status == "running").count();
 
+    // partial_failure: all steps have terminated, at least one errored.
+    // A run with pending steps and failures stays "pending" until all settle.
     let aggregate = if failed > 0 && running == 0 && completed + failed == total {
         "partial_failure"
     } else if running > 0 {
