@@ -5,6 +5,7 @@ use indicatif::HumanBytes;
 
 use crate::core::db::Database;
 use crate::core::manifest::AssetType;
+use crate::core::reconcile;
 
 /// Display sections for user-visible grouping
 struct Section {
@@ -43,6 +44,23 @@ const INTERNAL_TYPES: &[&str] = &[
 
 pub async fn run(type_filter: Option<AssetType>, show_all: bool) -> Result<()> {
     let db = Database::open()?;
+
+    // Sync any store entries not yet in the local DB from the shared index.yaml.
+    // This is an O(index-size) read — no directory walking. Falls back to a full
+    // scan only when the index doesn't exist yet (first run on a bare store).
+    let n = reconcile::reconcile_from_index(&db)
+        .or_else(|_| reconcile::reconcile_store(&db))
+        .unwrap_or(0);
+    if n > 0 {
+        println!(
+            "  {} Auto-registered {} model{} found on disk",
+            style("ℹ").dim(),
+            n,
+            if n == 1 { "" } else { "s" }
+        );
+        println!();
+    }
+
     let filter_str = type_filter.as_ref().map(|t| t.to_string());
     let models = db.list_installed(filter_str.as_deref())?;
 

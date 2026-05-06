@@ -378,8 +378,16 @@ mod tests {
         let store_root = tempfile::TempDir::new().unwrap();
 
         // Insert a job record so the FK on artifacts is satisfied
-        db.insert_job("job-test-123", "train", "running", "{}", "local", None)
-            .unwrap();
+        db.insert_job(
+            "job-test-123",
+            "train",
+            "running",
+            "{}",
+            "local",
+            None,
+            None,
+        )
+        .unwrap();
 
         let result = collect_lora(
             &output_file,

@@ -1,10 +1,10 @@
 use anyhow::Result;
 use console::style;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::core::config::Config;
 use crate::core::db::Database;
-use crate::core::registry::RegistryIndex;
+use crate::core::reconcile;
 use crate::core::store::Store;
 use crate::core::symlink;
 
@@ -142,64 +142,7 @@ pub async fn run(verify_hashes: bool, repair: bool) -> Result<()> {
             "{} Repairing — registering orphaned files...",
             style("→").cyan()
         );
-        let mut repaired = 0;
-
-        // Build a hash-prefix → (id, name, variant) lookup from the registry
-        let registry_lookup = build_registry_lookup();
-
-        for (store_path, asset_type, hash_prefix, file_name, size) in &orphans {
-            // Use the directory name as the SHA256 prefix — the store is
-            // content-addressed so the dir name IS the hash. Full verification
-            // can be done later with --verify-hashes. This avoids hashing
-            // multi-GB files during repair.
-            let sha256 = hash_prefix.clone();
-
-            // Try to match against the registry for proper ID/name
-            let (id, display_name, variant) = if let Some((reg_id, reg_name, reg_variant)) =
-                registry_lookup.get(hash_prefix.as_str())
-            {
-                (reg_id.clone(), reg_name.clone(), reg_variant.clone())
-            } else {
-                // Fallback: derive from filename
-                let stem = file_name
-                    .strip_suffix(".safetensors")
-                    .or_else(|| file_name.strip_suffix(".ckpt"))
-                    .or_else(|| file_name.strip_suffix(".bin"))
-                    .or_else(|| file_name.strip_suffix(".pt"))
-                    .unwrap_or(file_name);
-                let id = format!("local/{}/{}", asset_type, stem);
-                let display_name = stem.to_string();
-                (id, display_name, None)
-            };
-
-            if let Err(e) = db.insert_installed(&crate::core::db::InstalledModelRecord {
-                id: &id,
-                name: &display_name,
-                asset_type,
-                variant: variant.as_deref(),
-                sha256: &sha256,
-                size: *size,
-                file_name,
-                store_path,
-            }) {
-                println!(
-                    "  {} Failed to register {}: {}",
-                    style("✗").red(),
-                    file_name,
-                    e
-                );
-            } else {
-                println!(
-                    "  {} Registered [{}] {} ({})",
-                    style("✓").green(),
-                    asset_type,
-                    display_name,
-                    format_size(*size)
-                );
-                repaired += 1;
-            }
-        }
-
+        let repaired = reconcile::reconcile_store(&db).unwrap_or(0);
         println!();
         if repaired > 0 {
             println!(
@@ -207,7 +150,7 @@ pub async fn run(verify_hashes: bool, repair: bool) -> Result<()> {
                 style("✓").green(),
                 repaired,
                 if repaired == 1 { "" } else { "s" },
-                style("modl model list").cyan()
+                style("modl ls").cyan()
             );
         }
     }
@@ -334,38 +277,4 @@ fn scan_orphans(
             }
         }
     }
-}
-
-/// Build a HashMap from SHA256 prefix (16 chars) → (id, name, variant_label)
-/// by scanning the local registry index. Returns empty map if index is unavailable.
-fn build_registry_lookup() -> HashMap<String, (String, String, Option<String>)> {
-    let mut map = HashMap::new();
-    let Ok(index) = RegistryIndex::load() else {
-        return map;
-    };
-    for manifest in &index.items {
-        // Single-file models (LoRAs, VAEs, etc.)
-        if let Some(ref file) = manifest.file
-            && file.sha256.len() >= 16
-        {
-            map.insert(
-                file.sha256[..16].to_string(),
-                (manifest.id.clone(), manifest.name.clone(), None),
-            );
-        }
-        // Multi-variant models (checkpoints, text encoders)
-        for variant in &manifest.variants {
-            if variant.sha256.len() >= 16 {
-                map.insert(
-                    variant.sha256[..16].to_string(),
-                    (
-                        manifest.id.clone(),
-                        manifest.name.clone(),
-                        Some(variant.id.clone()),
-                    ),
-                );
-            }
-        }
-    }
-    map
 }

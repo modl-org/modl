@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use comfy_table::{Cell, Color, Table, presets::UTF8_FULL_CONDENSED};
 use console::style;
+use std::path::PathBuf;
 
 use crate::core::db::{ArtifactRecord, Database, JobRecord};
 use crate::core::outputs as output_service;
@@ -56,6 +57,25 @@ pub enum OutputCommands {
         #[arg(long, short = 'f')]
         force: bool,
     },
+    /// Download all outputs from a workflow run to a local directory
+    ///
+    /// When --server is set (or MODL_SERVER env var), fetches the ZIP archive
+    /// from a remote modl serve instance over Tailscale. Without --server,
+    /// copies files from the local output directory.
+    ///
+    /// Example:
+    ///   modl outputs export 20240101-120000-my-workflow --dest ./my-run
+    ///   MODL_SERVER=http://server:3939 modl outputs export <run-id> --dest ./local
+    Export {
+        /// Workflow run ID
+        run_id: String,
+        /// Destination directory (created if needed). Defaults to ./<run_id>
+        #[arg(long, short = 'd')]
+        dest: Option<PathBuf>,
+        /// Remote modl server URL (overrides MODL_SERVER env var)
+        #[arg(long)]
+        server: Option<String>,
+    },
 }
 
 pub async fn run(command: OutputCommands) -> Result<()> {
@@ -71,6 +91,11 @@ pub async fn run(command: OutputCommands) -> Result<()> {
         OutputCommands::Fav { id } => run_fav(&id, true).await,
         OutputCommands::Unfav { id } => run_fav(&id, false).await,
         OutputCommands::Rm { id, force } => run_rm(&id, force).await,
+        OutputCommands::Export {
+            run_id,
+            dest,
+            server,
+        } => run_export(&run_id, dest.as_deref(), server.as_deref()).await,
     }
 }
 
@@ -81,11 +106,8 @@ pub async fn run(command: OutputCommands) -> Result<()> {
 async fn run_list(limit: usize, kind_filter: Option<&str>, favorites_only: bool) -> Result<()> {
     let db = Database::open()?;
     let artifacts = db.list_artifacts(None)?;
-    let favorite_paths = if favorites_only {
-        db.get_favorite_paths()?
-    } else {
-        std::collections::HashSet::new()
-    };
+    // Single query used both for the ⭐ column and the --favorites filter.
+    let all_favorites = db.get_favorite_paths()?;
 
     if artifacts.is_empty() {
         println!("No outputs yet.");
@@ -96,9 +118,6 @@ async fn run_list(limit: usize, kind_filter: Option<&str>, favorites_only: bool)
         return Ok(());
     }
 
-    // Collect all favorite paths for the ⭐ column
-    let all_favorites = db.get_favorite_paths()?;
-
     // Filter by kind if requested
     let filtered: Vec<&ArtifactRecord> = artifacts
         .iter()
@@ -108,7 +127,7 @@ async fn run_list(limit: usize, kind_filter: Option<&str>, favorites_only: bool)
             {
                 return false;
             }
-            if favorites_only && !favorite_paths.contains(&a.path) {
+            if favorites_only && !all_favorites.contains(&a.path) {
                 return false;
             }
             true
@@ -375,32 +394,27 @@ async fn run_open(id: &str) -> Result<()> {
 
 async fn run_search(query: &str, limit: usize) -> Result<()> {
     let db = Database::open()?;
-    let jobs = db.list_jobs(None)?;
-    let query_lower = query.to_lowercase();
-
-    let mut matching_artifacts: Vec<(ArtifactRecord, String)> = Vec::new();
-
-    for job in &jobs {
-        // Search inside spec_json
-        let spec_lower = job.spec_json.to_lowercase();
-        if !spec_lower.contains(&query_lower) {
-            continue;
-        }
-
-        // This job matches — pull its artifacts
-        let artifacts = db.list_artifacts(Some(&job.job_id))?;
-        let summary = job_summary(job);
-
-        for artifact in artifacts {
-            matching_artifacts.push((artifact, summary.prompt_or_name.clone()));
-            if matching_artifacts.len() >= limit {
-                break;
-            }
-        }
-        if matching_artifacts.len() >= limit {
-            break;
-        }
-    }
+    // Single JOIN query — no N+1.
+    let rows = db.search_artifacts(query, limit)?;
+    let matching_artifacts: Vec<(ArtifactRecord, String)> = rows
+        .into_iter()
+        .map(|(artifact, spec_json)| {
+            let prompt = serde_json::from_str::<serde_json::Value>(&spec_json)
+                .ok()
+                .and_then(|v| {
+                    v.get("prompt")
+                        .and_then(|p| p.as_str())
+                        .or_else(|| {
+                            v.get("output")
+                                .and_then(|o| o.get("lora_name"))
+                                .and_then(|n| n.as_str())
+                        })
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| "—".into());
+            (artifact, prompt)
+        })
+        .collect();
 
     if matching_artifacts.is_empty() {
         println!("No outputs matching '{}'.", style(query).italic());
@@ -526,6 +540,116 @@ async fn run_rm(id: &str, force: bool) -> Result<()> {
             style("✓").green(),
             style(&filename).bold()
         );
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Export
+// ---------------------------------------------------------------------------
+
+async fn run_export(
+    run_id: &str,
+    dest: Option<&std::path::Path>,
+    server: Option<&str>,
+) -> Result<()> {
+    let dest_dir = dest
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from(run_id));
+
+    // Determine server URL: explicit arg > env var > local copy
+    let server_url = server
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("MODL_SERVER").ok());
+
+    if let Some(base) = server_url {
+        // Remote: fetch the ZIP from the server and unpack it.
+        let url = format!("{base}/api/workflow-runs/{run_id}/export.zip");
+        println!(
+            "{} Fetching {} ...",
+            style("→").cyan(),
+            style(&url).underlined()
+        );
+
+        let response = reqwest::get(&url)
+            .await
+            .context("Failed to connect to server")?;
+
+        if !response.status().is_success() {
+            bail!(
+                "Server returned {}: {}",
+                response.status(),
+                response.text().await.unwrap_or_default()
+            );
+        }
+
+        let bytes = response
+            .bytes()
+            .await
+            .context("Failed to read response body")?;
+        std::fs::create_dir_all(&dest_dir).context("Failed to create destination directory")?;
+
+        let cursor = std::io::Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(cursor).context("Invalid ZIP archive")?;
+        let n = archive.len();
+
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i)?;
+            if let Some(safe_name) = file.enclosed_name() {
+                let out_path = dest_dir.join(safe_name);
+                let mut out = std::fs::File::create(&out_path)?;
+                std::io::copy(&mut file, &mut out)?;
+            }
+        }
+
+        println!(
+            "{} Downloaded {} file{} to {}",
+            style("✓").green().bold(),
+            n,
+            if n == 1 { "" } else { "s" },
+            style(dest_dir.display().to_string()).bold()
+        );
+    } else {
+        // Local: copy artifact files directly from DB records.
+        let db = Database::open()?;
+        let jobs = db.list_jobs_by_run_id(run_id)?;
+
+        if jobs.is_empty() {
+            bail!("No workflow run found with ID '{run_id}'");
+        }
+
+        std::fs::create_dir_all(&dest_dir).context("Failed to create destination directory")?;
+
+        let mut copied = 0usize;
+        for job in &jobs {
+            let arts = db.list_artifacts(Some(&job.job_id))?;
+            for a in arts {
+                let src = std::path::Path::new(&a.path);
+                if !src.is_file() {
+                    continue;
+                }
+                let name = src
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| a.artifact_id.clone());
+                std::fs::copy(src, dest_dir.join(&name))
+                    .with_context(|| format!("Failed to copy {}", a.path))?;
+                copied += 1;
+            }
+        }
+
+        if copied == 0 {
+            println!("No artifacts found for run '{run_id}'.");
+        } else {
+            println!(
+                "{} Copied {} file{} to {}",
+                style("✓").green().bold(),
+                copied,
+                if copied == 1 { "" } else { "s" },
+                style(dest_dir.display().to_string()).bold()
+            );
+        }
     }
 
     Ok(())

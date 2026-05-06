@@ -7,3 +7,4 @@ pub mod models;
 pub mod outputs;
 pub mod studio;
 pub mod training;
+pub mod workflow_runs;

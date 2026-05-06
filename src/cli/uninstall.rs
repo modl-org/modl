@@ -153,7 +153,14 @@ fn remove_trained_artifact(
     db.delete_artifact(&artifact.artifact_id)?;
 
     // Remove associated job records from DB
-    db.delete_jobs_by_lora_name(lora_name)?;
+    let deleted_jobs = db.delete_jobs_by_lora_name(lora_name)?;
+    if deleted_jobs > 0 {
+        println!(
+            "  {} Removed {} job record(s)",
+            style("×").red(),
+            deleted_jobs
+        );
+    }
 
     println!();
     println!(

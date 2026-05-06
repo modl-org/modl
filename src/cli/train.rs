@@ -453,6 +453,7 @@ async fn execute_training(
         &spec_json,
         target_str.trim_matches('"'),
         None,
+        None,
     )?;
 
     println!(

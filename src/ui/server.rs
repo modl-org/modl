@@ -9,7 +9,7 @@ use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 
 use super::routes::{
-    analysis, civitai, datasets, files, generate, models, outputs, studio, training,
+    analysis, civitai, datasets, files, generate, models, outputs, studio, training, workflow_runs,
 };
 
 // ---------------------------------------------------------------------------
@@ -150,6 +150,11 @@ pub async fn start(port: u16, open_browser: bool) -> Result<()> {
         // Datasets
         .route("/api/datasets", get(datasets::api_list_datasets))
         .route("/api/datasets/{name}", get(datasets::api_get_dataset))
+        // Workflow run export
+        .route(
+            "/api/workflow-runs/{run_id}/export.zip",
+            get(workflow_runs::api_export_run_zip),
+        )
         // Outputs
         .route(
             "/api/outputs",

@@ -181,6 +181,42 @@ impl Database {
             ",
             )
             .context("Failed to run database migrations")?;
+
+        // Version-gated migrations — guarded by PRAGMA user_version so they
+        // only run once even if migrate() is called on every startup.
+        let version: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap_or(0);
+
+        if version < 1 {
+            // Add indexed workflow_run_id column so modl status doesn't need a
+            // full spec_json LIKE scan.
+            let _ = self
+                .conn
+                .execute_batch("ALTER TABLE jobs ADD COLUMN workflow_run_id TEXT;");
+            let _ = self.conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_jobs_workflow_run_id
+                 ON jobs (workflow_run_id) WHERE workflow_run_id IS NOT NULL;",
+            );
+            // Back-fill existing rows using SQLite's json_extract.
+            let _ = self.conn.execute_batch(
+                "UPDATE jobs SET workflow_run_id =
+                     json_extract(spec_json, '$.labels.workflow_run')
+                 WHERE workflow_run_id IS NULL
+                   AND json_type(spec_json, '$.labels.workflow_run') = 'text';",
+            );
+            let _ = self.conn.execute_batch("PRAGMA user_version = 1;");
+        }
+
+        if version < 2 {
+            let _ = self.conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_artifacts_job_id
+                 ON artifacts (job_id) WHERE job_id IS NOT NULL;",
+            );
+            let _ = self.conn.execute_batch("PRAGMA user_version = 2;");
+        }
+
         Ok(())
     }
 }

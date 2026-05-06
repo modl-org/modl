@@ -144,6 +144,47 @@ impl Database {
         Ok(())
     }
 
+    /// Search artifacts whose job spec_json contains `query` (case-insensitive).
+    ///
+    /// Returns `(ArtifactRecord, spec_json)` pairs ordered by job creation time,
+    /// newest first. Single JOIN query — no N+1.
+    pub fn search_artifacts(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(ArtifactRecord, String)>> {
+        let pattern = format!("%{}%", query.to_lowercase());
+        let mut stmt = self.conn.prepare(
+            "SELECT a.artifact_id, a.job_id, a.kind, a.path, a.sha256, a.size_bytes, a.metadata, a.created_at,
+                    j.spec_json
+             FROM artifacts a
+             JOIN jobs j ON j.job_id = a.job_id
+             WHERE lower(j.spec_json) LIKE ?1
+             ORDER BY j.created_at DESC
+             LIMIT ?2",
+        ).context("Failed to prepare search query")?;
+
+        let rows = stmt
+            .query_map(params![pattern, limit as i64], |row| {
+                let artifact = ArtifactRecord {
+                    artifact_id: row.get(0)?,
+                    job_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    path: row.get(3)?,
+                    sha256: row.get(4)?,
+                    size_bytes: row.get::<_, i64>(5)? as u64,
+                    metadata: row.get(6)?,
+                    created_at: row.get(7)?,
+                };
+                let spec_json: String = row.get(8)?;
+                Ok((artifact, spec_json))
+            })
+            .context("Failed to search artifacts")?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("Failed to collect search results")
+    }
+
     /// Delete artifact records by file path. Returns number of deleted rows.
     pub fn delete_artifacts_by_path(&self, path: &str) -> Result<usize> {
         let deleted = self

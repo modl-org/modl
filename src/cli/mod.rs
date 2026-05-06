@@ -31,6 +31,7 @@ mod preprocess;
 mod push;
 mod remove_bg;
 mod run;
+mod run_status;
 mod runtime;
 mod score;
 mod search;
@@ -1127,6 +1128,27 @@ See `modl/docs/guides/workflows.md` for the full reference.")]
         /// interrupted runs resume cleanly without duplicating work.
         #[arg(long)]
         force: bool,
+        /// Override the run ID (used by MCP/remote callers to track a job
+        /// before it starts). If omitted, a timestamp-based ID is generated.
+        #[arg(long, hide = true)]
+        run_id: Option<String>,
+    },
+
+    /// Show status of a workflow run by run ID
+    ///
+    /// Queries the local database for all step-jobs belonging to the run and
+    /// prints aggregate status plus artifact paths. Set MODL_BASE_URL to get
+    /// HTTP URLs suitable for remote download over Tailscale.
+    ///
+    /// Example:
+    ///   modl status 20240101-120000-my-workflow
+    ///   MODL_BASE_URL=http://server:3939 modl status <run-id> --json
+    Status {
+        /// Workflow run ID (from `modl run` output or MCP run_workflow response)
+        run_id: String,
+        /// Emit machine-readable JSON
+        #[arg(long)]
+        json: bool,
     },
 
     // ── Hidden ───────────────────────────────────────────────────────
@@ -1667,7 +1689,20 @@ pub async fn run(cli: Cli) -> Result<()> {
             json,
             in_order,
             force,
-        } => run::run(&specs, auto_pull, dry_run, json, in_order, !force).await,
+            run_id,
+        } => {
+            run::run(
+                &specs,
+                auto_pull,
+                dry_run,
+                json,
+                in_order,
+                !force,
+                run_id.as_deref(),
+            )
+            .await
+        }
+        Commands::Status { run_id, json } => run_status::run(&run_id, json).await,
 
         // ── Hidden ───────────────────────────────────────────────────
         Commands::Init { defaults, root } => init::run(defaults, root.as_deref()).await,
