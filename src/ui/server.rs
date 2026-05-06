@@ -152,7 +152,7 @@ pub async fn start(port: u16, open_browser: bool) -> Result<()> {
         .route("/api/datasets/{name}", get(datasets::api_get_dataset))
         // Workflow run export
         .route(
-            "/api/workflow-runs/:run_id/export.zip",
+            "/api/workflow-runs/{run_id}/export.zip",
             get(workflow_runs::api_export_run_zip),
         )
         // Outputs
