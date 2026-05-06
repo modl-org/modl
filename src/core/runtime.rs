@@ -37,6 +37,7 @@ const TRAINER_TORCHAUDIO_VERSION: &str = "2.7.0";
 const GENERATOR_TORCH_VERSION: &str = "2.7.0";
 const GENERATOR_TORCHVISION_VERSION: &str = "0.22.0";
 const AITOOLKIT_REPO_URL: &str = "https://github.com/ostris/ai-toolkit.git";
+const AITOOLKIT_PIN_SHA: &str = "6bb8acbffc2021cc009cc18491f00aa3800bf45a";
 const AITOOLKIT_CLONE_DIR: &str = "ai-toolkit";
 const DEFAULT_PYTHON_ARTIFACT_URL: &str = "https://github.com/indygreg/python-build-standalone/releases/download/20250409/cpython-3.11.12+20250409-x86_64-unknown-linux-gnu-install_only.tar.gz";
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -678,8 +679,25 @@ fn ensure_profile_dependencies(
 ) -> Result<()> {
     let marker_path = bootstrap_marker_path(env_dir);
 
-    if marker_path.exists() && !created_env {
+    // Force re-bootstrap if the ai-toolkit pin changed (for training profiles
+    // only) — otherwise existing installs keep the old commit forever.
+    let aitoolkit_stale = profile == "trainer-cu124"
+        && marker_path.exists()
+        && !created_env
+        && std::fs::read_to_string(&marker_path)
+            .ok()
+            .map(|m| !m.contains(&format!("aitoolkit={AITOOLKIT_PIN_SHA}")))
+            .unwrap_or(false);
+
+    if marker_path.exists() && !created_env && !aitoolkit_stale {
         return Ok(());
+    }
+
+    if aitoolkit_stale {
+        println!(
+            "  {} ai-toolkit pin updated, re-cloning …",
+            style("→").dim()
+        );
     }
 
     if profile == "trainer-cu124" {
@@ -766,7 +784,7 @@ fn ensure_profile_dependencies(
         )
     } else {
         format!(
-            "profile={profile}\ntorch={TRAINER_TORCH_VERSION}\ntorchvision={TRAINER_TORCHVISION_VERSION}\ntorchaudio={TRAINER_TORCHAUDIO_VERSION}\n"
+            "profile={profile}\ntorch={TRAINER_TORCH_VERSION}\ntorchvision={TRAINER_TORCHVISION_VERSION}\ntorchaudio={TRAINER_TORCHAUDIO_VERSION}\naitoolkit={AITOOLKIT_PIN_SHA}\n"
         )
     };
     fs::write(&marker_path, marker_contents)
@@ -782,19 +800,43 @@ fn aitoolkit_clone_dir(root: &Path) -> PathBuf {
 fn clone_or_update_aitoolkit(root: &Path) -> Result<()> {
     let dir = aitoolkit_clone_dir(root);
     if dir.join("toolkit").exists() {
-        // Already cloned – fast-forward update
+        // Already cloned — check if pinned SHA matches current HEAD.
+        let current = Command::new("git")
+            .arg("rev-parse")
+            .arg("HEAD")
+            .current_dir(&dir)
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if current == AITOOLKIT_PIN_SHA {
+            return Ok(());
+        }
+        // Fetch and checkout the pinned SHA (shallow fetch is sufficient).
         run_command(
             Command::new("git")
-                .arg("pull")
-                .arg("--ff-only")
+                .arg("fetch")
+                .arg("--depth")
+                .arg("1")
+                .arg("origin")
+                .arg(AITOOLKIT_PIN_SHA)
                 .current_dir(&dir),
-            "Failed to update ai-toolkit (git pull)",
+            "Failed to fetch ai-toolkit pin",
+        )?;
+        run_command(
+            Command::new("git")
+                .arg("checkout")
+                .arg(AITOOLKIT_PIN_SHA)
+                .current_dir(&dir),
+            "Failed to checkout ai-toolkit pin",
         )?;
     } else {
         if dir.exists() {
             fs::remove_dir_all(&dir)
                 .with_context(|| format!("Failed to remove stale {}", dir.display()))?;
         }
+        // Shallow-clone then checkout the pinned commit.
         run_command(
             Command::new("git")
                 .arg("clone")
@@ -803,6 +845,23 @@ fn clone_or_update_aitoolkit(root: &Path) -> Result<()> {
                 .arg(AITOOLKIT_REPO_URL)
                 .arg(&dir),
             "Failed to clone ai-toolkit",
+        )?;
+        run_command(
+            Command::new("git")
+                .arg("fetch")
+                .arg("--depth")
+                .arg("1")
+                .arg("origin")
+                .arg(AITOOLKIT_PIN_SHA)
+                .current_dir(&dir),
+            "Failed to fetch ai-toolkit pin",
+        )?;
+        run_command(
+            Command::new("git")
+                .arg("checkout")
+                .arg(AITOOLKIT_PIN_SHA)
+                .current_dir(&dir),
+            "Failed to checkout ai-toolkit pin",
         )?;
     }
     Ok(())
