@@ -9,7 +9,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -105,6 +105,10 @@ struct RawWorkflow {
     lora: Option<String>,
     #[serde(default)]
     defaults: StepDefaults,
+    /// Named image variables — defined once, referenced in any edit step as `$name`.
+    /// Values are either `data:image/...;base64,...` URIs or server-side file paths.
+    #[serde(default)]
+    images: HashMap<String, String>,
     steps: Vec<RawStep>,
 }
 
@@ -179,6 +183,10 @@ pub fn parse_str(yaml: &str, base_dir: &Path) -> Result<Workflow> {
     if raw.steps.is_empty() {
         bail!("workflow must have at least one step");
     }
+
+    // Resolve named image variables before processing steps. Each value is either
+    // a base64 data URI or a server-side path; both materialise to a PathBuf.
+    let image_vars = resolve_image_vars(&raw.images, base_dir)?;
 
     let mut seen_ids: HashSet<String> = HashSet::new();
     let mut materialized: Vec<Step> = Vec::with_capacity(raw.steps.len());
@@ -280,7 +288,8 @@ pub fn parse_str(yaml: &str, base_dir: &Path) -> Result<Workflow> {
                     raw_step.id
                 )
             })?;
-            let source = parse_image_ref(source_str, base_dir, &seen_ids, &raw_step.id)?;
+            let source =
+                parse_image_ref(source_str, base_dir, &seen_ids, &image_vars, &raw_step.id)?;
             StepKind::Edit(EditStep {
                 source,
                 prompt: edit_prompt.clone(),
@@ -355,18 +364,76 @@ fn validate_seeds(
     Ok(())
 }
 
+/// Pre-process the top-level `images:` map: decode/resolve each value and write
+/// it to `base_dir/{name}-ref.{ext}` so every step can reference it by name.
+fn resolve_image_vars(
+    images: &HashMap<String, String>,
+    base_dir: &Path,
+) -> Result<HashMap<String, PathBuf>> {
+    let mut vars = HashMap::with_capacity(images.len());
+    for (name, value) in images {
+        if !is_valid_id(name) {
+            bail!("images: variable name `{name}` must contain only letters, digits, `-`, `_`");
+        }
+        let path = if value.starts_with("data:image/") {
+            let (header, data) = value
+                .split_once(',')
+                .ok_or_else(|| anyhow!("images.{name}: data URI is missing the comma separator"))?;
+            let ext = header
+                .trim_start_matches("data:image/")
+                .split_once(';')
+                .map(|(t, _)| t)
+                .unwrap_or("png");
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .with_context(|| format!("images.{name}: failed to decode base64 data"))?;
+            let out_path = base_dir.join(format!("{name}-ref.{ext}"));
+            std::fs::write(&out_path, &bytes).with_context(|| {
+                format!("images.{name}: failed to write to `{}`", out_path.display())
+            })?;
+            out_path
+        } else {
+            let p = if Path::new(value).is_absolute() {
+                PathBuf::from(value)
+            } else {
+                base_dir.join(value)
+            };
+            if !p.exists() {
+                bail!("images.{name}: file `{}` does not exist", p.display());
+            }
+            p
+        };
+        vars.insert(name.clone(), path);
+    }
+    Ok(vars)
+}
+
 /// Parse an `edit:` source image reference.
 ///
-/// Two forms:
+/// Three forms:
+/// - `$name` (no `.outputs[`) → named image variable from the top-level `images:` map
 /// - `$step-id.outputs[N]` → resolved at runtime to the Nth output of an earlier step
 /// - Anything else → filesystem path relative to `base_dir`, must exist
 fn parse_image_ref(
     s: &str,
     base_dir: &Path,
     earlier_step_ids: &HashSet<String>,
+    image_vars: &HashMap<String, PathBuf>,
     current_step_id: &str,
 ) -> Result<ImageRef> {
     if let Some(rest) = s.strip_prefix('$') {
+        // `$name` with no dot → image variable ref.
+        // `$step-id.outputs[N]` → step-output ref.
+        // Anything else (e.g. `$a.outputs` missing `[N]`) → malformed, caught below.
+        if !rest.contains('.') {
+            let path = image_vars.get(rest).ok_or_else(|| {
+                anyhow!(
+                    "step `{current_step_id}`: image variable `{s}` is not defined — add `{rest}:` to the top-level `images:` map"
+                )
+            })?;
+            return Ok(ImageRef::Local(path.clone()));
+        }
+
         let (step_id, bracket_part) = rest.split_once(".outputs[").ok_or_else(|| {
             anyhow!(
                 "step `{current_step_id}`: invalid step-output ref `{s}` — expected `$step-id.outputs[N]`"
@@ -995,5 +1062,60 @@ steps:
             },
             _ => panic!("expected edit step"),
         }
+    }
+
+    // 1×1 red pixel PNG used across image-var tests.
+    const RED_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI6QAAAABJRU5ErkJggg==";
+
+    #[test]
+    fn image_var_base64_resolved_by_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            "name: test\nmodel: flux-dev\nimages:\n  alice: \"data:image/png;base64,{RED_PNG_B64}\"\nsteps:\n  - id: s1\n    edit: \"$alice\"\n    prompt: \"fix it\"\n"
+        );
+        let wf = parse_str(&yaml, tmp.path()).unwrap();
+        match &wf.steps[0].kind {
+            StepKind::Edit(e) => match &e.source {
+                ImageRef::Local(p) => {
+                    assert!(p.exists());
+                    assert!(p.to_string_lossy().ends_with("alice-ref.png"));
+                }
+                _ => panic!("expected Local"),
+            },
+            _ => panic!("expected edit"),
+        }
+    }
+
+    #[test]
+    fn image_var_reused_across_steps_same_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            "name: test\nmodel: flux-dev\nimages:\n  hero: \"data:image/png;base64,{RED_PNG_B64}\"\nsteps:\n  - id: s1\n    edit: \"$hero\"\n    prompt: \"scene 1\"\n  - id: s2\n    edit: \"$hero\"\n    prompt: \"scene 2\"\n"
+        );
+        let wf = parse_str(&yaml, tmp.path()).unwrap();
+        let path0 = match &wf.steps[0].kind {
+            StepKind::Edit(e) => match &e.source {
+                ImageRef::Local(p) => p.clone(),
+                _ => panic!(),
+            },
+            _ => panic!(),
+        };
+        let path1 = match &wf.steps[1].kind {
+            StepKind::Edit(e) => match &e.source {
+                ImageRef::Local(p) => p.clone(),
+                _ => panic!(),
+            },
+            _ => panic!(),
+        };
+        assert_eq!(path0, path1, "both steps should point to the same file");
+    }
+
+    #[test]
+    fn image_var_undefined_gives_clear_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let yaml = "name: test\nmodel: flux-dev\nsteps:\n  - id: s1\n    edit: \"$nobody\"\n    prompt: \"hi\"\n";
+        let err = parse_str(yaml, tmp.path()).unwrap_err().to_string();
+        assert!(err.contains("nobody"), "got: {err}");
+        assert!(err.contains("images:"), "got: {err}");
     }
 }
