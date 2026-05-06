@@ -60,6 +60,13 @@ triggers:
   - modl serve
   - modl dataset
   - modl gpu
+  - modl run
+  - modl status
+  - run a workflow
+  - batch generate
+  - multi-step workflow
+  - generate then edit
+  - fire and forget
 invocable: true
 argument-hint: "[action] [args...]"
 ---
@@ -500,6 +507,64 @@ Backup and restore.
 modl export <output.tar.zst> [--no-outputs] [--since YYYY-MM-DD]
 modl import <backup.tar.zst> [--dry-run] [--overwrite]
 ```
+
+### modl run
+
+Run a multi-step workflow from a YAML spec.
+
+```
+modl run <SPEC.yaml> [--json]
+modl run a.yaml b.yaml c.yaml      # sequential multi-spec
+
+YAML format:
+  name: "optional-display-name"
+  steps:
+    - id: draft
+      generate:
+        prompt: "..."
+        base: flux-schnell
+        size: "1:1"
+        count: 1
+        seed: 42          # optional
+    - id: refine
+      edit:
+        prompt: "enhance lighting"
+        base: klein-9b
+        image:
+          step_output: draft   # ← reference previous step output
+```
+
+JSON output: `{"run_id": "run-20260506-143022", "steps": 2, "status": "queued"}`
+
+### modl status
+
+Check the state of a workflow run.
+
+```
+modl status <run_id> [--json] [--watch]
+```
+
+`aggregate` values: `pending`, `running`, `completed`, `partial_failure`, `cancelled`
+
+### modl outputs export / ls
+
+```
+modl outputs export <run_id>           # download as ZIP
+modl outputs ls --run <run_id> --json  # list with URLs
+```
+
+### MCP Server
+
+modl exposes 15 tools over stdio JSON-RPC 2.0. Activate via `modl mcp` (configured in Claude Code's MCP settings).
+
+**Workflow tools:**
+- `run_workflow` — submit YAML spec, returns `run_id` (fire-and-forget)
+- `job_status` — poll a job or run_id for progress
+- `list_run_outputs` — fetch artifact URLs for a completed run
+
+Set `MODL_BASE_URL=http://server:3939` so returned URLs are reachable from the client.
+
+**Image ref limitation (issue #105):** `edit.image.path` must point to a path on the server where modl runs. Over a remote MCP/SSH connection, client-side file paths don't exist on the server. Workaround: use `step_output` refs to chain generate→edit within the same workflow, or pre-copy the source image to the server first.
 
 ## Common Workflows
 
