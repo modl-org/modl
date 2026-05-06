@@ -48,7 +48,13 @@ pub fn load() -> Vec<IndexEntry> {
 fn save(entries: &[IndexEntry]) {
     let path = index_path();
     let Some(parent) = path.parent() else { return };
-    let _ = std::fs::create_dir_all(parent);
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        eprintln!(
+            "warning: failed to create store index directory {}: {e}",
+            parent.display()
+        );
+        return;
+    }
     let Ok(yaml) = serde_yaml::to_string(entries) else {
         return;
     };
@@ -59,8 +65,12 @@ fn save(entries: &[IndexEntry]) {
         .suffix(".yaml.tmp")
         .tempfile_in(parent)
         && std::io::Write::write_all(&mut tmp, yaml.as_bytes()).is_ok()
+        && let Err(e) = tmp.persist(&path)
     {
-        let _ = tmp.persist(&path);
+        eprintln!(
+            "warning: failed to write store index {}: {e}",
+            path.display()
+        );
     }
 }
 

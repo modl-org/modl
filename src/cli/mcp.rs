@@ -987,6 +987,13 @@ fn tool_run_workflow(args: &Value) -> Result<Value, (i32, String)> {
         });
     }
 
+    // Reap the child process when it exits so it doesn't linger as a zombie.
+    // Rust's Drop on Child does NOT wait, so a long-running MCP server would
+    // accumulate defunct processes without this.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+
     Ok(json!({
         "content": [{
             "type": "text",
