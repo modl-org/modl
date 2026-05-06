@@ -474,9 +474,9 @@ fn ensure_profile_seed_files(root: &Path) -> Result<()> {
     write_profile_manifest_if_missing(root, "inference-cu124")?;
     write_profile_manifest_if_missing(root, GENERATOR_PROFILE)?;
 
-    write_profile_requirements(root, DEFAULT_PROFILE_CUDA)?;
-    write_profile_requirements(root, "inference-cu124")?;
-    write_profile_requirements(root, GENERATOR_PROFILE)?;
+    write_profile_requirements_if_missing(root, DEFAULT_PROFILE_CUDA)?;
+    write_profile_requirements_if_missing(root, "inference-cu124")?;
+    write_profile_requirements_if_missing(root, GENERATOR_PROFILE)?;
 
     Ok(())
 }
@@ -506,11 +506,11 @@ fn write_profile_manifest_if_missing(root: &Path, profile: &str) -> Result<()> {
     Ok(())
 }
 
-/// Write the requirements file, always overwriting. Dependency bumps (e.g.
-/// diffusers version pins) take effect on the next `modl runtime install` even
-/// for existing envs. The subsequent `pip install -r` is idempotent.
-fn write_profile_requirements(root: &Path, profile: &str) -> Result<()> {
+fn write_profile_requirements_if_missing(root: &Path, profile: &str) -> Result<()> {
     let requirements_path = profile_requirements_path(root, profile);
+    if requirements_path.exists() {
+        return Ok(());
+    }
 
     let content = match profile {
         "trainer-cu124" => {
