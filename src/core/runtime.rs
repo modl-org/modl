@@ -39,6 +39,7 @@ const GENERATOR_TORCHVISION_VERSION: &str = "0.22.0";
 const AITOOLKIT_REPO_URL: &str = "https://github.com/ostris/ai-toolkit.git";
 const AITOOLKIT_PIN_SHA: &str = "6bb8acbffc2021cc009cc18491f00aa3800bf45a";
 const AITOOLKIT_CLONE_DIR: &str = "ai-toolkit";
+const DIFFUSERS_VERSION: &str = "0.38.0";
 const DEFAULT_PYTHON_ARTIFACT_URL: &str = "https://github.com/indygreg/python-build-standalone/releases/download/20250409/cpython-3.11.12+20250409-x86_64-unknown-linux-gnu-install_only.tar.gz";
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const MACOS_AARCH64_PYTHON_ARTIFACT_URL: &str = "https://github.com/indygreg/python-build-standalone/releases/download/20250409/cpython-3.11.12+20250409-aarch64-apple-darwin-install_only.tar.gz";
@@ -515,15 +516,20 @@ fn write_profile_requirements(root: &Path, profile: &str) -> Result<()> {
 
     let content = match profile {
         "trainer-cu124" => {
-            "# Additional trainer-cu124 requirements (base torch + ai-toolkit are installed by bootstrap logic)\naccelerate>=0.33\nsafetensors>=0.5\ntransformers>=4.51\ndiffusers>=0.38.0\npillow>=10.0\nspandrel>=0.4\ngguf>=0.10.0\n"
+            format!(
+                "# Additional trainer-cu124 requirements (base torch + ai-toolkit are installed by bootstrap logic)\naccelerate>=0.33\nsafetensors>=0.5\ntransformers>=4.51\ndiffusers>={DIFFUSERS_VERSION}\npillow>=10.0\nspandrel>=0.4\ngguf>=0.10.0\n"
+            )
         }
         "inference-cu124" => {
             "# Runtime profile requirements for inference-cu124\nspandrel>=0.4\ninsightface>=0.7\n"
+                .to_string()
         }
         "generator" => {
-            "# Lightweight generation profile (no ai-toolkit, MPS-compatible on macOS)\naccelerate>=0.33\nsafetensors>=0.5\ntransformers>=4.51\ndiffusers>=0.38.0\npillow>=10.0\nspandrel>=0.4\nsentencepiece>=0.2\nprotobuf>=5.0\ngguf>=0.10.0\n"
+            format!(
+                "# Lightweight generation profile (no ai-toolkit, MPS-compatible on macOS)\naccelerate>=0.33\nsafetensors>=0.5\ntransformers>=4.51\ndiffusers>={DIFFUSERS_VERSION}\npillow>=10.0\nspandrel>=0.4\nsentencepiece>=0.2\nprotobuf>=5.0\ngguf>=0.10.0\n"
+            )
         }
-        _ => "# Runtime profile requirements\n\n",
+        _ => "# Runtime profile requirements\n\n".to_string(),
     };
 
     fs::write(&requirements_path, content)
@@ -780,11 +786,11 @@ fn ensure_profile_dependencies(
 
     let marker_contents = if profile == "generator" {
         format!(
-            "profile={profile}\ntorch={GENERATOR_TORCH_VERSION}\ntorchvision={GENERATOR_TORCHVISION_VERSION}\n"
+            "profile={profile}\ntorch={GENERATOR_TORCH_VERSION}\ntorchvision={GENERATOR_TORCHVISION_VERSION}\ndiffusers={DIFFUSERS_VERSION}\n"
         )
     } else {
         format!(
-            "profile={profile}\ntorch={TRAINER_TORCH_VERSION}\ntorchvision={TRAINER_TORCHVISION_VERSION}\ntorchaudio={TRAINER_TORCHAUDIO_VERSION}\naitoolkit={AITOOLKIT_PIN_SHA}\n"
+            "profile={profile}\ntorch={TRAINER_TORCH_VERSION}\ntorchvision={TRAINER_TORCHVISION_VERSION}\ntorchaudio={TRAINER_TORCHAUDIO_VERSION}\ndiffusers={DIFFUSERS_VERSION}\naitoolkit={AITOOLKIT_PIN_SHA}\n"
         )
     };
     fs::write(&marker_path, marker_contents)
@@ -875,6 +881,35 @@ pub fn aitoolkit_path() -> Result<Option<PathBuf>> {
     } else {
         Ok(None)
     }
+}
+
+/// Check whether the bootstrapped runtime is stale relative to the pinned
+/// dep versions compiled into this binary. Returns the profile name that
+/// needs updating, or `None` if everything is current.
+pub fn stale_runtime_profile() -> Result<Option<String>> {
+    let root = runtime_root()?;
+    for profile in [DEFAULT_PROFILE_CUDA, GENERATOR_PROFILE] {
+        let env_dir = root.join("envs").join(profile);
+        let marker_path = bootstrap_marker_path(&env_dir);
+        if !marker_path.exists() {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&marker_path)
+            .with_context(|| format!("Failed to read {}", marker_path.display()))?;
+        let expected_marker = if profile == "generator" {
+            format!(
+                "profile={profile}\ntorch={GENERATOR_TORCH_VERSION}\ntorchvision={GENERATOR_TORCHVISION_VERSION}\ndiffusers={DIFFUSERS_VERSION}\n"
+            )
+        } else {
+            format!(
+                "profile={profile}\ntorch={TRAINER_TORCH_VERSION}\ntorchvision={TRAINER_TORCHVISION_VERSION}\ntorchaudio={TRAINER_TORCHAUDIO_VERSION}\ndiffusers={DIFFUSERS_VERSION}\naitoolkit={AITOOLKIT_PIN_SHA}\n"
+            )
+        };
+        if contents != expected_marker {
+            return Ok(Some(profile.to_string()));
+        }
+    }
+    Ok(None)
 }
 
 fn bootstrap_marker_path(env_dir: &Path) -> PathBuf {
