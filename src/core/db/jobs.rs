@@ -77,6 +77,7 @@ impl Database {
     }
 
     /// List all jobs, optionally filtered by status
+    #[allow(dead_code)]
     pub fn list_jobs(&self, status_filter: Option<&str>) -> Result<Vec<JobRecord>> {
         let sql = if status_filter.is_some() {
             "SELECT job_id, kind, status, spec_json, target, provider, created_at, started_at, completed_at FROM jobs WHERE status = ?1 ORDER BY created_at DESC"

@@ -922,16 +922,6 @@ fn tool_run_workflow(args: &Value) -> Result<Value, (i32, String)> {
         .and_then(|v| v.as_str())
         .ok_or((-32602, "Missing required parameter: spec_yaml".to_string()))?;
 
-    // Write the YAML to a tempfile. NamedTempFile auto-deletes on drop,
-    // so we keep `tmp` alive past the 500ms early-exit check then let it drop.
-    let mut tmp = tempfile::Builder::new()
-        .suffix(".yaml")
-        .tempfile()
-        .map_err(|e| (-32603, format!("Failed to create tempfile: {e}")))?;
-    std::io::Write::write_all(&mut tmp, spec_yaml.as_bytes())
-        .map_err(|e| (-32603, format!("Failed to write workflow tempfile: {e}")))?;
-    let tmp_path = tmp.path().to_path_buf();
-
     // Pre-generate the run_id. Includes a short random suffix to prevent
     // collisions when two workflows are submitted within the same second.
     let run_id = format!(
@@ -940,18 +930,21 @@ fn tool_run_workflow(args: &Value) -> Result<Value, (i32, String)> {
         &uuid::Uuid::new_v4().to_string()[..6]
     );
 
-    // Log file for background output — useful for debugging.
-    let log_path = crate::core::paths::modl_root()
-        .join("run-logs")
-        .join(format!("{run_id}.log"));
-    let _ = std::fs::create_dir_all(log_path.parent().unwrap());
+    // Write YAML to a stable path alongside the stderr log — no temp file
+    // race (child must open before parent deletes). Also useful for debugging.
+    let run_log_dir = crate::core::paths::modl_root().join("run-logs");
+    let _ = std::fs::create_dir_all(&run_log_dir);
+    let spec_path = run_log_dir.join(format!("{run_id}.yaml"));
+    let log_path = run_log_dir.join(format!("{run_id}.log"));
+    std::fs::write(&spec_path, spec_yaml)
+        .map_err(|e| (-32603, format!("Failed to write workflow spec: {e}")))?;
 
     let bin = modl_bin().map_err(|e| (-32603, e.to_string()))?;
 
     // Capture stderr via pipe for a short window so we can detect immediate
     // failures (bad YAML, missing model, etc.) before returning run_id.
     let mut child = std::process::Command::new(&bin)
-        .args(["run", tmp_path.to_str().unwrap_or(""), "--run-id", &run_id])
+        .args(["run", spec_path.to_str().unwrap_or(""), "--run-id", &run_id])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -980,10 +973,6 @@ fn tool_run_workflow(args: &Value) -> Result<Value, (i32, String)> {
         }
     }
 
-    // Child has started and survived the early-exit window; the tempfile is no
-    // longer needed (modl run has already opened it).
-    drop(tmp);
-
     // Forward remaining stderr to the log file (best-effort).
     if let Some(mut stderr_pipe) = child.stderr.take() {
         let log_path_clone = log_path.clone();
@@ -1004,6 +993,7 @@ fn tool_run_workflow(args: &Value) -> Result<Value, (i32, String)> {
             "text": serde_json::to_string_pretty(&json!({
                 "run_id": run_id,
                 "status": "submitted",
+                "spec": spec_path.to_string_lossy(),
                 "log": log_path.to_string_lossy(),
             })).unwrap_or_default()
         }]

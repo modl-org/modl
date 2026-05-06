@@ -394,32 +394,27 @@ async fn run_open(id: &str) -> Result<()> {
 
 async fn run_search(query: &str, limit: usize) -> Result<()> {
     let db = Database::open()?;
-    let jobs = db.list_jobs(None)?;
-    let query_lower = query.to_lowercase();
-
-    let mut matching_artifacts: Vec<(ArtifactRecord, String)> = Vec::new();
-
-    for job in &jobs {
-        // Search inside spec_json
-        let spec_lower = job.spec_json.to_lowercase();
-        if !spec_lower.contains(&query_lower) {
-            continue;
-        }
-
-        // This job matches — pull its artifacts
-        let artifacts = db.list_artifacts(Some(&job.job_id))?;
-        let summary = job_summary(job);
-
-        for artifact in artifacts {
-            matching_artifacts.push((artifact, summary.prompt_or_name.clone()));
-            if matching_artifacts.len() >= limit {
-                break;
-            }
-        }
-        if matching_artifacts.len() >= limit {
-            break;
-        }
-    }
+    // Single JOIN query — no N+1.
+    let rows = db.search_artifacts(query, limit)?;
+    let matching_artifacts: Vec<(ArtifactRecord, String)> = rows
+        .into_iter()
+        .map(|(artifact, spec_json)| {
+            let prompt = serde_json::from_str::<serde_json::Value>(&spec_json)
+                .ok()
+                .and_then(|v| {
+                    v.get("prompt")
+                        .and_then(|p| p.as_str())
+                        .or_else(|| {
+                            v.get("output")
+                                .and_then(|o| o.get("lora_name"))
+                                .and_then(|n| n.as_str())
+                        })
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| "—".into());
+            (artifact, prompt)
+        })
+        .collect();
 
     if matching_artifacts.is_empty() {
         println!("No outputs matching '{}'.", style(query).italic());
