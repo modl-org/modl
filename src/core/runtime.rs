@@ -37,7 +37,9 @@ const TRAINER_TORCHAUDIO_VERSION: &str = "2.7.0";
 const GENERATOR_TORCH_VERSION: &str = "2.7.0";
 const GENERATOR_TORCHVISION_VERSION: &str = "0.22.0";
 const AITOOLKIT_REPO_URL: &str = "https://github.com/ostris/ai-toolkit.git";
+const AITOOLKIT_PIN_SHA: &str = "6bb8acbffc2021cc009cc18491f00aa3800bf45a";
 const AITOOLKIT_CLONE_DIR: &str = "ai-toolkit";
+const DIFFUSERS_VERSION: &str = "0.38.0";
 const DEFAULT_PYTHON_ARTIFACT_URL: &str = "https://github.com/indygreg/python-build-standalone/releases/download/20250409/cpython-3.11.12+20250409-x86_64-unknown-linux-gnu-install_only.tar.gz";
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const MACOS_AARCH64_PYTHON_ARTIFACT_URL: &str = "https://github.com/indygreg/python-build-standalone/releases/download/20250409/cpython-3.11.12+20250409-aarch64-apple-darwin-install_only.tar.gz";
@@ -474,9 +476,9 @@ fn ensure_profile_seed_files(root: &Path) -> Result<()> {
     write_profile_manifest_if_missing(root, "inference-cu124")?;
     write_profile_manifest_if_missing(root, GENERATOR_PROFILE)?;
 
-    write_profile_requirements_if_missing(root, DEFAULT_PROFILE_CUDA)?;
-    write_profile_requirements_if_missing(root, "inference-cu124")?;
-    write_profile_requirements_if_missing(root, GENERATOR_PROFILE)?;
+    write_profile_requirements(root, DEFAULT_PROFILE_CUDA)?;
+    write_profile_requirements(root, "inference-cu124")?;
+    write_profile_requirements(root, GENERATOR_PROFILE)?;
 
     Ok(())
 }
@@ -506,25 +508,28 @@ fn write_profile_manifest_if_missing(root: &Path, profile: &str) -> Result<()> {
     Ok(())
 }
 
-fn write_profile_requirements_if_missing(root: &Path, profile: &str) -> Result<()> {
+/// Write the requirements file, always overwriting. Dependency bumps (e.g.
+/// diffusers version pins) take effect on the next `modl runtime install` even
+/// for existing envs. The subsequent `pip install -r` is idempotent.
+fn write_profile_requirements(root: &Path, profile: &str) -> Result<()> {
     let requirements_path = profile_requirements_path(root, profile);
-    if requirements_path.exists() {
-        return Ok(());
-    }
 
     let content = match profile {
         "trainer-cu124" => {
-            // TODO: pin diffusers to a stable version once ErnieImagePipeline ships in a release
-            "# Additional trainer-cu124 requirements (base torch + ai-toolkit are installed by bootstrap logic)\naccelerate>=0.33\nsafetensors>=0.5\ntransformers>=4.51\ndiffusers @ git+https://github.com/huggingface/diffusers.git@main\npillow>=10.0\nspandrel>=0.4\ngguf>=0.10.0\n"
+            format!(
+                "# Additional trainer-cu124 requirements (base torch + ai-toolkit are installed by bootstrap logic)\naccelerate>=0.33\nsafetensors>=0.5\ntransformers>=4.51\ndiffusers>={DIFFUSERS_VERSION}\npillow>=10.0\nspandrel>=0.4\ngguf>=0.10.0\n"
+            )
         }
         "inference-cu124" => {
             "# Runtime profile requirements for inference-cu124\nspandrel>=0.4\ninsightface>=0.7\n"
+                .to_string()
         }
         "generator" => {
-            // TODO: pin diffusers to a stable version once ErnieImagePipeline ships in a release
-            "# Lightweight generation profile (no ai-toolkit, MPS-compatible on macOS)\naccelerate>=0.33\nsafetensors>=0.5\ntransformers>=4.51\ndiffusers @ git+https://github.com/huggingface/diffusers.git@main\npillow>=10.0\nspandrel>=0.4\nsentencepiece>=0.2\nprotobuf>=5.0\ngguf>=0.10.0\n"
+            format!(
+                "# Lightweight generation profile (no ai-toolkit, MPS-compatible on macOS)\naccelerate>=0.33\nsafetensors>=0.5\ntransformers>=4.51\ndiffusers>={DIFFUSERS_VERSION}\npillow>=10.0\nspandrel>=0.4\nsentencepiece>=0.2\nprotobuf>=5.0\ngguf>=0.10.0\n"
+            )
         }
-        _ => "# Runtime profile requirements\n\n",
+        _ => "# Runtime profile requirements\n\n".to_string(),
     };
 
     fs::write(&requirements_path, content)
@@ -680,8 +685,25 @@ fn ensure_profile_dependencies(
 ) -> Result<()> {
     let marker_path = bootstrap_marker_path(env_dir);
 
-    if marker_path.exists() && !created_env {
+    // Force re-bootstrap if the ai-toolkit pin changed (for training profiles
+    // only) — otherwise existing installs keep the old commit forever.
+    let aitoolkit_stale = profile == "trainer-cu124"
+        && marker_path.exists()
+        && !created_env
+        && std::fs::read_to_string(&marker_path)
+            .ok()
+            .map(|m| !m.contains(&format!("aitoolkit={AITOOLKIT_PIN_SHA}")))
+            .unwrap_or(false);
+
+    if marker_path.exists() && !created_env && !aitoolkit_stale {
         return Ok(());
+    }
+
+    if aitoolkit_stale {
+        println!(
+            "  {} ai-toolkit pin updated, re-cloning …",
+            style("→").dim()
+        );
     }
 
     if profile == "trainer-cu124" {
@@ -764,11 +786,11 @@ fn ensure_profile_dependencies(
 
     let marker_contents = if profile == "generator" {
         format!(
-            "profile={profile}\ntorch={GENERATOR_TORCH_VERSION}\ntorchvision={GENERATOR_TORCHVISION_VERSION}\n"
+            "profile={profile}\ntorch={GENERATOR_TORCH_VERSION}\ntorchvision={GENERATOR_TORCHVISION_VERSION}\ndiffusers={DIFFUSERS_VERSION}\n"
         )
     } else {
         format!(
-            "profile={profile}\ntorch={TRAINER_TORCH_VERSION}\ntorchvision={TRAINER_TORCHVISION_VERSION}\ntorchaudio={TRAINER_TORCHAUDIO_VERSION}\n"
+            "profile={profile}\ntorch={TRAINER_TORCH_VERSION}\ntorchvision={TRAINER_TORCHVISION_VERSION}\ntorchaudio={TRAINER_TORCHAUDIO_VERSION}\ndiffusers={DIFFUSERS_VERSION}\naitoolkit={AITOOLKIT_PIN_SHA}\n"
         )
     };
     fs::write(&marker_path, marker_contents)
@@ -784,19 +806,43 @@ fn aitoolkit_clone_dir(root: &Path) -> PathBuf {
 fn clone_or_update_aitoolkit(root: &Path) -> Result<()> {
     let dir = aitoolkit_clone_dir(root);
     if dir.join("toolkit").exists() {
-        // Already cloned – fast-forward update
+        // Already cloned — check if pinned SHA matches current HEAD.
+        let current = Command::new("git")
+            .arg("rev-parse")
+            .arg("HEAD")
+            .current_dir(&dir)
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if current == AITOOLKIT_PIN_SHA {
+            return Ok(());
+        }
+        // Fetch and checkout the pinned SHA (shallow fetch is sufficient).
         run_command(
             Command::new("git")
-                .arg("pull")
-                .arg("--ff-only")
+                .arg("fetch")
+                .arg("--depth")
+                .arg("1")
+                .arg("origin")
+                .arg(AITOOLKIT_PIN_SHA)
                 .current_dir(&dir),
-            "Failed to update ai-toolkit (git pull)",
+            "Failed to fetch ai-toolkit pin",
+        )?;
+        run_command(
+            Command::new("git")
+                .arg("checkout")
+                .arg(AITOOLKIT_PIN_SHA)
+                .current_dir(&dir),
+            "Failed to checkout ai-toolkit pin",
         )?;
     } else {
         if dir.exists() {
             fs::remove_dir_all(&dir)
                 .with_context(|| format!("Failed to remove stale {}", dir.display()))?;
         }
+        // Shallow-clone then checkout the pinned commit.
         run_command(
             Command::new("git")
                 .arg("clone")
@@ -805,6 +851,23 @@ fn clone_or_update_aitoolkit(root: &Path) -> Result<()> {
                 .arg(AITOOLKIT_REPO_URL)
                 .arg(&dir),
             "Failed to clone ai-toolkit",
+        )?;
+        run_command(
+            Command::new("git")
+                .arg("fetch")
+                .arg("--depth")
+                .arg("1")
+                .arg("origin")
+                .arg(AITOOLKIT_PIN_SHA)
+                .current_dir(&dir),
+            "Failed to fetch ai-toolkit pin",
+        )?;
+        run_command(
+            Command::new("git")
+                .arg("checkout")
+                .arg(AITOOLKIT_PIN_SHA)
+                .current_dir(&dir),
+            "Failed to checkout ai-toolkit pin",
         )?;
     }
     Ok(())
@@ -818,6 +881,35 @@ pub fn aitoolkit_path() -> Result<Option<PathBuf>> {
     } else {
         Ok(None)
     }
+}
+
+/// Check whether the bootstrapped runtime is stale relative to the pinned
+/// dep versions compiled into this binary. Returns the profile name that
+/// needs updating, or `None` if everything is current.
+pub fn stale_runtime_profile() -> Result<Option<String>> {
+    let root = runtime_root()?;
+    for profile in [DEFAULT_PROFILE_CUDA, GENERATOR_PROFILE] {
+        let env_dir = root.join("envs").join(profile);
+        let marker_path = bootstrap_marker_path(&env_dir);
+        if !marker_path.exists() {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&marker_path)
+            .with_context(|| format!("Failed to read {}", marker_path.display()))?;
+        let expected_marker = if profile == "generator" {
+            format!(
+                "profile={profile}\ntorch={GENERATOR_TORCH_VERSION}\ntorchvision={GENERATOR_TORCHVISION_VERSION}\ndiffusers={DIFFUSERS_VERSION}\n"
+            )
+        } else {
+            format!(
+                "profile={profile}\ntorch={TRAINER_TORCH_VERSION}\ntorchvision={TRAINER_TORCHVISION_VERSION}\ntorchaudio={TRAINER_TORCHAUDIO_VERSION}\ndiffusers={DIFFUSERS_VERSION}\naitoolkit={AITOOLKIT_PIN_SHA}\n"
+            )
+        };
+        if contents != expected_marker {
+            return Ok(Some(profile.to_string()));
+        }
+    }
+    Ok(None)
 }
 
 fn bootstrap_marker_path(env_dir: &Path) -> PathBuf {

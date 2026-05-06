@@ -163,6 +163,23 @@ pub async fn run() -> Result<()> {
                 style("\u{2713}").green().bold(),
                 style(format!("v{}", latest)).bold()
             );
+
+            // Check if the runtime deps are stale (e.g. pinned diffusers or
+            // ai-toolkit SHA bumped in this release). The marker file was
+            // written by the old version, so we compare against the new binary's
+            // constants.
+            if let Ok(Some(profile)) = crate::core::runtime::stale_runtime_profile() {
+                println!();
+                println!(
+                    "  {} Runtime dependencies have changed (profile \"{profile}\").",
+                    style("\u{2139}").dim()
+                );
+                println!(
+                    "  {} Run {} to update Python packages and ai-toolkit.",
+                    style("   ").dim(),
+                    style("modl runtime install").cyan()
+                );
+            }
         }
         Err(_) => {
             // Leave the downloaded binary in temp and print manual instructions
