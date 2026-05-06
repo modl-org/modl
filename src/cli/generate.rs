@@ -70,79 +70,16 @@ fn resolve_lora(name: &str, weight: f32, db: &Database) -> Result<Option<LoraRef
 }
 
 /// Pick the best installed generation model, falling back to "flux-schnell".
-fn default_generation_model(db: &Database) -> String {
-    let gen_types = ["checkpoint", "diffusion_model"];
-    if let Ok(installed) = db.list_installed(None) {
-        let gen_models: Vec<_> = installed
-            .iter()
-            .filter(|m| gen_types.contains(&m.asset_type.as_str()))
-            .collect();
-        if gen_models.len() == 1 {
-            return gen_models[0].id.clone();
-        }
-        // Multiple installed: prefer flux-schnell if present, else first
-        if !gen_models.is_empty() {
-            if let Some(m) = gen_models.iter().find(|m| m.id == "flux-schnell") {
-                return m.id.clone();
-            }
-            return gen_models[0].id.clone();
-        }
-    }
-    "flux-schnell".to_string()
-}
+use super::model_resolution::{
+    default_generation_model, resolve_cloud_provider, resolve_inpaint_model,
+};
 
-/// Default inference steps based on model type.
 fn default_steps(base_model: &str) -> u32 {
     model_family::model_defaults(base_model).0
 }
 
-/// Default guidance scale based on model type.
 fn default_guidance(base_model: &str) -> f32 {
     model_family::model_defaults(base_model).1
-}
-
-fn resolve_base_model_path(base_model: &str, db: &Database) -> Option<String> {
-    model_resolve::resolve_base_model_path(base_model, db)
-}
-
-/// Check if a model ID is installed in the DB.
-fn is_model_installed(model_id: &str, db: &Database) -> bool {
-    resolve_base_model_path(model_id, db).is_some()
-}
-
-/// Smart inpaint routing: prefer dedicated fill models over generic Flux inpainting.
-///
-/// When the user requests inpainting with a regular Flux 1 model (flux-dev,
-/// flux-schnell), auto-route to the best installed Flux Fill model. Fill models
-/// have 384 input channels and produce much cleaner inpainting results.
-fn resolve_inpaint_model(base_model: &str, db: &Database) -> (String, Option<String>) {
-    let info = model_family::resolve_model(base_model);
-    let is_flux1 = info.is_some_and(|m| m.arch_key == "flux" || m.arch_key == "flux_schnell");
-    if !is_flux1 {
-        return (
-            base_model.to_string(),
-            resolve_base_model_path(base_model, db),
-        );
-    }
-
-    for candidate in ["flux-fill-dev-onereward", "flux-fill-dev"] {
-        if is_model_installed(candidate, db) {
-            println!(
-                "  {} Using {} for inpainting",
-                style("↳").dim(),
-                style(candidate).bold()
-            );
-            return (
-                candidate.to_string(),
-                resolve_base_model_path(candidate, db),
-            );
-        }
-    }
-
-    (
-        base_model.to_string(),
-        resolve_base_model_path(base_model, db),
-    )
 }
 
 /// All arguments for `modl generate`, used by both CLI and web UI.
@@ -225,7 +162,7 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
         preflight::for_generation(&base_model)?;
     }
 
-    let base_model_path = resolve_base_model_path(&base_model, &db);
+    let base_model_path = model_resolve::resolve_base_model_path(&base_model, &db);
 
     // -------------------------------------------------------------------
     // Resolve size: explicit --size wins, otherwise use init-image dims
@@ -1014,23 +951,4 @@ async fn execute_generate(
     }
 
     Ok(())
-}
-
-/// Resolve cloud provider from --provider flag or config default.
-fn resolve_cloud_provider(provider: Option<CloudProvider>) -> CloudProvider {
-    if let Some(p) = provider {
-        return p;
-    }
-
-    // Check config for default provider
-    if let Ok(config) = crate::core::config::Config::load()
-        && let Some(ref cloud) = config.cloud
-        && let Some(ref default) = cloud.default_provider
-        && let Ok(p) = default.parse()
-    {
-        return p;
-    }
-
-    // Default to Modal
-    CloudProvider::Modal
 }

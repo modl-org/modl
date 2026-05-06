@@ -18,6 +18,8 @@ use crate::core::presets::{self, DatasetStats, GpuContext};
 use crate::core::remote_executor::RemoteExecutor;
 use crate::core::run_manifest;
 
+use super::model_resolution::resolve_cloud_provider;
+
 /// CLI overrides that take precedence over preset-resolved values.
 pub struct TrainOverrides {
     pub steps: Option<u32>,
@@ -893,23 +895,4 @@ fn edit_in_editor(content: &str) -> Result<String> {
     let edited = std::fs::read_to_string(&tmp_path).context("Failed to read edited file")?;
     let _ = std::fs::remove_file(&tmp_path);
     Ok(edited)
-}
-
-/// Resolve cloud provider from --provider flag or config default.
-fn resolve_cloud_provider(provider: Option<CloudProvider>) -> CloudProvider {
-    if let Some(p) = provider {
-        return p;
-    }
-
-    // Check config for default provider
-    if let Ok(config) = crate::core::config::Config::load()
-        && let Some(ref cloud) = config.cloud
-        && let Some(ref default) = cloud.default_provider
-        && let Ok(p) = default.parse()
-    {
-        return p;
-    }
-
-    // Default to Modal
-    CloudProvider::Modal
 }
