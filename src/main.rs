@@ -38,6 +38,16 @@ async fn async_main() -> Result<()> {
     // This never blocks the main command — we just read the result at the end.
     let update_handle = core::update_check::spawn_check();
 
+    // If the runtime is stale (pinned dep versions changed since last install),
+    // warn the user once. Suppress for 'upgrade' and 'runtime' commands to
+    // avoid noise during the update/reinstall workflow itself.
+    if !matches!(
+        &cli.command,
+        cli::Commands::Upgrade | cli::Commands::Runtime { .. }
+    ) {
+        warn_if_runtime_stale();
+    }
+
     let result = cli::run(cli).await;
 
     // Wait briefly for the background check to finish (it's usually instant
@@ -46,4 +56,23 @@ async fn async_main() -> Result<()> {
     core::update_check::print_if_update_available();
 
     result
+}
+
+fn warn_if_runtime_stale() {
+    match core::runtime::stale_runtime_profile() {
+        Ok(Some(profile)) => {
+            eprintln!(
+                "{} {} Runtime dependencies have changed. Run {} to update.",
+                console::style("!"),
+                console::style("warning:").yellow().bold(),
+                console::style("modl runtime install").cyan(),
+            );
+            let _ = profile;
+        }
+        Err(e) => {
+            // Best-effort — never fail the command because of a marker read.
+            let _ = e;
+        }
+        _ => {}
+    }
 }
