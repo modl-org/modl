@@ -7,6 +7,7 @@
 //! `GenerateJobSpec` / `EditJobSpec` happens at execution time (Phase B).
 
 use anyhow::{Context, Result, anyhow, bail};
+use base64::Engine as _;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -394,6 +395,32 @@ fn parse_image_ref(
             step_id: step_id.to_string(),
             index,
         })
+    } else if s.starts_with("data:image/") {
+        // Base64 inline image — decode and materialise to disk next to the spec file.
+        // Enables passing images from a remote client through the MCP run_workflow tool.
+        let (header, data) = s.split_once(',').ok_or_else(|| {
+            anyhow!(
+                "step `{current_step_id}`: inline image `data:...` is missing the comma separator"
+            )
+        })?;
+        let ext = header
+            .trim_start_matches("data:image/")
+            .split_once(';')
+            .map(|(t, _)| t)
+            .unwrap_or("png");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .with_context(|| {
+                format!("step `{current_step_id}`: failed to decode base64 inline image")
+            })?;
+        let out_path = base_dir.join(format!("{current_step_id}-source.{ext}"));
+        std::fs::write(&out_path, &bytes).with_context(|| {
+            format!(
+                "step `{current_step_id}`: failed to write inline image to `{}`",
+                out_path.display()
+            )
+        })?;
+        Ok(ImageRef::Local(out_path))
     } else {
         let path = if Path::new(s).is_absolute() {
             PathBuf::from(s)
@@ -940,5 +967,33 @@ steps:
 "#;
         let err = parse(yaml).unwrap_err().to_string();
         assert!(err.contains("step-output ref"), "got: {err}");
+    }
+
+    #[test]
+    fn inline_base64_image_materialised() {
+        use std::io::Read;
+        // 1×1 red pixel PNG, base64-encoded.
+        let b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI6QAAAABJRU5ErkJggg==";
+        let tmp = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            "name: test\nmodel: flux-dev\nsteps:\n  - id: retouch\n    edit: \"data:image/png;base64,{b64}\"\n    prompt: \"fix it\"\n"
+        );
+        let wf = parse_str(&yaml, tmp.path()).unwrap();
+        match &wf.steps[0].kind {
+            StepKind::Edit(e) => match &e.source {
+                ImageRef::Local(p) => {
+                    assert!(p.exists(), "inline image should be written to disk");
+                    assert!(p.to_string_lossy().ends_with("retouch-source.png"));
+                    let mut bytes = Vec::new();
+                    std::fs::File::open(p)
+                        .unwrap()
+                        .read_to_end(&mut bytes)
+                        .unwrap();
+                    assert!(!bytes.is_empty());
+                }
+                _ => panic!("expected Local after inline decode"),
+            },
+            _ => panic!("expected edit step"),
+        }
     }
 }
