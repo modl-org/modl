@@ -15,6 +15,8 @@ use crate::core::preflight;
 use crate::core::remote_executor::RemoteExecutor;
 use crate::core::runtime;
 
+use super::model_resolution::resolve_cloud_provider;
+
 /// All arguments for `modl edit`, used by both CLI and web UI.
 pub struct EditArgs<'a> {
     pub prompt: &'a str,
@@ -567,18 +569,4 @@ async fn execute_edit(
     }
 
     Ok(())
-}
-
-fn resolve_cloud_provider(provider: Option<CloudProvider>) -> CloudProvider {
-    if let Some(p) = provider {
-        return p;
-    }
-    if let Ok(config) = crate::core::config::Config::load()
-        && let Some(ref cloud) = config.cloud
-        && let Some(ref default) = cloud.default_provider
-        && let Ok(p) = default.parse()
-    {
-        return p;
-    }
-    CloudProvider::Modal
 }

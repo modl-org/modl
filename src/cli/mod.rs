@@ -25,6 +25,7 @@ mod list;
 mod login;
 mod logout;
 mod mcp;
+mod model_resolution;
 mod outputs;
 mod popular;
 mod preprocess;
@@ -1337,68 +1338,36 @@ pub async fn run(cli: Cli) -> Result<()> {
             provider,
             attach_gpu,
             gpu_type,
-        } => match command {
-            Some(TrainSubcommands::Setup { reinstall }) => train_setup::run(reinstall).await,
-            Some(TrainSubcommands::Status { name, watch, json }) => {
-                train_status::run(name.as_deref(), watch, json)?;
-                Ok(())
-            }
-            Some(TrainSubcommands::Rm { name }) => {
-                use console::style;
-                crate::core::training::delete_training_run(&name)?;
-                println!("{} Deleted training run '{}'", style("✓").green(), name);
-                Ok(())
-            }
-            Some(TrainSubcommands::Ls) => {
-                let runs = crate::core::training::list_training_runs()?;
-                if runs.is_empty() {
-                    println!("No training runs found.");
-                } else {
-                    for name in &runs {
-                        println!("  {name}");
-                    }
-                    println!("\n{} training run(s)", runs.len());
-                }
-                Ok(())
-            }
-            None if base.is_none() || lora_type.is_none() => {
-                print_train_info();
-                Ok(())
-            }
-            None => {
-                let base_val = base.as_deref().unwrap();
-                let lora_type_val = lora_type.unwrap();
-                train::run(
-                    dataset.as_deref(),
-                    base_val,
-                    name.as_deref(),
-                    trigger.as_deref(),
-                    lora_type_val,
-                    preset,
-                    train::TrainOverrides {
-                        steps,
-                        rank,
-                        lr,
-                        batch_size,
-                        resolution,
-                        optimizer,
-                        seed,
-                        repeats,
-                        caption_dropout,
-                        class_word,
-                        resume,
-                        sample_every,
-                    },
-                    config.as_deref(),
-                    dry_run,
-                    cloud,
-                    provider,
-                    attach_gpu,
-                    &gpu_type,
-                )
-                .await
-            }
-        },
+        } => {
+            dispatch_train(
+                command,
+                dataset,
+                base,
+                name,
+                trigger,
+                lora_type,
+                preset,
+                steps,
+                rank,
+                lr,
+                batch_size,
+                resolution,
+                optimizer,
+                seed,
+                repeats,
+                caption_dropout,
+                class_word,
+                resume,
+                sample_every,
+                config,
+                dry_run,
+                cloud,
+                provider,
+                attach_gpu,
+                gpu_type,
+            )
+            .await
+        }
         Commands::Enhance {
             prompt,
             model,
@@ -1510,128 +1479,16 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Info { id } => info::run(&id).await,
 
         // ── Vision (image → text/data) ─────────────────────────────
-        Commands::Vision { command } => match command {
-            VisionCommands::Describe {
-                paths,
-                detail,
-                model,
-                fast,
-                json,
-            } => {
-                let effective_model = if fast && model.is_none() {
-                    Some("qwen3-vl-2b".to_string())
-                } else {
-                    model
-                };
-                describe::run(&paths, &detail, effective_model.as_deref(), json).await
-            }
-            VisionCommands::Score { paths, json } => score::run(&paths, json).await,
-            VisionCommands::Detect {
-                paths,
-                r#type,
-                embeddings,
-                json,
-            } => detect::run(&paths, &r#type, embeddings, json).await,
-            VisionCommands::Ground {
-                query,
-                paths,
-                threshold,
-                model,
-                fast,
-                json,
-            } => {
-                let effective_model = if fast && model.is_none() {
-                    Some("qwen3-vl-2b".to_string())
-                } else {
-                    model
-                };
-                ground::run(&query, &paths, threshold, effective_model.as_deref(), json).await
-            }
-            VisionCommands::Compare {
-                paths,
-                reference,
-                json,
-            } => compare::run(&paths, reference.as_deref(), json).await,
-        },
+        Commands::Vision { command } => dispatch_vision(command).await,
 
         // ── Process (image → image) ─────────────────────────────────
-        Commands::Process { command } => match command {
-            ProcessCommands::Upscale {
-                paths,
-                scale,
-                model,
-                output,
-                json,
-            } => upscale::run(&paths, output.as_deref(), scale, &model, json).await,
-            ProcessCommands::RemoveBg {
-                paths,
-                output,
-                json,
-            } => remove_bg::run(&paths, output.as_deref(), json).await,
-            ProcessCommands::Segment {
-                image,
-                output,
-                method,
-                bbox,
-                point,
-                expand,
-                json,
-            } => {
-                segment::run(
-                    &image,
-                    output.as_deref(),
-                    &method,
-                    bbox.as_deref(),
-                    point.as_deref(),
-                    expand,
-                    json,
-                )
-                .await
-            }
-            ProcessCommands::Preprocess { command } => preprocess::run(command).await,
-            ProcessCommands::Compose {
-                background,
-                layer,
-                position,
-                scale,
-                opacity,
-                canvas_size,
-                output,
-                json,
-            } => {
-                compose::run(compose::ComposeArgs {
-                    background: &background,
-                    layers: &layer,
-                    positions: &position,
-                    scales: &scale,
-                    opacities: &opacity,
-                    canvas_size: canvas_size.as_deref(),
-                    output_dir: output.as_deref(),
-                    json,
-                })
-                .await
-            }
-        },
+        Commands::Process { command } => dispatch_process(command).await,
 
         // ── Remote GPU ───────────────────────────────────────────────
-        Commands::Gpu { command } => match command {
-            GpuCommands::Attach { spec, idle } => gpu::attach(&spec, &idle).await,
-            GpuCommands::Detach => gpu::detach().await,
-            GpuCommands::Status => gpu::status().await,
-            GpuCommands::Ssh => gpu::ssh().await,
-            GpuCommands::Agent {
-                session_token,
-                api_base,
-            } => gpu::agent(&session_token, &api_base).await,
-        },
+        Commands::Gpu { command } => dispatch_gpu(command).await,
 
         // ── Auth ─────────────────────────────────────────────────────
-        Commands::Auth { command } => match command {
-            AuthCommands::Login => login::run().await,
-            AuthCommands::Logout => logout::run().await,
-            AuthCommands::Whoami => whoami::run().await,
-            AuthCommands::Add { provider } => auth::run(provider).await,
-        },
+        Commands::Auth { command } => dispatch_auth(command).await,
         Commands::Login => login::run().await,
 
         // ── Data Management ──────────────────────────────────────────
@@ -1645,20 +1502,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             foreground,
             install_service,
             remove_service,
-        } => {
-            if install_service {
-                serve::install_service(port).await
-            } else if remove_service {
-                serve::remove_service().await
-            } else {
-                serve::run(port, no_open, foreground).await
-            }
-        }
-        Commands::Worker { command } => match command {
-            WorkerSubcommands::Start { timeout } => worker::start(timeout).await,
-            WorkerSubcommands::Stop => worker::stop().await,
-            WorkerSubcommands::Status => worker::status().await,
-        },
+        } => dispatch_serve(port, no_open, foreground, install_service, remove_service).await,
+        Commands::Worker { command } => dispatch_worker(command).await,
         Commands::Mcp => mcp::run().await,
 
         // ── System ───────────────────────────────────────────────────
@@ -1668,18 +1513,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             repair,
         } => doctor::run(verify_hashes, repair).await,
         Commands::Upgrade => upgrade::run().await,
-        Commands::System { command } => match command {
-            SystemCommands::Gc => gc::run().await,
-            SystemCommands::Update => update::run().await,
-            SystemCommands::Link {
-                path,
-                comfyui,
-                a1111,
-            } => {
-                let comfy = comfyui.or(path);
-                link::run(comfy.as_deref(), a1111.as_deref()).await
-            }
-        },
+        Commands::System { command } => dispatch_system(command).await,
 
         // ── Workflow ────────────────────────────────────────────────
         Commands::Run {
@@ -1720,6 +1554,264 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::CliSchema => {
             dump_cli_schema();
             Ok(())
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_train(
+    command: Option<TrainSubcommands>,
+    dataset: Option<String>,
+    base: Option<String>,
+    name: Option<String>,
+    trigger: Option<String>,
+    lora_type: Option<LoraType>,
+    preset: Option<Preset>,
+    steps: Option<u32>,
+    rank: Option<u32>,
+    lr: Option<f64>,
+    batch_size: Option<u32>,
+    resolution: Option<u32>,
+    optimizer: Option<Optimizer>,
+    seed: Option<u64>,
+    repeats: Option<u32>,
+    caption_dropout: Option<f64>,
+    class_word: Option<String>,
+    resume: Option<String>,
+    sample_every: Option<u32>,
+    config: Option<String>,
+    dry_run: bool,
+    cloud: bool,
+    provider: Option<CloudProvider>,
+    attach_gpu: bool,
+    gpu_type: String,
+) -> Result<()> {
+    match command {
+        Some(TrainSubcommands::Setup { reinstall }) => train_setup::run(reinstall).await,
+        Some(TrainSubcommands::Status { name, watch, json }) => {
+            train_status::run(name.as_deref(), watch, json)?;
+            Ok(())
+        }
+        Some(TrainSubcommands::Rm { name }) => {
+            crate::core::training::delete_training_run(&name)?;
+            println!("{} Deleted training run '{}'", style("✓").green(), name);
+            Ok(())
+        }
+        Some(TrainSubcommands::Ls) => {
+            let runs = crate::core::training::list_training_runs()?;
+            if runs.is_empty() {
+                println!("No training runs found.");
+            } else {
+                for name in &runs {
+                    println!("  {name}");
+                }
+                println!("\n{} training run(s)", runs.len());
+            }
+            Ok(())
+        }
+        None if base.is_none() || lora_type.is_none() => {
+            print_train_info();
+            Ok(())
+        }
+        None => {
+            let base_val = base.as_deref().unwrap();
+            let lora_type_val = lora_type.unwrap();
+            train::run(
+                dataset.as_deref(),
+                base_val,
+                name.as_deref(),
+                trigger.as_deref(),
+                lora_type_val,
+                preset,
+                train::TrainOverrides {
+                    steps,
+                    rank,
+                    lr,
+                    batch_size,
+                    resolution,
+                    optimizer,
+                    seed,
+                    repeats,
+                    caption_dropout,
+                    class_word,
+                    resume,
+                    sample_every,
+                },
+                config.as_deref(),
+                dry_run,
+                cloud,
+                provider,
+                attach_gpu,
+                &gpu_type,
+            )
+            .await
+        }
+    }
+}
+
+async fn dispatch_vision(command: VisionCommands) -> Result<()> {
+    match command {
+        VisionCommands::Describe {
+            paths,
+            detail,
+            model,
+            fast,
+            json,
+        } => {
+            let effective_model = if fast && model.is_none() {
+                Some("qwen3-vl-2b".to_string())
+            } else {
+                model
+            };
+            describe::run(&paths, &detail, effective_model.as_deref(), json).await
+        }
+        VisionCommands::Score { paths, json } => score::run(&paths, json).await,
+        VisionCommands::Detect {
+            paths,
+            r#type,
+            embeddings,
+            json,
+        } => detect::run(&paths, &r#type, embeddings, json).await,
+        VisionCommands::Ground {
+            query,
+            paths,
+            threshold,
+            model,
+            fast,
+            json,
+        } => {
+            let effective_model = if fast && model.is_none() {
+                Some("qwen3-vl-2b".to_string())
+            } else {
+                model
+            };
+            ground::run(&query, &paths, threshold, effective_model.as_deref(), json).await
+        }
+        VisionCommands::Compare {
+            paths,
+            reference,
+            json,
+        } => compare::run(&paths, reference.as_deref(), json).await,
+    }
+}
+
+async fn dispatch_process(command: ProcessCommands) -> Result<()> {
+    match command {
+        ProcessCommands::Upscale {
+            paths,
+            scale,
+            model,
+            output,
+            json,
+        } => upscale::run(&paths, output.as_deref(), scale, &model, json).await,
+        ProcessCommands::RemoveBg {
+            paths,
+            output,
+            json,
+        } => remove_bg::run(&paths, output.as_deref(), json).await,
+        ProcessCommands::Segment {
+            image,
+            output,
+            method,
+            bbox,
+            point,
+            expand,
+            json,
+        } => {
+            segment::run(
+                &image,
+                output.as_deref(),
+                &method,
+                bbox.as_deref(),
+                point.as_deref(),
+                expand,
+                json,
+            )
+            .await
+        }
+        ProcessCommands::Preprocess { command } => preprocess::run(command).await,
+        ProcessCommands::Compose {
+            background,
+            layer,
+            position,
+            scale,
+            opacity,
+            canvas_size,
+            output,
+            json,
+        } => {
+            compose::run(compose::ComposeArgs {
+                background: &background,
+                layers: &layer,
+                positions: &position,
+                scales: &scale,
+                opacities: &opacity,
+                canvas_size: canvas_size.as_deref(),
+                output_dir: output.as_deref(),
+                json,
+            })
+            .await
+        }
+    }
+}
+
+async fn dispatch_gpu(command: GpuCommands) -> Result<()> {
+    match command {
+        GpuCommands::Attach { spec, idle } => gpu::attach(&spec, &idle).await,
+        GpuCommands::Detach => gpu::detach().await,
+        GpuCommands::Status => gpu::status().await,
+        GpuCommands::Ssh => gpu::ssh().await,
+        GpuCommands::Agent {
+            session_token,
+            api_base,
+        } => gpu::agent(&session_token, &api_base).await,
+    }
+}
+
+async fn dispatch_auth(command: AuthCommands) -> Result<()> {
+    match command {
+        AuthCommands::Login => login::run().await,
+        AuthCommands::Logout => logout::run().await,
+        AuthCommands::Whoami => whoami::run().await,
+        AuthCommands::Add { provider } => auth::run(provider).await,
+    }
+}
+
+async fn dispatch_serve(
+    port: u16,
+    no_open: bool,
+    foreground: bool,
+    install_service: bool,
+    remove_service: bool,
+) -> Result<()> {
+    if install_service {
+        serve::install_service(port).await
+    } else if remove_service {
+        serve::remove_service().await
+    } else {
+        serve::run(port, no_open, foreground).await
+    }
+}
+
+async fn dispatch_worker(command: WorkerSubcommands) -> Result<()> {
+    match command {
+        WorkerSubcommands::Start { timeout } => worker::start(timeout).await,
+        WorkerSubcommands::Stop => worker::stop().await,
+        WorkerSubcommands::Status => worker::status().await,
+    }
+}
+
+async fn dispatch_system(command: SystemCommands) -> Result<()> {
+    match command {
+        SystemCommands::Gc => gc::run().await,
+        SystemCommands::Update => update::run().await,
+        SystemCommands::Link {
+            path,
+            comfyui,
+            a1111,
+        } => {
+            let comfy = comfyui.or(path);
+            link::run(comfy.as_deref(), a1111.as_deref()).await
         }
     }
 }
