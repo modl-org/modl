@@ -30,6 +30,8 @@ const POD_DISK_GB: f64 = 80.0;
 const PROVISION_TIMEOUT_SECS: u64 = 8 * 60;
 /// Give up if SSH never accepts a connection after the instance reports running.
 const SSH_TIMEOUT_SECS: u64 = 6 * 60;
+/// Seconds of event silence before probing whether the worker is still alive.
+const LIVENESS_CHECK_SECS: u64 = 60;
 
 pub struct PodOptions {
     pub gpu_type: String,
@@ -157,11 +159,26 @@ pub async fn run_pod_training(spec: TrainJobSpec, opts: PodOptions) -> Result<()
     let onstart = "touch /root/.no_auto_tmux\n";
     let env = vec![("HF_HUB_OFFLINE".to_string(), "0".to_string())];
 
+    // The user confirmed offers[0]'s price; fallback offers are ranked by
+    // perf-per-dollar, not price, so without a cap a failed first rent could
+    // silently land on anything up to --max-price.
+    let price_cap = best.dph_total * 1.25;
+
     let mut booted: Option<(u64, vast::Offer, SshTarget)> = None;
     let mut bad_machines: std::collections::HashSet<u64> = std::collections::HashSet::new();
     for offer in offers.iter().take(8) {
         if offer.machine_id != 0 && bad_machines.contains(&offer.machine_id) {
             continue; // same physical box as one that just failed to boot
+        }
+        if offer.dph_total > price_cap {
+            println!(
+                "{} Skipping fallback offer {} at ${:.3}/hr — more than 25% over the confirmed ${:.3}/hr",
+                style("!").yellow(),
+                offer.id,
+                offer.dph_total,
+                best.dph_total
+            );
+            continue;
         }
         let id = match vast::create_instance(
             offer.id,
@@ -331,66 +348,86 @@ async fn drive_pod(
         None,
     )?;
 
-    let token_env = hf_token
-        .map(|t| format!("HF_TOKEN={} ", shell_quote(t)))
-        .unwrap_or_default();
+    // The HF token must not land in any argv: local `ps` shows the full ssh
+    // command line, and remote `env` would show it in the worker's argv too.
+    // Ship it over stdin to a 600-perm file and export it via a shell prefix
+    // assignment, which appears in no process's arguments.
+    let token_prefix = match hf_token {
+        Some(t) => {
+            run_ssh_stdin(
+                &ssh,
+                &format!("umask 077 && cat > {REMOTE_ROOT}/.hf_token"),
+                t,
+            )?;
+            format!("HF_TOKEN=\"$(cat {REMOTE_ROOT}/.hf_token)\" ")
+        }
+        None => String::new(),
+    };
     let launch = format!(
         "cd {REMOTE_ROOT} && rm -f events.jsonl && \
-         nohup env HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 {token_env}\
+         {token_prefix}HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 \
          PYTHONPATH={REMOTE_ROOT}/worker MODL_AITOOLKIT_ROOT={REMOTE_ROOT}/ai-toolkit \
-         {REMOTE_ROOT}/venv/bin/python -m modl_worker.main train --config {REMOTE_ROOT}/spec.yaml --job-id {job_id} \
-         >> {REMOTE_ROOT}/events.jsonl 2>> {REMOTE_ROOT}/stderr.log & echo launched"
-    );
-    run_ssh_quiet(&ssh, &launch)?;
-    println!(
-        "{} Training started on pod — {}",
-        style("→").cyan(),
-        style(&job_id).dim()
+         nohup {REMOTE_ROOT}/venv/bin/python -m modl_worker.main train --config {REMOTE_ROOT}/spec.yaml --job-id {job_id} \
+         >> {REMOTE_ROOT}/events.jsonl 2>> {REMOTE_ROOT}/stderr.log & \
+         echo $! > {REMOTE_ROOT}/worker.pid; echo launched"
     );
 
-    let outcome = stream_events(&ssh, &job_id, &db)?;
+    // From here on the job row exists — no error may leave it stuck at
+    // "running" (phantom running jobs in `modl ls` / the UI training tab).
+    let result = (|| -> Result<()> {
+        run_ssh_quiet(&ssh, &launch)?;
+        println!(
+            "{} Training started on pod — {}",
+            style("→").cyan(),
+            style(&job_id).dim()
+        );
 
-    match outcome {
-        TrainOutcome::Completed => {}
-        TrainOutcome::Failed(msg) => {
-            db.update_job_status(&job_id, "error")?;
-            let tail = run_ssh_capture(&ssh, &format!("tail -n 30 {REMOTE_ROOT}/stderr.log"))
-                .unwrap_or_default();
-            bail!("Pod training failed: {msg}\n\nLast worker stderr:\n{tail}");
+        match stream_events(&ssh, &job_id, &db)? {
+            TrainOutcome::Completed => {}
+            TrainOutcome::Failed(msg) => {
+                let tail = run_ssh_capture(&ssh, &format!("tail -n 30 {REMOTE_ROOT}/stderr.log"))
+                    .unwrap_or_default();
+                bail!("Pod training failed: {msg}\n\nLast worker stderr:\n{tail}");
+            }
         }
+
+        // ---------------------------------------------------------------
+        // 7. Sync artifacts back + register locally
+        // ---------------------------------------------------------------
+        println!("{} Syncing artifacts back...", style("→").cyan());
+        let local_out = PathBuf::from(&spec.output.destination_dir);
+        std::fs::create_dir_all(&local_out)?;
+        rsync_from(&ssh, &format!("{REMOTE_ROOT}/output/"), &local_out)?;
+
+        let final_lora = find_final_lora(&local_out, &spec.output.lora_name)?;
+        let store_root = crate::core::paths::modl_root();
+        let collected = crate::core::artifacts::collect_lora(
+            &final_lora,
+            &spec.output.lora_name,
+            &spec.model.base_model_id,
+            &spec.params.trigger_word,
+            &job_id,
+            &db,
+            &store_root,
+        )?;
+        db.update_job_status(&job_id, "completed")?;
+
+        println!(
+            "{} LoRA registered: {}",
+            style("✓").green().bold(),
+            collected.store_path.display()
+        );
+        println!(
+            "  Try it: modl generate \"{} ...\" --lora {} --base {}",
+            spec.params.trigger_word, spec.output.lora_name, spec.model.base_model_id
+        );
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = db.update_job_status(&job_id, "error");
     }
-
-    // ---------------------------------------------------------------
-    // 7. Sync artifacts back + register locally
-    // ---------------------------------------------------------------
-    println!("{} Syncing artifacts back...", style("→").cyan());
-    let local_out = PathBuf::from(&spec.output.destination_dir);
-    std::fs::create_dir_all(&local_out)?;
-    rsync_from(&ssh, &format!("{REMOTE_ROOT}/output/"), &local_out)?;
-
-    let final_lora = find_final_lora(&local_out, &spec.output.lora_name)?;
-    let store_root = crate::core::paths::modl_root();
-    let collected = crate::core::artifacts::collect_lora(
-        &final_lora,
-        &spec.output.lora_name,
-        &spec.model.base_model_id,
-        &spec.params.trigger_word,
-        &job_id,
-        &db,
-        &store_root,
-    )?;
-    db.update_job_status(&job_id, "completed")?;
-
-    println!(
-        "{} LoRA registered: {}",
-        style("✓").green().bold(),
-        collected.store_path.display()
-    );
-    println!(
-        "  Try it: modl generate \"{} ...\" --lora {} --base {}",
-        spec.params.trigger_word, spec.output.lora_name, spec.model.base_model_id
-    );
-    Ok(())
+    result
 }
 
 fn preflight(spec: &TrainJobSpec) -> Result<()> {
@@ -484,6 +521,14 @@ enum TrainOutcome {
 
 /// Follow the remote events file, printing progress and persisting events.
 /// Reconnects if the SSH tail drops (pods have flaky links).
+///
+/// A worker that dies without a terminal event (kernel OOM-kill, a crash
+/// before the first event is emitted) leaves a healthy `tail -F` following a
+/// file that will never grow — without a liveness probe that hangs forever
+/// on a billing pod. So when the stream goes quiet we ask the pod whether
+/// the worker PID is still alive, and only a definitive "dead" fails the job
+/// (SSH errors during the probe are treated as alive so a flaky link can't
+/// kill a healthy run).
 fn stream_events(ssh: &SshTarget, job_id: &str, db: &Database) -> Result<TrainOutcome> {
     let mut reconnects = 0u32;
     let mut last_seq: u64 = 0;
@@ -499,64 +544,66 @@ fn stream_events(ssh: &SshTarget, job_id: &str, db: &Database) -> Result<TrainOu
             .context("Failed to spawn ssh tail for event streaming")?;
 
         let stdout = child.stdout.take().context("ssh tail: no stdout")?;
-        let reader = std::io::BufReader::new(stdout);
-
-        for line in reader.lines() {
-            let Ok(line) = line else { break };
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
+        let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
+        let reader_thread = std::thread::spawn(move || {
+            let reader = std::io::BufReader::new(stdout);
+            for line in reader.lines() {
+                let Ok(line) = line else { break };
+                if line_tx.send(line).is_err() {
+                    break;
+                }
             }
-            let Ok(raw) = serde_json::from_str::<serde_json::Value>(line) else {
-                continue;
-            };
-            let Some(event) = parse_worker_event(&raw, job_id) else {
-                continue;
-            };
-            if event.sequence != 0 && event.sequence <= last_seq {
-                continue; // already seen before a reconnect
-            }
-            last_seq = event.sequence.max(last_seq);
-            let _ = db.insert_job_event(
-                job_id,
-                event.sequence,
-                &serde_json::to_string(&event).unwrap_or_default(),
-            );
+        });
 
-            match &event.event {
-                EventPayload::Progress {
-                    stage,
-                    step,
-                    total_steps,
-                    loss,
-                    ..
-                } => {
-                    let loss_str = loss.map(|l| format!("  loss {l:.4}")).unwrap_or_default();
-                    println!("  [{stage}] step {step}/{total_steps}{loss_str}");
+        // Some(..) = terminal outcome; None = tail dropped, reconnect.
+        let mut outcome: Option<TrainOutcome> = None;
+        loop {
+            use std::sync::mpsc::RecvTimeoutError;
+            let line = match line_rx
+                .recv_timeout(std::time::Duration::from_secs(LIVENESS_CHECK_SECS))
+            {
+                Ok(line) => line,
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => {
+                    // Quiet stream — normal during long steps or model
+                    // downloads, as long as the worker is still running.
+                    if !worker_is_dead(ssh) {
+                        continue;
+                    }
+                    // Drain any in-flight lines: the worker may have just
+                    // finished and its terminal event still be in the pipe.
+                    while let Ok(line) = line_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                        if let Some(o) = handle_event_line(&line, job_id, db, &mut last_seq) {
+                            outcome = Some(o);
+                            break;
+                        }
+                    }
+                    if outcome.is_none() {
+                        outcome = Some(TrainOutcome::Failed(
+                            "worker process died without reporting an error \
+                             (OOM-killed or crashed before the first event)"
+                                .to_string(),
+                        ));
+                    }
+                    break;
                 }
-                EventPayload::Log { level, message } if level != "debug" => {
-                    println!("  {}", style(message).dim());
-                }
-                EventPayload::Warning { message, .. } => {
-                    println!("  {} {message}", style("⚠").yellow());
-                }
-                EventPayload::Artifact { path, .. } => {
-                    println!("  {} checkpoint: {path}", style("•").cyan());
-                }
-                EventPayload::Completed { .. } => {
-                    let _ = child.kill();
-                    return Ok(TrainOutcome::Completed);
-                }
-                EventPayload::Error { message, .. } => {
-                    let _ = child.kill();
-                    return Ok(TrainOutcome::Failed(message.clone()));
-                }
-                _ => {}
+            };
+            if let Some(o) = handle_event_line(&line, job_id, db, &mut last_seq) {
+                outcome = Some(o);
+                break;
             }
         }
 
-        // Tail ended without a terminal event — connection dropped.
         let _ = child.kill();
+        let _ = child.wait();
+        drop(line_rx);
+        let _ = reader_thread.join();
+
+        if let Some(outcome) = outcome {
+            return Ok(outcome);
+        }
+
+        // Tail ended without a terminal event — connection dropped.
         reconnects += 1;
         if reconnects > 20 {
             bail!(
@@ -573,6 +620,73 @@ fn stream_events(ssh: &SshTarget, job_id: &str, db: &Database) -> Result<TrainOu
     }
 }
 
+/// Parse, persist, and print one JSONL event line. Returns Some(..) for a
+/// terminal event.
+fn handle_event_line(
+    line: &str,
+    job_id: &str,
+    db: &Database,
+    last_seq: &mut u64,
+) -> Option<TrainOutcome> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let raw = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    let event = parse_worker_event(&raw, job_id)?;
+    if event.sequence != 0 && event.sequence <= *last_seq {
+        return None; // already seen before a reconnect
+    }
+    *last_seq = event.sequence.max(*last_seq);
+    let _ = db.insert_job_event(
+        job_id,
+        event.sequence,
+        &serde_json::to_string(&event).unwrap_or_default(),
+    );
+
+    match &event.event {
+        EventPayload::Progress {
+            stage,
+            step,
+            total_steps,
+            loss,
+            ..
+        } => {
+            let loss_str = loss.map(|l| format!("  loss {l:.4}")).unwrap_or_default();
+            println!("  [{stage}] step {step}/{total_steps}{loss_str}");
+        }
+        EventPayload::Log { level, message } if level != "debug" => {
+            println!("  {}", style(message).dim());
+        }
+        EventPayload::Warning { message, .. } => {
+            println!("  {} {message}", style("⚠").yellow());
+        }
+        EventPayload::Artifact { path, .. } => {
+            println!("  {} checkpoint: {path}", style("•").cyan());
+        }
+        EventPayload::Completed { .. } => return Some(TrainOutcome::Completed),
+        EventPayload::Error { message, .. } => {
+            return Some(TrainOutcome::Failed(message.clone()));
+        }
+        _ => {}
+    }
+    None
+}
+
+/// True only on a definitive "dead" answer from the pod. SSH failures return
+/// false — a flaky link must not fail a healthy job; the launch step writes
+/// the pidfile before we ever get here.
+fn worker_is_dead(ssh: &SshTarget) -> bool {
+    let cmd = format!(
+        "if [ -f {REMOTE_ROOT}/worker.pid ] && kill -0 \"$(cat {REMOTE_ROOT}/worker.pid)\" 2>/dev/null; \
+         then echo alive; else echo dead; fi"
+    );
+    match run_ssh_capture(ssh, &cmd) {
+        Ok(out) => out.contains("dead"),
+        Err(_) => false,
+    }
+}
+
 async fn wait_for_instance(instance_id: u64) -> Result<SshTarget> {
     println!(
         "{} Waiting for instance to boot (usually 1-3 minutes)...",
@@ -581,9 +695,32 @@ async fn wait_for_instance(instance_id: u64) -> Result<SshTarget> {
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_secs(PROVISION_TIMEOUT_SECS);
     let mut last_status = String::new();
+    let mut poll_failures = 0u32;
 
     loop {
-        let inst = vast::get_instance(instance_id).await?;
+        // Vast's API throws intermittent 5xx/timeouts — a single transient
+        // error must not get a healthy booting pod destroyed and its machine
+        // blacklisted. Only give up after several consecutive failures.
+        let inst = match vast::get_instance(instance_id).await {
+            Ok(inst) => {
+                poll_failures = 0;
+                inst
+            }
+            Err(e) => {
+                poll_failures += 1;
+                if poll_failures >= 5 {
+                    return Err(e.context(format!(
+                        "Vast API failed {poll_failures} consecutive status polls for instance {instance_id}"
+                    )));
+                }
+                println!(
+                    "{} Vast API error while polling ({poll_failures}/5), retrying...",
+                    style("!").yellow()
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                continue;
+            }
+        };
         if inst.actual_status != last_status {
             println!("  status: {}", inst.actual_status);
             last_status = inst.actual_status.clone();
@@ -670,6 +807,33 @@ fn run_ssh_capture(ssh: &SshTarget, cmd: &str) -> Result<String> {
         .output()
         .context("ssh command failed to spawn")?;
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Run a remote command feeding `input` on stdin — for secrets that must not
+/// appear in any argv.
+fn run_ssh_stdin(ssh: &SshTarget, cmd: &str, input: &str) -> Result<()> {
+    use std::io::Write;
+    let mut child = Command::new("ssh")
+        .args(ssh.base_args())
+        .arg(cmd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("ssh command failed to spawn")?;
+    child
+        .stdin
+        .take()
+        .context("ssh: no stdin handle")?
+        .write_all(input.as_bytes())?;
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        bail!(
+            "Remote command failed: {cmd}\n{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 /// Run a remote script with live output (bootstrap etc.).

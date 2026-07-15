@@ -138,7 +138,10 @@ pub async fn search_offers(
         "dph_total": {"lte": max_price_per_hour},
         "inet_down": {"gte": 500},
         "inet_up": {"gte": 200},
-        "disk_space": {"gte": 60},
+        // Must cover the POD_DISK_GB (80) requested at rent time — hosts
+        // below it pass search, then fail at create_instance, burning a
+        // failover attempt.
+        "disk_space": {"gte": 80},
         "reliability2": {"gte": 0.98},
         "direct_port_count": {"gte": 1},
         "cuda_max_good": {"gte": 12.9},
