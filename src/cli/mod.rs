@@ -838,7 +838,8 @@ pub enum Commands {
         /// GPU type for remote execution (e.g. a100, a10g, h100, rtx4090)
         #[arg(long, default_value = "a100")]
         gpu_type: String,
-        /// Rent a Vast.ai pod with your own API key (e.g. rtx4090, a100-80gb, h100).
+        /// Rent a Vast.ai pod with your own API key (e.g. rtx4090, a100-80gb, h100,
+        /// or "auto" to pick the best value across all GPU types that fit the model).
         /// Trains on the pod, syncs the LoRA back, destroys the pod. Needs VASTAI_API_KEY.
         #[arg(long, value_name = "GPU_TYPE", conflicts_with_all = ["cloud", "attach_gpu"])]
         pod: Option<String>,

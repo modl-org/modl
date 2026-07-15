@@ -10,14 +10,19 @@ use serde_json::json;
 
 const API_BASE: &str = "https://console.vast.ai/api/v0";
 
-/// Docker image for rented pods. Vast.ai's own PyTorch template is pre-cached
-/// across their fleet, so it boots in ~1 min (vs 5-20 min for custom images).
-pub const POD_IMAGE: &str = "vastai/pytorch:latest";
+/// Docker image for rented pods. Vast's minimal base image on a PINNED tag:
+/// the bootstrap builds its own python/torch venv, so the fat pytorch image
+/// buys nothing — and a stable digest means host docker caches actually hit
+/// (`:latest` churns and forces multi-GB re-pulls fleet-wide).
+pub const POD_IMAGE: &str = "vastai/base-image:cuda-12.9.2-auto";
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // full marketplace row — some fields are display-only for now
 pub struct Offer {
     pub id: u64,
+    /// Physical host — several offers can share one machine. Used to avoid
+    /// re-renting a box that just failed to boot.
+    pub machine_id: u64,
     pub gpu_name: String,
     pub num_gpus: u32,
     pub gpu_ram_mb: u64,
@@ -34,6 +39,7 @@ pub struct Offer {
 pub struct Instance {
     pub id: u64,
     pub actual_status: String,
+    pub status_msg: Option<String>,
     pub gpu_name: String,
     pub ssh_host: Option<String>,
     pub ssh_port: Option<u16>,
@@ -73,6 +79,7 @@ pub fn api_key() -> Result<String> {
 fn gpu_name_filter(gpu_type: &str) -> String {
     match gpu_type.to_lowercase().as_str() {
         "rtx3090" | "3090" => "RTX 3090".into(),
+        "rtx3090ti" | "3090ti" => "RTX 3090 Ti".into(),
         "rtx4090" | "4090" => "RTX 4090".into(),
         "rtx5090" | "5090" => "RTX 5090".into(),
         "a10g" => "A10G".into(),
@@ -122,22 +129,25 @@ pub async fn search_offers(
 ) -> Result<Vec<Offer>> {
     let (client, key) = client()?;
 
+    let auto = matches!(gpu_type.to_lowercase().as_str(), "auto" | "any");
     let mut query = json!({
         "verified": {"eq": true},
         "external": {"eq": false},
         "rentable": {"eq": true},
-        "gpu_name": {"eq": gpu_name_filter(gpu_type)},
         "num_gpus": {"eq": 1},
         "dph_total": {"lte": max_price_per_hour},
         "inet_down": {"gte": 500},
         "inet_up": {"gte": 200},
         "disk_space": {"gte": 60},
-        "reliability2": {"gte": 0.95},
+        "reliability2": {"gte": 0.98},
         "direct_port_count": {"gte": 1},
-        "cuda_max_good": {"gte": 12.0},
+        "cuda_max_good": {"gte": 12.9},
         "order": [["dlperf", "desc"]],
         "limit": 40,
     });
+    if !auto {
+        query["gpu_name"] = json!({"eq": gpu_name_filter(gpu_type)});
+    }
     if let Some(gb) = min_vram_gb {
         query["gpu_ram"] = json!({"gte": gb as u64 * 1024});
     }
@@ -170,6 +180,7 @@ fn parse_offers(data: &serde_json::Value) -> Vec<Offer> {
         .filter_map(|o| {
             Some(Offer {
                 id: o.get("id")?.as_u64()?,
+                machine_id: o.get("machine_id").and_then(|v| v.as_u64()).unwrap_or(0),
                 gpu_name: o.get("gpu_name")?.as_str().unwrap_or("").to_string(),
                 num_gpus: o.get("num_gpus").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
                 gpu_ram_mb: o.get("gpu_ram").and_then(|v| v.as_f64()).unwrap_or(0.0) as u64,
@@ -275,6 +286,7 @@ fn parse_instance(inst: &serde_json::Value, fallback_id: u64) -> Result<Instance
     struct Raw {
         id: Option<u64>,
         actual_status: Option<String>,
+        status_msg: Option<String>,
         gpu_name: Option<String>,
         ssh_host: Option<String>,
         ssh_port: Option<u16>,
@@ -286,6 +298,7 @@ fn parse_instance(inst: &serde_json::Value, fallback_id: u64) -> Result<Instance
     Ok(Instance {
         id: raw.id.unwrap_or(fallback_id),
         actual_status: raw.actual_status.unwrap_or_else(|| "unknown".into()),
+        status_msg: raw.status_msg,
         gpu_name: raw.gpu_name.unwrap_or_default(),
         ssh_host: raw.ssh_host,
         ssh_port: raw.ssh_port,

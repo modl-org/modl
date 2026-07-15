@@ -17,7 +17,8 @@ use crate::core::db::Database;
 use crate::core::executor::parse_worker_event;
 use crate::core::job::{EventPayload, TrainJobSpec};
 use crate::core::runtime::{
-    AITOOLKIT_PIN_SHA, AITOOLKIT_REPO_URL, TRAINER_TORCH_VERSION, TRAINER_TORCHVISION_VERSION,
+    AITOOLKIT_PIN_SHA, AITOOLKIT_REPO_URL, TRAINER_TORCH_VERSION, TRAINER_TORCHAUDIO_VERSION,
+    TRAINER_TORCHVISION_VERSION,
 };
 use crate::core::training::resolve_worker_python_root;
 use crate::core::vast;
@@ -157,7 +158,11 @@ pub async fn run_pod_training(spec: TrainJobSpec, opts: PodOptions) -> Result<()
     let env = vec![("HF_HUB_OFFLINE".to_string(), "0".to_string())];
 
     let mut booted: Option<(u64, vast::Offer, SshTarget)> = None;
-    for offer in offers.iter().take(5) {
+    let mut bad_machines: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    for offer in offers.iter().take(8) {
+        if offer.machine_id != 0 && bad_machines.contains(&offer.machine_id) {
+            continue; // same physical box as one that just failed to boot
+        }
         let id = match vast::create_instance(
             offer.id,
             vast::POD_IMAGE,
@@ -199,6 +204,7 @@ pub async fn run_pod_training(spec: TrainJobSpec, opts: PodOptions) -> Result<()
                     style("!").yellow(),
                     id
                 );
+                bad_machines.insert(offer.machine_id);
                 if let Err(e) = vast::destroy_instance(id).await {
                     println!(
                         "{} Could not destroy {id}: {e} — check with: modl pod ls",
@@ -462,6 +468,7 @@ echo "[pod] installing torch {TRAINER_TORCH_VERSION} + ai-toolkit + worker deps 
 sed -i -E '/^(diffusers|git\+.*diffusers)/d' requirements*.txt
 python3 -m uv pip install --quiet --python {REMOTE_ROOT}/venv/bin/python \
   "torch=={TRAINER_TORCH_VERSION}" "torchvision=={TRAINER_TORCHVISION_VERSION}" \
+  "torchaudio=={TRAINER_TORCHAUDIO_VERSION}" \
   -r requirements.txt \
   "diffusers>=0.38.0" "transformers>=4.51" accelerate "safetensors>=0.5" \
   pillow "gguf>=0.10.0" pyyaml
@@ -585,6 +592,19 @@ async fn wait_for_instance(instance_id: u64) -> Result<SshTarget> {
             && let (Some(host), Some(port)) = (inst.ssh_host.clone(), inst.ssh_port)
         {
             return Ok(SshTarget { host, port });
+        }
+        // Hosts sometimes fail at container init (runc/kernel mismatches,
+        // broken nvidia runtime). The daemon error is terminal — don't
+        // burn the whole boot budget waiting for it to change.
+        if let Some(msg) = &inst.status_msg
+            && (msg.contains("Error response from daemon")
+                || msg.contains("OCI runtime")
+                || msg.contains("failed to start containers"))
+        {
+            bail!(
+                "Host failed to start the container: {}",
+                msg.lines().next().unwrap_or(msg)
+            );
         }
         if std::time::Instant::now() > deadline {
             bail!(
