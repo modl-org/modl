@@ -708,10 +708,17 @@ fn tool_list_models(_args: &Value) -> Result<Value, (i32, String)> {
 
     // Append per-model prompting guidance for the installed base models so
     // agents prompt each architecture the way it expects.
+    // Exact-token match: model IDs can be prefixes of each other (z-image /
+    // z-image-turbo), so a substring check would attach guides for models
+    // that aren't actually installed.
+    let installed: std::collections::HashSet<&str> = clean
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_'))
+        .filter(|t| !t.is_empty())
+        .collect();
     let mut guides = String::new();
     for family in crate::core::model_family::families() {
         for model in &family.models {
-            if !clean.contains(&model.id) {
+            if !installed.contains(model.id.as_str()) {
                 continue;
             }
             if let Some(ref g) = model.prompt_guide {

@@ -710,7 +710,7 @@ modl vision ground "the red car on the left" photo.jpg --json
 1. User wants fast/draft? → `flux-schnell` (4 steps)
 2. User wants high quality? → `flux-dev` (28 steps)
 3. User wants text in image? → `qwen-image` (25 steps)
-4. User wants negative prompts? → `chroma` (40 steps)
+4. User wants negative prompts? → `chroma` (20 steps)
 5. User has < 12GB VRAM? → `sdxl` (5 GB) or `sd-1.5` (3 GB)
 6. User wants to edit an existing image? → `modl edit` with `klein-9b` (fast) or `qwen-image-edit-2511` (best)
 7. User wants to inpaint a specific region? → `modl generate --mask` with `flux-fill-dev`
