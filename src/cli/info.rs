@@ -520,7 +520,7 @@ fn show_trained_artifact(db: &Database, query: &str) -> Result<()> {
         // Job status
         println!();
         println!("  {}", style("Job:").bold());
-        println!("    ID:            {}", &job.job_id);
+        println!("    ID:            {}", job.job_id);
         println!(
             "    Status:        {}",
             match job.status.as_str() {
@@ -529,7 +529,7 @@ fn show_trained_artifact(db: &Database, query: &str) -> Result<()> {
                 _ => style(&job.status).yellow(),
             }
         );
-        println!("    Target:        {}", &job.target);
+        println!("    Target:        {}", job.target);
         if let Some(ref started) = job.started_at {
             println!("    Started:       {}", started);
         }
@@ -541,10 +541,10 @@ fn show_trained_artifact(db: &Database, query: &str) -> Result<()> {
     // Artifact details
     println!();
     println!("  {}", style("Output:").bold());
-    println!("    Path:          {}", &artifact.path);
+    println!("    Path:          {}", artifact.path);
     println!("    Size:          {}", HumanBytes(artifact.size_bytes));
-    println!("    SHA256:        {}", &artifact.sha256);
-    println!("    Created:       {}", &artifact.created_at);
+    println!("    SHA256:        {}", artifact.sha256);
+    println!("    Created:       {}", artifact.created_at);
 
     // Symlink info
     let loras_dir = crate::core::paths::modl_root().join("loras");

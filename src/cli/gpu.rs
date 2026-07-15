@@ -118,12 +118,12 @@ pub async fn agent(session_token: &str, api_base: &str) -> Result<()> {
                 eprintln!(
                     "{} Got job: {} (type: {})",
                     style("→").cyan(),
-                    &job.job_id,
-                    &job.job_type
+                    job.job_id,
+                    job.job_type
                 );
 
                 if let Err(e) = execute_agent_job(&client, api_base, &auth_header, &job).await {
-                    eprintln!("{} Job {} failed: {e:#}", style("✗").red(), &job.job_id);
+                    eprintln!("{} Job {} failed: {e:#}", style("✗").red(), job.job_id);
                     // Report failure to API
                     let _ =
                         update_job_status(&client, api_base, &auth_header, &job.job_id, "failed")
@@ -366,7 +366,7 @@ async fn execute_train_job(
         } else {
             style("✗").red()
         },
-        &job.job_id,
+        job.job_id,
         final_status
     );
 
