@@ -43,6 +43,10 @@ struct TomlModel {
     text_rendering: bool,
     defaults: TomlDefaults,
     #[serde(default)]
+    prompt_guide: Option<String>,
+    #[serde(default)]
+    edit_prompt_guide: Option<String>,
+    #[serde(default)]
     lightning: Option<TomlLightning>,
     #[serde(default)]
     controlnet: Option<TomlControlNet>,
@@ -114,6 +118,8 @@ pub struct ModelInfo {
     pub speed: u8,
     pub text_rendering: bool,
     pub description: String,
+    pub prompt_guide: Option<String>,
+    pub edit_prompt_guide: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -277,6 +283,8 @@ fn build_parsed(root: TomlRoot) -> ParsedModels {
                 speed: m.speed,
                 text_rendering: m.text_rendering,
                 description: m.description,
+                prompt_guide: m.prompt_guide.map(|s| s.trim().to_string()),
+                edit_prompt_guide: m.edit_prompt_guide.map(|s| s.trim().to_string()),
             });
         }
 

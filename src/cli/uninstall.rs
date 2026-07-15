@@ -93,7 +93,7 @@ fn remove_trained_artifact(
     println!(
         "{} Removing trained {} {}",
         style("→").cyan(),
-        &artifact.kind,
+        artifact.kind,
         style(lora_name).bold()
     );
 
@@ -166,7 +166,7 @@ fn remove_trained_artifact(
     println!(
         "{} Removed trained {} '{}'.",
         style("✓").green(),
-        &artifact.kind,
+        artifact.kind,
         lora_name
     );
 

@@ -29,6 +29,10 @@ quality = 4
 speed = 2
 text_rendering = false
 defaults = { steps = 28, guidance = 3.5, resolution = 1024 }
+prompt_guide = """
+Write full descriptive sentences, not tag lists — subject, setting, lighting,
+camera, style. Rewards long, specific prompts. Guidance-distilled: negative
+prompts have no effect. Keep guidance near 3.5; higher values oversaturate."""
 
 [families.flux1.models.flux-dev.controlnet]
 manifest_id = "flux-dev-controlnet-union"
@@ -57,6 +61,10 @@ quality = 3
 speed = 5
 text_rendering = false
 defaults = { steps = 4, guidance = 1.0, resolution = 1024 }
+prompt_guide = """
+Same prose style as Flux Dev, but the 4-step distillation flattens nuance —
+keep prompts shorter and lead with the subject. No negative prompt support.
+Good for fast drafts; re-run keepers on flux-dev for final quality."""
 
 [families.flux1.models.flux-schnell.controlnet]
 manifest_id = "flux-dev-controlnet-union"
@@ -80,6 +88,9 @@ quality = 4
 speed = 2
 text_rendering = false
 defaults = { steps = 20, guidance = 4.0, resolution = 1024 }
+prompt_guide = """
+Detailed descriptive prose. Uses real CFG, so negative prompts work — use
+them to suppress artifacts. Aesthetic keywords and camera terms both help."""
 
 # ─── Flux Fill ───────────────────────────────────────────────────────
 
@@ -103,6 +114,10 @@ quality = 5
 speed = 2
 text_rendering = false
 defaults = { steps = 50, guidance = 30.0, resolution = 1024 }
+prompt_guide = """
+Inpainting: describe what the masked region should contain as part of the
+whole scene, not the patch in isolation. The very high default guidance (30)
+is normal for Fill models — don't lower it to txt2img values."""
 
 [families.flux_fill.models.flux-fill-dev-onereward]
 name = "Flux Fill Dev OneReward"
@@ -119,6 +134,10 @@ quality = 5
 speed = 2
 text_rendering = false
 defaults = { steps = 50, guidance = 30.0, resolution = 1024 }
+prompt_guide = """
+Inpainting: describe what the masked region should contain as part of the
+whole scene, not the patch in isolation. The very high default guidance (30)
+is normal for Fill models — don't lower it to txt2img values."""
 
 # ─── Flux 2 ──────────────────────────────────────────────────────────
 
@@ -142,6 +161,10 @@ quality = 5
 speed = 1
 text_rendering = false
 defaults = { steps = 28, guidance = 4.0, resolution = 1024 }
+prompt_guide = """
+Strongest instruction following in the lineup — write structured, specific
+prose: subject, environment, lighting, camera, exact colors (hex values
+work). Handles long multi-clause prompts without dropping details."""
 
 [families.flux2.models.flux2-klein-4b]
 name = "Flux 2 Klein 4B"
@@ -158,6 +181,14 @@ quality = 3
 speed = 5
 text_rendering = false
 defaults = { steps = 4, guidance = 1.0, resolution = 1024 }
+prompt_guide = """
+Concise descriptive prose; lead with the subject. 4-step distilled — very
+long prompts lose detail, and negative prompts have no effect."""
+edit_prompt_guide = """
+One imperative instruction per edit ("change the background to a white
+studio"). Chain multiple edit steps in a workflow instead of stacking
+changes in one prompt. Say what to preserve when it matters ("keep the
+product unchanged")."""
 
 [families.flux2.models.flux2-klein-9b]
 name = "Flux 2 Klein 9B"
@@ -174,6 +205,14 @@ quality = 4
 speed = 4
 text_rendering = false
 defaults = { steps = 4, guidance = 1.0, resolution = 1024 }
+prompt_guide = """
+Concise descriptive prose; noticeably better prompt adherence than Klein 4B.
+Still 4-step distilled — no negative prompts, keep prompts focused."""
+edit_prompt_guide = """
+One imperative instruction per edit ("change the background to a white
+studio"). Chain multiple edit steps in a workflow instead of stacking
+changes in one prompt. Say what to preserve when it matters ("keep the
+product unchanged")."""
 
 # ─── Z-Image ─────────────────────────────────────────────────────────
 
@@ -197,6 +236,9 @@ quality = 4
 speed = 2
 text_rendering = false
 defaults = { steps = 20, guidance = 4.0, resolution = 1024 }
+prompt_guide = """
+Descriptive prose with style and lighting detail; strong photorealistic
+aesthetics without quality keywords. Understands English and Chinese."""
 
 [families.zimage.models.z-image.controlnet]
 manifest_id = "z-image-turbo-controlnet-union"
@@ -220,6 +262,10 @@ quality = 3
 speed = 4
 text_rendering = false
 defaults = { steps = 8, guidance = 0.0, resolution = 1024 }
+prompt_guide = """
+Runs at guidance 0.0 — CFG is baked in, so negative prompts do nothing.
+Short-to-medium descriptive prompts; strong aesthetics out of the box.
+Understands English and Chinese."""
 
 [families.zimage.models.z-image-turbo.controlnet]
 manifest_id = "z-image-turbo-controlnet-union"
@@ -250,6 +296,10 @@ quality = 4
 speed = 2
 text_rendering = true
 defaults = { steps = 50, guidance = 4.0, resolution = 1024 }
+prompt_guide = """
+Strong instruction following and text rendering — put the exact text to
+render in quotes inside the prompt (a neon sign that says "OPEN").
+Understands English and Chinese."""
 
 [families.ernie.models.ernie-image-turbo]
 name = "ERNIE-Image Turbo"
@@ -266,6 +316,9 @@ quality = 4
 speed = 4
 text_rendering = true
 defaults = { steps = 8, guidance = 1.0, resolution = 1024 }
+prompt_guide = """
+Same prompting as ERNIE-Image (quote exact text to render, EN/ZH) but
+8-step distilled — keep prompts focused; negative prompts have no effect."""
 
 # ─── Qwen Image (generation) ─────────────────────────────────────────
 
@@ -289,6 +342,11 @@ quality = 5
 speed = 2
 text_rendering = true
 defaults = { steps = 25, guidance = 3.0, resolution = 1024 }
+prompt_guide = """
+Best-in-class text rendering: quote the exact text to render, and it can
+lay out multiple text blocks, signs, and UI labels. Handles long, dense
+descriptive prompts. English and Chinese. Quality suffixes like
+"ultra HD, cinematic composition" measurably help."""
 
 [families.qwen_image.models.qwen-image.lightning]
 lora_registry_id = "qwen-image-2512-lightning"
@@ -327,6 +385,11 @@ quality = 5
 speed = 1
 text_rendering = true
 defaults = { steps = 40, guidance = 4.0, resolution = 1024 }
+prompt_guide = """
+Instruction-style editing: state the change as a command, one change per
+edit; be explicit about what stays ("keep the face and pose unchanged").
+To change text in the image, quote the exact replacement text. Supports
+multiple input images for composition and reference."""
 
 [families.qwen_image_edit.models.qwen-image-edit-2511.lightning]
 lora_registry_id = "qwen-image-edit-2511-lightning"
@@ -357,6 +420,10 @@ quality = 3
 speed = 2
 text_rendering = false
 defaults = { steps = 30, guidance = 7.5, resolution = 1024 }
+prompt_guide = """
+Keyword/tag style works best: comma-separated phrases with the important
+tokens first. Negative prompts matter a lot — always supply one (e.g.
+"blurry, lowres, bad anatomy"). CFG 5–8."""
 
 [families.stable_diffusion.models.sdxl.controlnet]
 manifest_id = "sdxl-controlnet-union"
@@ -385,3 +452,7 @@ quality = 2
 speed = 4
 text_rendering = false
 defaults = { steps = 30, guidance = 7.5, resolution = 512 }
+prompt_guide = """
+Tag-style prompting; keep it under ~75 tokens (CLIP truncates the rest).
+Negative prompts are essential. Native 512px — pushing resolution much
+higher distorts anatomy."""
