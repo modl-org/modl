@@ -126,11 +126,24 @@ jobs:
             artifacts/modl-*
             artifacts/SHA256SUMS
 
+  # The secrets context is not available in job-level `if` expressions;
+  # referencing it there fails the whole workflow at parse time (the 0-second
+  # startup failures that shipped v0.2.13/v0.2.14 with no assets). Gate via a
+  # job output instead, where secrets are legal.
+  docker-gate:
+    name: Check Docker Hub credentials
+    runs-on: ubuntu-latest
+    outputs:
+      has-creds: ${{ steps.check.outputs.has-creds }}
+    steps:
+      - id: check
+        run: echo "has-creds=${{ secrets.DOCKERHUB_USERNAME != '' }}" >> "$GITHUB_OUTPUT"
+
   docker:
     name: Push GPU Docker Image
-    needs: build
+    needs: [build, docker-gate]
     runs-on: ubuntu-latest
-    if: ${{ secrets.DOCKERHUB_USERNAME != '' }}
+    if: needs.docker-gate.outputs.has-creds == 'true'
     steps:
       - uses: actions/checkout@v4
 
