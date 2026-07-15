@@ -478,7 +478,7 @@ async fn execute_training(
     // training_status.rs reads ~/.modl/training_output/<name>.log
     let log_path = {
         let training_output = crate::core::paths::modl_root().join("training_output");
-        training_output.join(format!("{}.log", &spec.output.lora_name))
+        training_output.join(format!("{}.log", spec.output.lora_name))
     };
     let mut log_file = std::fs::OpenOptions::new()
         .create(true)
