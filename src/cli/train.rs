@@ -39,6 +39,26 @@ pub struct TrainOverrides {
 /// Run the train command. Arguments are all optional; missing ones trigger
 /// interactive prompts (except when --config is given).
 #[allow(clippy::too_many_arguments)]
+/// Options for BYO-pod training (`modl train --pod`).
+pub struct PodArgs {
+    pub gpu_type: String,
+    pub max_price: f64,
+    pub keep_pod: bool,
+    pub yes: bool,
+}
+
+impl PodArgs {
+    fn into_options(self) -> crate::core::pod::PodOptions {
+        crate::core::pod::PodOptions {
+            gpu_type: self.gpu_type,
+            max_price_per_hour: self.max_price,
+            yes: self.yes,
+            keep_pod: self.keep_pod,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     dataset_arg: Option<&str>,
     base: &str,
@@ -53,6 +73,7 @@ pub async fn run(
     provider: Option<CloudProvider>,
     attach_gpu: bool,
     gpu_type: &str,
+    pod: Option<PodArgs>,
 ) -> Result<()> {
     // -------------------------------------------------------------------
     // Fast path: --config <yaml> loads a full spec directly
@@ -75,6 +96,9 @@ pub async fn run(
             return Ok(());
         }
 
+        if let Some(pod_args) = pod {
+            return crate::core::pod::run_pod_training(spec, pod_args.into_options()).await;
+        }
         return execute_training(spec, cloud, provider, attach_gpu, gpu_type).await;
     }
 
@@ -372,6 +396,10 @@ pub async fn run(
         println!("{} Dry run — generated spec:", style("✓").green().bold());
         println!("{}", serde_yaml::to_string(&spec)?);
         return Ok(());
+    }
+
+    if let Some(pod_args) = pod {
+        return crate::core::pod::run_pod_training(spec, pod_args.into_options()).await;
     }
 
     execute_training(spec, cloud, provider, attach_gpu, gpu_type).await

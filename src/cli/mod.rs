@@ -27,6 +27,7 @@ mod logout;
 mod mcp;
 mod model_resolution;
 mod outputs;
+mod pod;
 mod popular;
 mod preprocess;
 mod push;
@@ -559,6 +560,25 @@ pub enum GpuCommands {
     },
 }
 
+#[derive(Subcommand)]
+pub enum PodCommands {
+    /// List Vast.ai instances on your account (they bill until destroyed)
+    Ls,
+    /// Destroy an instance (billing stops)
+    Rm {
+        /// Instance ID (from `modl pod ls` or the train --pod output)
+        id: u64,
+        /// Skip confirmation
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Print the SSH command for an instance
+    Ssh {
+        /// Instance ID
+        id: u64,
+    },
+}
+
 // ── Top-level commands ───────────────────────────────────────────────────
 
 #[derive(Subcommand)]
@@ -818,6 +838,19 @@ pub enum Commands {
         /// GPU type for remote execution (e.g. a100, a10g, h100, rtx4090)
         #[arg(long, default_value = "a100")]
         gpu_type: String,
+        /// Rent a Vast.ai pod with your own API key (e.g. rtx4090, a100-80gb, h100).
+        /// Trains on the pod, syncs the LoRA back, destroys the pod. Needs VASTAI_API_KEY.
+        #[arg(long, value_name = "GPU_TYPE", conflicts_with_all = ["cloud", "attach_gpu"])]
+        pod: Option<String>,
+        /// Max hourly price for --pod offers (USD)
+        #[arg(long, default_value_t = 3.0)]
+        max_price: f64,
+        /// Keep the pod running after --pod training (keeps billing!)
+        #[arg(long)]
+        keep_pod: bool,
+        /// Skip the rent-confirmation prompt for --pod
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Enhance prompts with AI quality tags and descriptors for better generation results
@@ -973,6 +1006,12 @@ pub enum Commands {
     Gpu {
         #[command(subcommand)]
         command: GpuCommands,
+    },
+
+    /// Manage Vast.ai pods rented with your own API key (see: modl train --pod)
+    Pod {
+        #[command(subcommand)]
+        command: PodCommands,
     },
 
     // ── Auth ──────────────────────────────────────────────────────────
@@ -1338,7 +1377,17 @@ pub async fn run(cli: Cli) -> Result<()> {
             provider,
             attach_gpu,
             gpu_type,
+            pod,
+            max_price,
+            keep_pod,
+            yes,
         } => {
+            let pod_args = pod.map(|gpu| train::PodArgs {
+                gpu_type: gpu,
+                max_price,
+                keep_pod,
+                yes,
+            });
             dispatch_train(
                 command,
                 dataset,
@@ -1365,6 +1414,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 provider,
                 attach_gpu,
                 gpu_type,
+                pod_args,
             )
             .await
         }
@@ -1486,6 +1536,11 @@ pub async fn run(cli: Cli) -> Result<()> {
 
         // ── Remote GPU ───────────────────────────────────────────────
         Commands::Gpu { command } => dispatch_gpu(command).await,
+        Commands::Pod { command } => match command {
+            PodCommands::Ls => pod::ls().await,
+            PodCommands::Rm { id, yes } => pod::rm(id, yes).await,
+            PodCommands::Ssh { id } => pod::ssh(id).await,
+        },
 
         // ── Auth ─────────────────────────────────────────────────────
         Commands::Auth { command } => dispatch_auth(command).await,
@@ -1585,6 +1640,7 @@ async fn dispatch_train(
     provider: Option<CloudProvider>,
     attach_gpu: bool,
     gpu_type: String,
+    pod: Option<train::PodArgs>,
 ) -> Result<()> {
     match command {
         Some(TrainSubcommands::Setup { reinstall }) => train_setup::run(reinstall).await,
@@ -1643,6 +1699,7 @@ async fn dispatch_train(
                 provider,
                 attach_gpu,
                 &gpu_type,
+                pod,
             )
             .await
         }
