@@ -704,8 +704,35 @@ fn tool_list_models(_args: &Value) -> Result<Value, (i32, String)> {
 
     // Strip ANSI codes for clean text output
     let clean = strip_ansi(&stdout);
+    let mut text = clean.trim().to_string();
+
+    // Append per-model prompting guidance for the installed base models so
+    // agents prompt each architecture the way it expects.
+    let mut guides = String::new();
+    for family in crate::core::model_family::families() {
+        for model in &family.models {
+            if !clean.contains(&model.id) {
+                continue;
+            }
+            if let Some(ref g) = model.prompt_guide {
+                guides.push_str(&format!("\n- {}: {}", model.id, g.replace('\n', " ")));
+            }
+            if let Some(ref g) = model.edit_prompt_guide {
+                guides.push_str(&format!(
+                    "\n- {} (edit): {}",
+                    model.id,
+                    g.replace('\n', " ")
+                ));
+            }
+        }
+    }
+    if !guides.is_empty() {
+        text.push_str("\n\nPrompting guides:");
+        text.push_str(&guides);
+    }
+
     Ok(json!({
-        "content": [{"type": "text", "text": clean.trim()}]
+        "content": [{"type": "text", "text": text}]
     }))
 }
 

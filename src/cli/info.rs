@@ -153,6 +153,8 @@ fn show_registry_model(
                 style(&lightning.lora_registry_id).cyan()
             );
         }
+
+        print_prompt_guides(model);
     }
 
     // Variants
@@ -313,6 +315,23 @@ fn show_registry_model(
     Ok(())
 }
 
+fn print_prompt_guides(model: &crate::core::models::ModelInfo) {
+    if let Some(ref guide) = model.prompt_guide {
+        println!();
+        println!("  {}", style("Prompting:").bold());
+        for line in guide.lines() {
+            println!("    {}", line);
+        }
+    }
+    if let Some(ref guide) = model.edit_prompt_guide {
+        println!();
+        println!("  {}", style("Prompting (edit):").bold());
+        for line in guide.lines() {
+            println!("    {}", line);
+        }
+    }
+}
+
 /// Show info for a model that's installed locally but not present in the
 /// cached registry index. Falls back to DB fields + models.toml specs.
 fn show_installed_model(model: &crate::core::db::InstalledModel) -> Result<()> {
@@ -383,6 +402,7 @@ fn show_installed_model(model: &crate::core::db::InstalledModel) -> Result<()> {
             "    Defaults:      {} steps, {:.1} CFG, {}px",
             spec.default_steps, spec.default_guidance, spec.default_resolution
         );
+        print_prompt_guides(spec);
         println!();
     }
 
