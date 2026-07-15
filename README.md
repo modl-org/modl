@@ -96,6 +96,22 @@ modl train --dataset my-product --base flux-dev --name product-v1 --lora-type ob
 modl generate "a photo of OHWX on marble countertop" --lora product-v1
 ```
 
+### No GPU? Rent one for the training run
+
+`--pod` rents a GPU on [Vast.ai](https://cloud.vast.ai) with **your own API key**, trains there, syncs the LoRA back to your machine, and destroys the pod when done. No modl account, no hosted service — your key, your pod, your results.
+
+```bash
+export VASTAI_API_KEY=<your-key>   # from cloud.vast.ai/account (add an SSH key too)
+
+modl train --dataset my-product --base flux2-dev --name product-v1 \
+  --lora-type object --pod a100-80gb
+
+modl pod ls          # anything still running (and billing)?
+modl pod rm <id>     # destroy a straggler
+```
+
+Train 19B-class models (Flux 2 Dev, Qwen Image) on an A100/H100 for well under a dollar an hour — the trained LoRA lands in your local library like any local run.
+
 ---
 
 ## Supported Models

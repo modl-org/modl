@@ -838,6 +838,7 @@ MODEL_REGISTRY: dict[str, tuple[str, str]] = {
     "qwen_image_edit_2511":  ("qwen_image_edit_2511", "Qwen/Qwen-Image-Edit-2511"),
     "flux-fill-dev":            ("flux_fill",            "black-forest-labs/FLUX.1-Fill-dev"),
     "flux-fill-dev-onereward":  ("flux_fill_onereward",  "yichengup/flux.1-fill-dev-OneReward"),
+    "sdxl":           ("sdxl",          "stabilityai/stable-diffusion-xl-base-1.0"),
     "sdxl-base-1.0":  ("sdxl",          "stabilityai/stable-diffusion-xl-base-1.0"),
     "sdxl-turbo":     ("sdxl",          "stabilityai/sdxl-turbo"),
     "sd-1.5":         ("sd15",          "stable-diffusion-v1-5/stable-diffusion-v1-5"),
