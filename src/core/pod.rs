@@ -76,30 +76,57 @@ pub async fn run_pod_training(spec: TrainJobSpec, opts: PodOptions) -> Result<()
     // ---------------------------------------------------------------
     // 1. Find and confirm an offer
     // ---------------------------------------------------------------
+    // VRAM the training job actually needs, from models.toml. Presets enable
+    // quantization, so fp8 is the realistic floor; bf16 otherwise.
+    let min_vram_gb = crate::core::model_family::find_model(&spec.model.base_model_id).map(|m| {
+        if spec.params.quantize {
+            m.vram_fp8_gb
+        } else {
+            m.vram_bf16_gb
+        }
+    });
+    if let Some(gb) = min_vram_gb {
+        println!(
+            "{} {} needs ≥{}GB VRAM for training ({})",
+            style("→").cyan(),
+            spec.model.base_model_id,
+            gb,
+            if spec.params.quantize {
+                "quantized"
+            } else {
+                "bf16"
+            }
+        );
+    }
+
     println!(
-        "{} Searching Vast.ai for {} offers (max ${:.2}/hr)...",
+        "{} Searching Vast.ai for {} offers (max ${:.2}/hr, ranked by perf-per-dollar)...",
         style("→").cyan(),
         opts.gpu_type,
         opts.max_price_per_hour
     );
-    let offers = vast::search_offers(&opts.gpu_type, opts.max_price_per_hour).await?;
+    let offers = vast::search_offers(&opts.gpu_type, opts.max_price_per_hour, min_vram_gb).await?;
     if offers.is_empty() {
         bail!(
-            "No rentable {} offers under ${:.2}/hr. Try a different --pod type or raise --max-price.",
+            "No rentable {} offers under ${:.2}/hr{}. Try a bigger --pod type or raise --max-price.",
             opts.gpu_type,
-            opts.max_price_per_hour
+            opts.max_price_per_hour,
+            min_vram_gb
+                .map(|g| format!(" with ≥{g}GB VRAM"))
+                .unwrap_or_default()
         );
     }
 
     let best = &offers[0];
     println!(
-        "  {} — {:.0}GB VRAM, {:.0}GB disk, {:.0} Mbps down, ${:.3}/hr (reliability {:.1}%)",
+        "  {} — {:.0}GB VRAM, {:.0}GB disk, {:.0} Mbps down, ${:.3}/hr (reliability {:.1}%, value {:.0} dlperf/$)",
         style(&best.gpu_name).bold(),
         best.gpu_ram_mb as f64 / 1024.0,
         best.disk_gb,
         best.inet_down,
         best.dph_total,
-        best.reliability * 100.0
+        best.reliability * 100.0,
+        vast::offer_value(best)
     );
 
     if !opts.yes {
@@ -396,13 +423,15 @@ fi
 cd {REMOTE_ROOT}/ai-toolkit
 git fetch --quiet origin {AITOOLKIT_PIN_SHA} || git fetch --quiet origin
 git checkout --quiet {AITOOLKIT_PIN_SHA}
-echo "[pod] pinning preinstalled torch so pip does not replace it..."
+echo "[pod] installing uv (fast resolver — image pip is often ancient)..."
+python3 -m pip install --quiet uv
 TORCH_VER=$(python3 -c "import torch; print(torch.__version__.split('+')[0])" 2>/dev/null || true)
-if [ -n "$TORCH_VER" ]; then python3 -m pip install --quiet "torch==$TORCH_VER" || true; fi
-echo "[pod] installing ai-toolkit requirements (this is the slow part)..."
-python3 -m pip install --quiet -r requirements.txt
-echo "[pod] installing worker requirements..."
-python3 -m pip install --quiet "diffusers>=0.38.0" "transformers>=4.51" accelerate "safetensors>=0.5" pillow "gguf>=0.10.0" pyyaml
+TORCH_PIN=""
+if [ -n "$TORCH_VER" ]; then TORCH_PIN="torch==$TORCH_VER"; fi
+echo "[pod] installing ai-toolkit + worker requirements (torch pinned to preinstalled $TORCH_VER)..."
+python3 -m uv pip install --system --quiet -r requirements.txt \
+  "diffusers>=0.38.0" "transformers>=4.51" accelerate "safetensors>=0.5" \
+  pillow "gguf>=0.10.0" pyyaml $TORCH_PIN
 echo "[pod] bootstrap complete"
 "#
     )
@@ -749,6 +778,7 @@ mod tests {
         assert!(script.contains(AITOOLKIT_PIN_SHA));
         assert!(script.contains("requirements.txt"));
         assert!(script.contains("unset HF_HUB_OFFLINE"));
+        assert!(script.contains("uv pip install --system"));
     }
 
     #[test]

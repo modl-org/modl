@@ -36,9 +36,6 @@ pub struct TrainOverrides {
     pub sample_every: Option<u32>,
 }
 
-/// Run the train command. Arguments are all optional; missing ones trigger
-/// interactive prompts (except when --config is given).
-#[allow(clippy::too_many_arguments)]
 /// Options for BYO-pod training (`modl train --pod`).
 pub struct PodArgs {
     pub gpu_type: String,
@@ -58,6 +55,8 @@ impl PodArgs {
     }
 }
 
+/// Run the train command. Arguments are all optional; missing ones trigger
+/// interactive prompts (except when --config is given).
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     dataset_arg: Option<&str>,

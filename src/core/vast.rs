@@ -41,20 +41,32 @@ pub struct Instance {
     pub label: Option<String>,
 }
 
-/// Resolve the user's Vast.ai API key. BYO-key: env var only, no hosted auth.
+/// Resolve the user's Vast.ai API key. BYO-key, no hosted auth:
+/// `VASTAI_API_KEY` env var, falling back to `~/.vast_api_key`
+/// (the same file the official vastai CLI uses).
 pub fn api_key() -> Result<String> {
-    match std::env::var("VASTAI_API_KEY") {
-        Ok(k) if !k.trim().is_empty() => Ok(k.trim().to_string()),
-        _ => bail!(
-            "VASTAI_API_KEY is not set.\n\n\
-             modl train --pod rents a GPU on Vast.ai using your own account:\n\
-             1. Create an account at https://cloud.vast.ai\n\
-             2. Copy your API key from https://cloud.vast.ai/account\n\
-             3. export VASTAI_API_KEY=<your-key>\n\n\
-             Also add an SSH key to your Vast.ai account — modl connects to the\n\
-             pod over SSH to ship the dataset and sync results back."
-        ),
+    if let Ok(k) = std::env::var("VASTAI_API_KEY")
+        && !k.trim().is_empty()
+    {
+        return Ok(k.trim().to_string());
     }
+    if let Some(home) = dirs::home_dir() {
+        let key_file = home.join(".vast_api_key");
+        if let Ok(k) = std::fs::read_to_string(&key_file)
+            && !k.trim().is_empty()
+        {
+            return Ok(k.trim().to_string());
+        }
+    }
+    bail!(
+        "No Vast.ai API key found.\n\n\
+         modl train --pod rents a GPU on Vast.ai using your own account:\n\
+         1. Create an account at https://cloud.vast.ai\n\
+         2. Copy your API key from https://cloud.vast.ai/account\n\
+         3. export VASTAI_API_KEY=<your-key>  (or save it to ~/.vast_api_key)\n\n\
+         Also add an SSH key to your Vast.ai account — modl connects to the\n\
+         pod over SSH to ship the dataset and sync results back."
+    )
 }
 
 /// Map a friendly GPU type to Vast.ai's gpu_name filter value.
@@ -90,12 +102,27 @@ async fn check(resp: reqwest::Response, what: &str) -> Result<serde_json::Value>
     serde_json::from_str(&body).with_context(|| format!("Vast.ai {what}: invalid JSON response"))
 }
 
+/// Compute per-dollar value of an offer: AI throughput (dlperf) per $/hr.
+/// This is the ranking metric — a slightly slower host at half the price wins.
+pub fn offer_value(offer: &Offer) -> f64 {
+    if offer.dph_total <= 0.0 {
+        return 0.0;
+    }
+    offer.dlperf / offer.dph_total
+}
+
 /// Search the marketplace for rentable offers matching a GPU type.
-/// Results are sorted fastest-host-first (dlperf desc), then by price.
-pub async fn search_offers(gpu_type: &str, max_price_per_hour: f64) -> Result<Vec<Offer>> {
+///
+/// `min_vram_gb` is a hard filter (job won't fit below it). Results are
+/// sorted by value (dlperf per dollar) — not raw speed, not raw price.
+pub async fn search_offers(
+    gpu_type: &str,
+    max_price_per_hour: f64,
+    min_vram_gb: Option<u32>,
+) -> Result<Vec<Offer>> {
     let (client, key) = client()?;
 
-    let query = json!({
+    let mut query = json!({
         "verified": {"eq": true},
         "external": {"eq": false},
         "rentable": {"eq": true},
@@ -109,8 +136,11 @@ pub async fn search_offers(gpu_type: &str, max_price_per_hour: f64) -> Result<Ve
         "direct_port_count": {"gte": 1},
         "cuda_max_good": {"gte": 12.0},
         "order": [["dlperf", "desc"]],
-        "limit": 20,
+        "limit": 40,
     });
+    if let Some(gb) = min_vram_gb {
+        query["gpu_ram"] = json!({"gte": gb as u64 * 1024});
+    }
 
     let resp = client
         .post(format!("{API_BASE}/bundles/"))
@@ -123,14 +153,9 @@ pub async fn search_offers(gpu_type: &str, max_price_per_hour: f64) -> Result<Ve
 
     let mut offers = parse_offers(&data);
     offers.sort_by(|a, b| {
-        b.dlperf
-            .partial_cmp(&a.dlperf)
+        offer_value(b)
+            .partial_cmp(&offer_value(a))
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then(
-                a.dph_total
-                    .partial_cmp(&b.dph_total)
-                    .unwrap_or(std::cmp::Ordering::Equal),
-            )
     });
     Ok(offers)
 }
