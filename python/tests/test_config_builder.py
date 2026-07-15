@@ -5,13 +5,35 @@ path the worker runs on a pod (no local store, HF fallback). A NameError
 here shipped to production once; every trainable arch gets a smoke build.
 """
 
+import importlib.util
 import sys
+import types
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Load config_builder + arch_config directly, bypassing modl_worker.adapters'
+# __init__.py (which eagerly imports every adapter and pulls PIL/torch —
+# unavailable in the pytest-only CI env). Same approach as test_arch_config,
+# extended with a synthetic package so config_builder's relative import of
+# arch_config resolves.
+_ADAPTERS = Path(__file__).resolve().parents[1] / "modl_worker" / "adapters"
+_pkg = types.ModuleType("_cb_isolated")
+_pkg.__path__ = [str(_ADAPTERS)]
+sys.modules["_cb_isolated"] = _pkg
 
-from modl_worker.adapters.arch_config import ARCH_CONFIGS  # noqa: E402
-from modl_worker.adapters.config_builder import spec_to_aitoolkit_config  # noqa: E402
+
+def _load(name: str):
+    spec = importlib.util.spec_from_file_location(f"_cb_isolated.{name}", _ADAPTERS / f"{name}.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[f"_cb_isolated.{name}"] = mod
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod
+
+
+_arch_config = _load("arch_config")
+_config_builder = _load("config_builder")
+
+ARCH_CONFIGS = _arch_config.ARCH_CONFIGS
+spec_to_aitoolkit_config = _config_builder.spec_to_aitoolkit_config
 
 
 def _spec(base_model_id: str, lora_type: str = "object") -> dict:
