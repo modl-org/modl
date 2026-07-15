@@ -31,8 +31,8 @@ pub fn default_profile() -> &'static str {
 const DEFAULT_CHANNEL: &str = "stable";
 const PYTHON_VERSION: &str = "3.11.12";
 const TRAINER_CU126_INDEX_URL: &str = "https://download.pytorch.org/whl/cu126";
-const TRAINER_TORCH_VERSION: &str = "2.7.0";
-const TRAINER_TORCHVISION_VERSION: &str = "0.22.0";
+pub(crate) const TRAINER_TORCH_VERSION: &str = "2.7.0";
+pub(crate) const TRAINER_TORCHVISION_VERSION: &str = "0.22.0";
 const TRAINER_TORCHAUDIO_VERSION: &str = "2.7.0";
 const GENERATOR_TORCH_VERSION: &str = "2.7.0";
 const GENERATOR_TORCHVISION_VERSION: &str = "0.22.0";

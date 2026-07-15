@@ -16,14 +16,17 @@ use std::process::{Command, Stdio};
 use crate::core::db::Database;
 use crate::core::executor::parse_worker_event;
 use crate::core::job::{EventPayload, TrainJobSpec};
-use crate::core::runtime::{AITOOLKIT_PIN_SHA, AITOOLKIT_REPO_URL};
+use crate::core::runtime::{
+    AITOOLKIT_PIN_SHA, AITOOLKIT_REPO_URL, TRAINER_TORCH_VERSION, TRAINER_TORCHVISION_VERSION,
+};
 use crate::core::training::resolve_worker_python_root;
 use crate::core::vast;
 
 const REMOTE_ROOT: &str = "/root/modl-pod";
 const POD_DISK_GB: f64 = 80.0;
-/// Give up if the instance isn't running with SSH details within this window.
-const PROVISION_TIMEOUT_SECS: u64 = 12 * 60;
+/// Per-host boot budget. Duds get destroyed and the next offer is tried,
+/// so this can be tight — good hosts come up in 1-3 minutes.
+const PROVISION_TIMEOUT_SECS: u64 = 8 * 60;
 /// Give up if SSH never accepts a connection after the instance reports running.
 const SSH_TIMEOUT_SECS: u64 = 6 * 60;
 
@@ -34,6 +37,7 @@ pub struct PodOptions {
     pub keep_pod: bool,
 }
 
+#[derive(Clone)]
 struct SshTarget {
     host: String,
     port: u16,
@@ -144,17 +148,17 @@ pub async fn run_pod_training(spec: TrainJobSpec, opts: PodOptions) -> Result<()
     }
 
     // ---------------------------------------------------------------
-    // 2. Rent — retry across top offers if one gets taken
+    // 2. Rent + boot — a marketplace host can be taken (rent fails) or a
+    //    dud (rents but never boots). Both fall through to the next offer.
     // ---------------------------------------------------------------
     let label = format!("modl-pod-{}", spec.output.lora_name);
     // Disable Vast's auto-tmux so our SSH commands run in a plain shell.
     let onstart = "touch /root/.no_auto_tmux\n";
     let env = vec![("HF_HUB_OFFLINE".to_string(), "0".to_string())];
 
-    let mut instance_id = None;
-    let mut rented_offer = best.clone();
+    let mut booted: Option<(u64, vast::Offer, SshTarget)> = None;
     for offer in offers.iter().take(5) {
-        match vast::create_instance(
+        let id = match vast::create_instance(
             offer.id,
             vast::POD_IMAGE,
             onstart,
@@ -164,34 +168,53 @@ pub async fn run_pod_training(spec: TrainJobSpec, opts: PodOptions) -> Result<()
         )
         .await
         {
-            Ok(id) => {
-                instance_id = Some(id);
-                rented_offer = offer.clone();
-                break;
-            }
+            Ok(id) => id,
             Err(e) => {
                 println!(
                     "{} Offer {} unavailable ({e}), trying next...",
                     style("!").yellow(),
                     offer.id
                 );
+                continue;
+            }
+        };
+
+        println!(
+            "{} Rented instance {} (${:.3}/hr). If anything goes wrong: modl pod rm {}",
+            style("✓").green(),
+            style(id).bold(),
+            offer.dph_total,
+            id
+        );
+
+        match wait_for_instance(id).await {
+            Ok(ssh) => {
+                booted = Some((id, offer.clone(), ssh));
+                break;
+            }
+            Err(e) => {
+                println!("{} {e}", style("!").yellow());
+                println!(
+                    "{} Host never booted — destroying instance {} and trying the next offer...",
+                    style("!").yellow(),
+                    id
+                );
+                if let Err(e) = vast::destroy_instance(id).await {
+                    println!(
+                        "{} Could not destroy {id}: {e} — check with: modl pod ls",
+                        style("✗").red()
+                    );
+                }
             }
         }
     }
-    let instance_id = instance_id.context("All candidate offers failed — try again shortly")?;
+    let (instance_id, rented_offer, ssh) =
+        booted.context("No offer produced a working pod — try again shortly")?;
     let started_at = std::time::Instant::now();
 
-    println!(
-        "{} Rented instance {} (${:.3}/hr). If anything goes wrong: modl pod rm {}",
-        style("✓").green(),
-        style(instance_id).bold(),
-        rented_offer.dph_total,
-        instance_id
-    );
-
-    // Everything after renting runs inside a fallible block so the pod is
+    // Everything after boot runs inside a fallible block so the pod is
     // destroyed on error unless --keep-pod was passed.
-    let result = drive_pod(&spec, instance_id, hf_token.as_deref()).await;
+    let result = drive_pod(&spec, &ssh, instance_id, hf_token.as_deref()).await;
 
     if opts.keep_pod {
         println!(
@@ -225,14 +248,19 @@ pub async fn run_pod_training(spec: TrainJobSpec, opts: PodOptions) -> Result<()
     result
 }
 
-/// Provision → bootstrap → train → sync back. Assumes the instance is rented;
+/// Bootstrap → train → sync back. Assumes the instance is booted;
 /// the caller handles teardown.
-async fn drive_pod(spec: &TrainJobSpec, instance_id: u64, hf_token: Option<&str>) -> Result<()> {
+async fn drive_pod(
+    spec: &TrainJobSpec,
+    ssh: &SshTarget,
+    instance_id: u64,
+    hf_token: Option<&str>,
+) -> Result<()> {
     // ---------------------------------------------------------------
-    // 3. Wait for the instance to boot and SSH to come up
+    // 3. Wait for sshd to accept connections (running != ssh-ready)
     // ---------------------------------------------------------------
-    let ssh = wait_for_instance(instance_id).await?;
-    wait_for_ssh(&ssh)?;
+    wait_for_ssh(ssh)?;
+    let ssh = ssh.clone();
 
     // ---------------------------------------------------------------
     // 4. Ship worker + dataset + spec
@@ -304,7 +332,7 @@ async fn drive_pod(spec: &TrainJobSpec, instance_id: u64, hf_token: Option<&str>
         "cd {REMOTE_ROOT} && rm -f events.jsonl && \
          nohup env HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 {token_env}\
          PYTHONPATH={REMOTE_ROOT}/worker MODL_AITOOLKIT_ROOT={REMOTE_ROOT}/ai-toolkit \
-         python3 -m modl_worker.main train --config {REMOTE_ROOT}/spec.yaml --job-id {job_id} \
+         {REMOTE_ROOT}/venv/bin/python -m modl_worker.main train --config {REMOTE_ROOT}/spec.yaml --job-id {job_id} \
          >> {REMOTE_ROOT}/events.jsonl 2>> {REMOTE_ROOT}/stderr.log & echo launched"
     );
     run_ssh_quiet(&ssh, &launch)?;
@@ -423,15 +451,20 @@ fi
 cd {REMOTE_ROOT}/ai-toolkit
 git fetch --quiet origin {AITOOLKIT_PIN_SHA} || git fetch --quiet origin
 git checkout --quiet {AITOOLKIT_PIN_SHA}
-echo "[pod] installing uv (fast resolver — image pip is often ancient)..."
-python3 -m pip install --quiet uv
-TORCH_VER=$(python3 -c "import torch; print(torch.__version__.split('+')[0])" 2>/dev/null || true)
-TORCH_PIN=""
-if [ -n "$TORCH_VER" ]; then TORCH_PIN="torch==$TORCH_VER"; fi
-echo "[pod] installing ai-toolkit + worker requirements (torch pinned to preinstalled $TORCH_VER)..."
-python3 -m uv pip install --system --quiet -r requirements.txt \
+echo "[pod] installing uv (image python/pip vary too much to trust)..."
+python3 -m pip install --quiet uv 2>/dev/null || pip install --quiet uv
+echo "[pod] creating managed python 3.11 venv (host-independent, like the local runtime)..."
+python3 -m uv venv --quiet --python 3.11 {REMOTE_ROOT}/venv
+echo "[pod] installing torch {TRAINER_TORCH_VERSION} + ai-toolkit + worker deps (uv, parallel)..."
+# ai-toolkit pins diffusers to a git commit that predates what the worker
+# needs — strip its diffusers pin (throwaway clone, edit in place so the
+# `-r requirements_base.txt` include keeps working) and pin ours instead.
+sed -i -E '/^(diffusers|git\+.*diffusers)/d' requirements*.txt
+python3 -m uv pip install --quiet --python {REMOTE_ROOT}/venv/bin/python \
+  "torch=={TRAINER_TORCH_VERSION}" "torchvision=={TRAINER_TORCHVISION_VERSION}" \
+  -r requirements.txt \
   "diffusers>=0.38.0" "transformers>=4.51" accelerate "safetensors>=0.5" \
-  pillow "gguf>=0.10.0" pyyaml $TORCH_PIN
+  pillow "gguf>=0.10.0" pyyaml
 echo "[pod] bootstrap complete"
 "#
     )
@@ -555,8 +588,7 @@ async fn wait_for_instance(instance_id: u64) -> Result<SshTarget> {
         }
         if std::time::Instant::now() > deadline {
             bail!(
-                "Instance {instance_id} did not become reachable within {} minutes. \
-                 Destroy it with: modl pod rm {instance_id}",
+                "Instance {instance_id} did not reach running state within {} minutes.",
                 PROVISION_TIMEOUT_SECS / 60
             );
         }
@@ -628,7 +660,7 @@ fn run_ssh_streaming(ssh: &SshTarget, script: &str) -> Result<()> {
         .status()
         .context("ssh command failed to spawn")?;
     if !status.success() {
-        bail!("Remote bootstrap failed (exit {status}). The pod is still up for inspection.");
+        bail!("Remote bootstrap failed (exit {status}).");
     }
     Ok(())
 }
@@ -778,7 +810,8 @@ mod tests {
         assert!(script.contains(AITOOLKIT_PIN_SHA));
         assert!(script.contains("requirements.txt"));
         assert!(script.contains("unset HF_HUB_OFFLINE"));
-        assert!(script.contains("uv pip install --system"));
+        assert!(script.contains("uv venv --quiet --python 3.11"));
+        assert!(script.contains(TRAINER_TORCH_VERSION));
     }
 
     #[test]
