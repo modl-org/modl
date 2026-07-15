@@ -273,11 +273,13 @@ pub async fn list_instances() -> Result<Vec<Instance>> {
         .context("Vast.ai instance list request failed")?;
     let data = check(resp, "instance list").await?;
 
-    let empty = vec![];
+    // A response without the `instances` array is an API anomaly, not an
+    // empty account — callers prune pods.json against this list, so treating
+    // it as empty would silently unregister live billing pods.
     let list = data
         .get("instances")
         .and_then(|v| v.as_array())
-        .unwrap_or(&empty);
+        .with_context(|| format!("Vast.ai instance list: unexpected response shape: {data}"))?;
     Ok(list
         .iter()
         .filter_map(|i| parse_instance(i, 0).ok())
@@ -319,6 +321,12 @@ pub async fn destroy_instance(instance_id: u64) -> Result<()> {
         .send()
         .await
         .context("Vast.ai instance destroy request failed")?;
+    // An instance that's already gone (destroyed from the Vast console) is a
+    // successful destroy — `pod rm` and teardown must be idempotent so the
+    // local record can still be pruned instead of nagging forever.
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(());
+    }
     check(resp, "instance destroy").await?;
     Ok(())
 }

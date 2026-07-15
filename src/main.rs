@@ -55,6 +55,11 @@ async fn async_main() -> Result<()> {
     let _ = tokio::time::timeout(std::time::Duration::from_millis(500), update_handle).await;
     core::update_check::print_if_update_available();
 
+    // Idle-safety nag: warn (zero network) if a rented pod has been billing
+    // for hours. Pods can't self-destruct (we refuse to ship them the key),
+    // so this is the mitigation for a forgotten instance.
+    core::pod_state::warn_if_stale();
+
     result
 }
 
