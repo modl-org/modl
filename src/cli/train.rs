@@ -42,17 +42,119 @@ pub struct PodArgs {
     pub max_price: f64,
     pub keep_pod: bool,
     pub yes: bool,
+    /// Ignore any active pod and provision a fresh one-shot instance.
+    pub fresh: bool,
 }
 
 impl PodArgs {
-    fn into_options(self) -> crate::core::pod::PodOptions {
+    fn into_options(self, label: String) -> crate::core::pod::PodOptions {
         crate::core::pod::PodOptions {
             gpu_type: self.gpu_type,
             max_price_per_hour: self.max_price,
+            disk_gb: crate::core::pod::POD_DISK_GB,
             yes: self.yes,
             keep_pod: self.keep_pod,
+            label,
         }
     }
+}
+
+/// Run a training spec on a pod: reuse the active pod if one is up (unless
+/// `--fresh`), otherwise one-shot provision → train → destroy.
+async fn run_pod(spec: TrainJobSpec, args: PodArgs) -> Result<()> {
+    use crate::core::{pod, pod_state};
+
+    if !args.fresh
+        && let Some(rec) = pod_state::active_pod().await?
+    {
+        println!(
+            "{} Reusing pod {} ({}, ${:.3}/hr)…",
+            style("→").cyan(),
+            rec.instance_id,
+            rec.gpu_name,
+            rec.dph_total
+        );
+
+        // VRAM guard: if we can estimate the pod's VRAM and it's below the
+        // model's training floor, refuse — the alternative is a slow OOM crash.
+        if let (Some(pod_vram), Some(floor)) = (
+            estimate_vram_gb(&rec.gpu_name),
+            pod::min_vram_for_train(&spec),
+        ) && pod_vram < floor
+        {
+            anyhow::bail!(
+                "Active pod {} is a {} (~{}GB VRAM) but {} needs ≥{}GB to train.\n\
+                 Replace it: modl pod rm {} — then rerun (a fresh pod will be sized correctly).",
+                rec.instance_id,
+                rec.gpu_name,
+                pod_vram,
+                spec.model.base_model_id,
+                floor,
+                rec.instance_id
+            );
+        }
+
+        // GPU-type mismatch is a warning, not an error — the user may
+        // deliberately want to reuse whatever is warm.
+        if !args.gpu_type.eq_ignore_ascii_case("auto")
+            && !gpu_type_matches(&rec.gpu_name, &args.gpu_type)
+        {
+            println!(
+                "  {} you asked for {} but the active pod is {} — using the pod anyway ({} to replace).",
+                style("⚠").yellow(),
+                args.gpu_type,
+                rec.gpu_name,
+                style("--fresh").bold()
+            );
+        }
+
+        let pod_obj = pod::Pod::from(rec.clone());
+        pod::bootstrap(&pod_obj)?;
+        pod::run_train_job(&pod_obj, &spec)?;
+        println!(
+            "{} Pod {} still running (${:.3}/hr) — {} when done.",
+            style("⚠").yellow(),
+            rec.instance_id,
+            rec.dph_total,
+            style(format!("modl pod rm {}", rec.instance_id)).bold()
+        );
+        return Ok(());
+    }
+
+    // No active pod (or --fresh): today's one-shot behavior.
+    let label = format!("modl-pod-{}", spec.output.lora_name);
+    pod::run_pod_training(spec, args.into_options(label)).await
+}
+
+/// Best-effort VRAM (GB) for a Vast GPU name. `None` when the card is unknown
+/// (we then skip the reuse VRAM guard rather than guess wrong).
+fn estimate_vram_gb(gpu_name: &str) -> Option<u32> {
+    let n = gpu_name.to_uppercase();
+    if n.contains("H200") {
+        Some(141)
+    } else if n.contains("H100") {
+        Some(80)
+    } else if n.contains("A100") {
+        if n.contains("80") { Some(80) } else { Some(40) }
+    } else if n.contains("A6000") || n.contains("6000 ADA") || n.contains("L40") {
+        Some(48)
+    } else if n.contains("5090") {
+        Some(32)
+    } else if n.contains("4090") || n.contains("3090") || n.contains("A10") {
+        Some(24)
+    } else if n.contains("4080") {
+        // 4080 and 4080 SUPER are 16GB cards — grouping them with the 24GB
+        // tier let sub-floor pods pass the guard and OOM mid-train.
+        Some(16)
+    } else {
+        None
+    }
+}
+
+/// Loose match between a Vast GPU name and a requested `--pod` type.
+fn gpu_type_matches(pod_gpu_name: &str, requested: &str) -> bool {
+    let norm = |s: &str| s.to_uppercase().replace([' ', '_', '-'], "");
+    norm(pod_gpu_name).contains(&norm(requested))
 }
 
 /// Run the train command. Arguments are all optional; missing ones trigger
@@ -96,7 +198,7 @@ pub async fn run(
         }
 
         if let Some(pod_args) = pod {
-            return crate::core::pod::run_pod_training(spec, pod_args.into_options()).await;
+            return run_pod(spec, pod_args).await;
         }
         return execute_training(spec, cloud, provider, attach_gpu, gpu_type).await;
     }
@@ -398,7 +500,7 @@ pub async fn run(
     }
 
     if let Some(pod_args) = pod {
-        return crate::core::pod::run_pod_training(spec, pod_args.into_options()).await;
+        return run_pod(spec, pod_args).await;
     }
 
     execute_training(spec, cloud, provider, attach_gpu, gpu_type).await

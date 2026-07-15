@@ -562,6 +562,41 @@ pub enum GpuCommands {
 
 #[derive(Subcommand)]
 pub enum PodCommands {
+    /// Rent + bootstrap a persistent pod for reuse across train/generate jobs
+    ///
+    /// Later `modl train --pod …` and `modl pod run …` reuse this pod
+    /// automatically (bootstrap fast-paths on a fingerprint match). The pod
+    /// bills until you `modl pod rm` it.
+    Up {
+        /// GPU type (rtx4090, a100-80gb, h100, …) or "auto" for best value
+        gpu: String,
+        /// Max hourly price for offers (USD)
+        #[arg(long, default_value_t = 3.0)]
+        max_price: f64,
+        /// Disk to provision (GB) — persistent pods accumulate an HF cache
+        #[arg(long, default_value_t = 120.0)]
+        disk: f64,
+        /// Minimum VRAM (GB) floor; required for "auto" (defaults to 24)
+        #[arg(long)]
+        min_vram: Option<u32>,
+        /// Replace an already-active pod instead of reusing it
+        #[arg(long)]
+        fresh: bool,
+        /// Skip the rent-confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Run a command on a pod over SSH (defaults to the active pod)
+    ///
+    /// Example: modl pod exec -- nvidia-smi
+    Exec {
+        /// Instance ID (defaults to the active pod)
+        #[arg(long)]
+        id: Option<u64>,
+        /// Command to run, after `--`
+        #[arg(last = true, required = true, value_name = "CMD")]
+        cmd: Vec<String>,
+    },
     /// List Vast.ai instances on your account (they bill until destroyed)
     Ls,
     /// Destroy an instance (billing stops)
@@ -846,9 +881,14 @@ pub enum Commands {
         /// Max hourly price for --pod offers (USD)
         #[arg(long, default_value_t = 3.0)]
         max_price: f64,
-        /// Keep the pod running after --pod training (keeps billing!)
+        /// Keep the pod running after --pod training (keeps billing!). Also
+        /// registers it as a reusable pod (see `modl pod up`).
         #[arg(long)]
         keep_pod: bool,
+        /// Ignore any active pod (`modl pod up`) and provision a fresh one-shot
+        /// pod that is destroyed when training finishes.
+        #[arg(long)]
+        fresh: bool,
         /// Skip the rent-confirmation prompt for --pod
         #[arg(long)]
         yes: bool,
@@ -1381,12 +1421,14 @@ pub async fn run(cli: Cli) -> Result<()> {
             pod,
             max_price,
             keep_pod,
+            fresh,
             yes,
         } => {
             let pod_args = pod.map(|gpu| train::PodArgs {
                 gpu_type: gpu,
                 max_price,
                 keep_pod,
+                fresh,
                 yes,
             });
             dispatch_train(
@@ -1538,6 +1580,15 @@ pub async fn run(cli: Cli) -> Result<()> {
         // ── Remote GPU ───────────────────────────────────────────────
         Commands::Gpu { command } => dispatch_gpu(command).await,
         Commands::Pod { command } => match command {
+            PodCommands::Up {
+                gpu,
+                max_price,
+                disk,
+                min_vram,
+                fresh,
+                yes,
+            } => pod::up(gpu, max_price, disk, min_vram, fresh, yes).await,
+            PodCommands::Exec { id, cmd } => pod::exec(id, cmd).await,
             PodCommands::Ls => pod::ls().await,
             PodCommands::Rm { id, yes } => pod::rm(id, yes).await,
             PodCommands::Ssh { id } => pod::ssh(id).await,

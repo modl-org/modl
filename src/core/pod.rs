@@ -1,11 +1,20 @@
-//! BYO-pod training — rent a Vast.ai GPU with the user's own key, train,
-//! sync artifacts back into the local store, destroy the pod.
+//! BYO-pod GPU lifecycle — rent a Vast.ai GPU with the user's own key, ship
+//! `python/modl_worker` + job specs, run jobs, sync artifacts back.
 //!
-//! The pod never needs the modl binary or the hosted orchestrator:
-//! - `python/modl_worker` + dataset + spec ship over rsync
-//! - the worker resolves the base model to a HuggingFace repo (no store)
-//! - training runs under nohup; JSONL events stream back via `ssh tail -F`
-//! - the finished LoRA rsyncs home and registers like a local training run
+//! The pod never needs the modl binary, the hosted orchestrator, or the Vast
+//! API key:
+//! - `python/modl_worker` + a uv-managed Python 3.11 venv + job specs ship
+//!   over rsync/ssh
+//! - the worker resolves the base model to a HuggingFace repo (no local store)
+//! - jobs run under nohup; JSONL events stream back via `ssh tail -F`
+//! - finished artifacts rsync home and register like a local run
+//!
+//! ## Composable stages (docs/plans/pod-lifecycle.md §1.1)
+//!
+//! `provision → bootstrap → run_train_job → teardown`. The one-shot
+//! `run_pod_training()` chains all four; `modl pod up` stops after `bootstrap`
+//! and persists a [`crate::core::pod_state::PodRecord`] so later jobs reuse
+//! the warm instance (bootstrap fast-paths on a fingerprint match).
 
 use anyhow::{Context, Result, bail};
 use console::style;
@@ -16,6 +25,7 @@ use std::process::{Command, Stdio};
 use crate::core::db::Database;
 use crate::core::executor::parse_worker_event;
 use crate::core::job::{EventPayload, TrainJobSpec};
+use crate::core::pod_state::{self, PodRecord};
 use crate::core::runtime::{
     AITOOLKIT_PIN_SHA, AITOOLKIT_REPO_URL, TRAINER_TORCH_VERSION, TRAINER_TORCHAUDIO_VERSION,
     TRAINER_TORCHVISION_VERSION,
@@ -23,8 +33,10 @@ use crate::core::runtime::{
 use crate::core::training::resolve_worker_python_root;
 use crate::core::vast;
 
-const REMOTE_ROOT: &str = "/root/modl-pod";
-const POD_DISK_GB: f64 = 80.0;
+pub(crate) const REMOTE_ROOT: &str = "/root/modl-pod";
+/// Default disk for one-shot train pods. `pod up` raises this (persistent
+/// pods accumulate an HF cache across jobs — that's the point).
+pub const POD_DISK_GB: f64 = 80.0;
 /// Per-host boot budget. Duds get destroyed and the next offer is tried,
 /// so this can be tight — good hosts come up in 1-3 minutes.
 const PROVISION_TIMEOUT_SECS: u64 = 8 * 60;
@@ -33,21 +45,27 @@ const SSH_TIMEOUT_SECS: u64 = 6 * 60;
 /// Seconds of event silence before probing whether the worker is still alive.
 const LIVENESS_CHECK_SECS: u64 = 60;
 
+/// Rental configuration shared by `train --pod` (one-shot) and `pod up`.
 pub struct PodOptions {
     pub gpu_type: String,
     pub max_price_per_hour: f64,
+    pub disk_gb: f64,
     pub yes: bool,
     pub keep_pod: bool,
+    /// Vast instance label (shows in `pod ls` / the Vast console).
+    pub label: String,
 }
 
+/// SSH target for a booted pod. Fields are `pub(crate)` so `pod_executor`
+/// can reuse the transport helpers.
 #[derive(Clone)]
-struct SshTarget {
-    host: String,
-    port: u16,
+pub(crate) struct SshTarget {
+    pub(crate) host: String,
+    pub(crate) port: u16,
 }
 
 impl SshTarget {
-    fn base_args(&self) -> Vec<String> {
+    pub(crate) fn base_args(&self) -> Vec<String> {
         vec![
             "-o".into(),
             "StrictHostKeyChecking=accept-new".into(),
@@ -61,7 +79,7 @@ impl SshTarget {
         ]
     }
 
-    fn rsync_transport(&self) -> String {
+    pub(crate) fn rsync_transport(&self) -> String {
         format!(
             "ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -p {}",
             self.port
@@ -69,43 +87,65 @@ impl SshTarget {
     }
 }
 
-pub async fn run_pod_training(spec: TrainJobSpec, opts: PodOptions) -> Result<()> {
-    preflight(&spec)?;
+/// A booted, SSH-reachable pod. Returned by [`provision`], consumed by the
+/// other stages. Convertible to/from a persisted [`PodRecord`].
+#[derive(Clone)]
+pub struct Pod {
+    pub instance_id: u64,
+    pub gpu_name: String,
+    pub dph_total: f64,
+    pub(crate) ssh: SshTarget,
+    /// RFC3339 — set when the pod was first provisioned.
+    pub created_at: String,
+    pub bootstrap_fingerprint: Option<String>,
+}
 
-    let hf_token = huggingface_token();
-    if hf_token.is_none() {
-        println!(
-            "{} No HuggingFace token found — gated base models (Flux, Klein) will fail to download on the pod. Add one with: modl auth add huggingface",
-            style("⚠").yellow()
-        );
+impl Pod {
+    /// Build a persistable record for `pods.json`.
+    pub fn to_record(&self, label: &str) -> PodRecord {
+        PodRecord {
+            instance_id: self.instance_id,
+            gpu_name: self.gpu_name.clone(),
+            dph_total: self.dph_total,
+            ssh_host: self.ssh.host.clone(),
+            ssh_port: self.ssh.port,
+            created_at: self.created_at.clone(),
+            bootstrap_fingerprint: self.bootstrap_fingerprint.clone(),
+            label: label.to_string(),
+        }
     }
+}
+
+impl From<PodRecord> for Pod {
+    fn from(r: PodRecord) -> Self {
+        Pod {
+            instance_id: r.instance_id,
+            gpu_name: r.gpu_name,
+            dph_total: r.dph_total,
+            ssh: SshTarget {
+                host: r.ssh_host,
+                port: r.ssh_port,
+            },
+            created_at: r.created_at,
+            bootstrap_fingerprint: r.bootstrap_fingerprint,
+        }
+    }
+}
+
+// ===========================================================================
+// Stage 1 — provision (search → rent w/ boot-failover → wait for SSH)
+// ===========================================================================
+
+/// Search the marketplace, rent an offer (retrying across offers/machines on
+/// boot failures), and wait until SSH accepts connections. The returned
+/// [`Pod`] is ready for [`bootstrap`].
+pub async fn provision(opts: &PodOptions, min_vram_gb: Option<u32>) -> Result<Pod> {
+    vast::api_key()?;
+    check_local_tools()?;
 
     // ---------------------------------------------------------------
     // 1. Find and confirm an offer
     // ---------------------------------------------------------------
-    // VRAM the training job actually needs, from models.toml. Presets enable
-    // quantization, so fp8 is the realistic floor; bf16 otherwise.
-    let min_vram_gb = crate::core::model_family::find_model(&spec.model.base_model_id).map(|m| {
-        if spec.params.quantize {
-            m.vram_fp8_gb
-        } else {
-            m.vram_bf16_gb
-        }
-    });
-    if let Some(gb) = min_vram_gb {
-        println!(
-            "{} {} needs ≥{}GB VRAM for training ({})",
-            style("→").cyan(),
-            spec.model.base_model_id,
-            gb,
-            if spec.params.quantize {
-                "quantized"
-            } else {
-                "bf16"
-            }
-        );
-    }
-
     println!(
         "{} Searching Vast.ai for {} offers (max ${:.2}/hr, ranked by perf-per-dollar)...",
         style("→").cyan(),
@@ -115,7 +155,7 @@ pub async fn run_pod_training(spec: TrainJobSpec, opts: PodOptions) -> Result<()
     let offers = vast::search_offers(&opts.gpu_type, opts.max_price_per_hour, min_vram_gb).await?;
     if offers.is_empty() {
         bail!(
-            "No rentable {} offers under ${:.2}/hr{}. Try a bigger --pod type or raise --max-price.",
+            "No rentable {} offers under ${:.2}/hr{}. Try a bigger GPU type or raise --max-price.",
             opts.gpu_type,
             opts.max_price_per_hour,
             min_vram_gb
@@ -154,7 +194,6 @@ pub async fn run_pod_training(spec: TrainJobSpec, opts: PodOptions) -> Result<()
     // 2. Rent + boot — a marketplace host can be taken (rent fails) or a
     //    dud (rents but never boots). Both fall through to the next offer.
     // ---------------------------------------------------------------
-    let label = format!("modl-pod-{}", spec.output.lora_name);
     // Disable Vast's auto-tmux so our SSH commands run in a plain shell.
     let onstart = "touch /root/.no_auto_tmux\n";
     let env = vec![("HF_HUB_OFFLINE".to_string(), "0".to_string())];
@@ -185,8 +224,8 @@ pub async fn run_pod_training(spec: TrainJobSpec, opts: PodOptions) -> Result<()
             vast::POD_IMAGE,
             onstart,
             &env,
-            POD_DISK_GB,
-            &label,
+            opts.disk_gb,
+            &opts.label,
         )
         .await
         {
@@ -209,6 +248,26 @@ pub async fn run_pod_training(spec: TrainJobSpec, opts: PodOptions) -> Result<()
             id
         );
 
+        // Track the instance from the moment it bills. If the boot wait, the
+        // bootstrap, or the user's Ctrl-C kills this flow, `pod ls` and the
+        // stale-pod nag must still know about it. SSH details land after
+        // boot; the fingerprint after bootstrap.
+        if let Err(e) = pod_state::upsert(PodRecord {
+            instance_id: id,
+            gpu_name: offer.gpu_name.clone(),
+            dph_total: offer.dph_total,
+            ssh_host: String::new(),
+            ssh_port: 0,
+            created_at: pod_state::now_rfc3339(),
+            bootstrap_fingerprint: None,
+            label: opts.label.clone(),
+        }) {
+            println!(
+                "{} Could not record pod {id} in pods.json: {e}",
+                style("⚠").yellow()
+            );
+        }
+
         match wait_for_instance(id).await {
             Ok(ssh) => {
                 booted = Some((id, offer.clone(), ssh));
@@ -222,86 +281,156 @@ pub async fn run_pod_training(spec: TrainJobSpec, opts: PodOptions) -> Result<()
                     id
                 );
                 bad_machines.insert(offer.machine_id);
-                if let Err(e) = vast::destroy_instance(id).await {
-                    println!(
-                        "{} Could not destroy {id}: {e} — check with: modl pod ls",
+                match vast::destroy_instance(id).await {
+                    // Only forget a dud we actually destroyed — a record for
+                    // a still-billing instance must survive.
+                    Ok(()) => {
+                        let _ = pod_state::remove(id);
+                    }
+                    Err(e) => println!(
+                        "{} Could not destroy {id}: {e} — still billing, check with: modl pod ls",
                         style("✗").red()
-                    );
+                    ),
                 }
             }
         }
     }
     let (instance_id, rented_offer, ssh) =
         booted.context("No offer produced a working pod — try again shortly")?;
-    let started_at = std::time::Instant::now();
 
-    // Everything after boot runs inside a fallible block so the pod is
-    // destroyed on error unless --keep-pod was passed.
-    let result = drive_pod(&spec, &ssh, instance_id, hf_token.as_deref()).await;
-
-    if opts.keep_pod {
+    let pod = Pod {
+        instance_id,
+        gpu_name: rented_offer.gpu_name,
+        dph_total: rented_offer.dph_total,
+        ssh,
+        created_at: pod_state::now_rfc3339(),
+        bootstrap_fingerprint: None,
+    };
+    // Refresh the record with the SSH target now that we have one.
+    if let Err(e) = pod_state::upsert(pod.to_record(&opts.label)) {
         println!(
-            "{} --keep-pod: instance {} is still running and billing. Destroy with: modl pod rm {}",
-            style("⚠").yellow(),
-            instance_id,
-            instance_id
+            "{} Could not update pods.json for {instance_id}: {e}",
+            style("⚠").yellow()
         );
-    } else {
-        println!(
-            "{} Destroying instance {}...",
-            style("→").cyan(),
-            instance_id
-        );
-        match vast::destroy_instance(instance_id).await {
-            Ok(()) => println!("{} Pod destroyed — billing stopped.", style("✓").green()),
-            Err(e) => println!(
-                "{} Could not destroy instance {instance_id}: {e}\n  Destroy it manually: modl pod rm {instance_id}",
-                style("✗").red()
-            ),
-        }
     }
 
-    let hours = started_at.elapsed().as_secs_f64() / 3600.0;
-    println!(
-        "  Pod time: {:.0}m — estimated cost ${:.2}",
-        hours * 60.0,
-        hours * rented_offer.dph_total
-    );
-
-    result
-}
-
-/// Bootstrap → train → sync back. Assumes the instance is booted;
-/// the caller handles teardown.
-async fn drive_pod(
-    spec: &TrainJobSpec,
-    ssh: &SshTarget,
-    instance_id: u64,
-    hf_token: Option<&str>,
-) -> Result<()> {
     // ---------------------------------------------------------------
     // 3. Wait for sshd to accept connections (running != ssh-ready)
     // ---------------------------------------------------------------
-    wait_for_ssh(ssh)?;
-    let ssh = ssh.clone();
+    wait_for_ssh(&pod.ssh)?;
 
-    // ---------------------------------------------------------------
-    // 4. Ship worker + dataset + spec
-    // ---------------------------------------------------------------
-    let worker_root = resolve_worker_python_root()?;
-    let dataset_path = PathBuf::from(&spec.dataset.path);
+    Ok(pod)
+}
 
-    println!("{} Uploading worker + dataset...", style("→").cyan());
-    run_ssh_quiet(
-        &ssh,
-        &format!("mkdir -p {REMOTE_ROOT}/worker {REMOTE_ROOT}/dataset"),
-    )?;
+// ===========================================================================
+// Stage 2 — bootstrap (rsync worker + ai-toolkit/deps, fingerprinted)
+// ===========================================================================
+
+/// Ship `modl_worker` and ensure the ai-toolkit + Python deps are installed.
+///
+/// Idempotent + fingerprinted: the worker is always re-rsynced (cheap, picks
+/// up local edits), but the expensive venv/deps step is skipped when the
+/// remote `.bootstrap-fingerprint` marker matches the current script hash.
+pub fn bootstrap(pod: &Pod) -> Result<()> {
+    let ssh = &pod.ssh;
+
+    // Always refresh the worker — small, and it picks up local worker edits
+    // between jobs on a persistent pod.
+    println!("{} Uploading worker...", style("→").cyan());
+    run_ssh_quiet(ssh, &format!("mkdir -p {REMOTE_ROOT}/worker"))?;
     rsync_to(
-        &ssh,
-        &worker_root.join("modl_worker"),
+        ssh,
+        &resolve_worker_python_root()?.join("modl_worker"),
         &format!("{REMOTE_ROOT}/worker/"),
     )?;
-    rsync_to(&ssh, &dataset_path, &format!("{REMOTE_ROOT}/dataset-up/"))?;
+
+    // Fingerprint fast-path: same bootstrap script as last time ⇒ deps are
+    // already in place, skip the multi-minute install.
+    let want = bootstrap_fingerprint();
+    let have = run_ssh_capture(
+        ssh,
+        &format!("cat {REMOTE_ROOT}/.bootstrap-fingerprint 2>/dev/null"),
+    )
+    .unwrap_or_default();
+    if have.trim() == want {
+        println!(
+            "{} Pod already bootstrapped (fingerprint match) — reusing venv + ai-toolkit.",
+            style("✓").green()
+        );
+        let _ = pod_state::set_fingerprint(pod.instance_id, &want);
+        return Ok(());
+    }
+
+    println!(
+        "{} Bootstrapping pod (ai-toolkit @ {} + deps, a few minutes)...",
+        style("→").cyan(),
+        &AITOOLKIT_PIN_SHA[..8]
+    );
+    run_ssh_streaming(ssh, &bootstrap_script())?;
+
+    // Record the fingerprint so the next bootstrap can fast-path.
+    run_ssh_quiet(
+        ssh,
+        &format!(
+            "printf %s {} > {REMOTE_ROOT}/.bootstrap-fingerprint",
+            shell_quote(&want)
+        ),
+    )?;
+    let _ = pod_state::set_fingerprint(pod.instance_id, &want);
+    Ok(())
+}
+
+/// sha256 of [`bootstrap_script`]. Since the script embeds the ai-toolkit SHA
+/// and torch/diffusers pins, this changes whenever any dependency pin changes,
+/// forcing an automatic re-bootstrap.
+pub fn bootstrap_fingerprint() -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bootstrap_script().as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+// ===========================================================================
+// Stage 3 — run_train_job (upload dataset/spec → train → sync back)
+// ===========================================================================
+
+/// Upload the dataset + rewritten spec, launch the trainer under nohup, stream
+/// events, then rsync the LoRA home and register it. Assumes [`bootstrap`] has
+/// run. Does NOT tear the pod down.
+pub fn run_train_job(pod: &Pod, spec: &TrainJobSpec) -> Result<()> {
+    let ssh = &pod.ssh;
+
+    let ds = Path::new(&spec.dataset.path);
+    if !ds.is_dir() {
+        bail!("Dataset directory not found: {}", spec.dataset.path);
+    }
+
+    let hf_token = huggingface_token();
+    if hf_token.is_none() {
+        println!(
+            "{} No HuggingFace token found — gated base models (Flux, Klein) will fail to download on the pod. Add one with: modl auth add huggingface",
+            style("⚠").yellow()
+        );
+    }
+
+    // A worker from a previous run may still be alive: nohup survives a
+    // dropped link, and proceeding would wipe its dataset and events file
+    // out from under it and launch a second trainer on the same GPU.
+    if matches!(probe_worker(ssh), WorkerProbe::Alive) {
+        bail!(
+            "A job is already running on pod {} — wait for it to finish, or destroy the pod: modl pod rm {}",
+            pod.instance_id,
+            pod.instance_id
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // 4. Ship dataset + spec
+    // ---------------------------------------------------------------
+    let dataset_path = PathBuf::from(&spec.dataset.path);
+    println!("{} Uploading dataset...", style("→").cyan());
+    run_ssh_quiet(ssh, &format!("mkdir -p {REMOTE_ROOT}/dataset"))?;
+    rsync_to(ssh, &dataset_path, &format!("{REMOTE_ROOT}/dataset-up/"))?;
     // rsync of a dir path (no trailing slash) nests it: dataset-up/<basename>.
     // Normalize so the spec can always point at REMOTE_ROOT/dataset.
     let ds_name = dataset_path
@@ -309,7 +438,7 @@ async fn drive_pod(
         .map(|n| n.to_string_lossy().to_string())
         .context("Dataset path has no directory name")?;
     run_ssh_quiet(
-        &ssh,
+        ssh,
         &format!(
             "rm -rf {REMOTE_ROOT}/dataset && mv {REMOTE_ROOT}/dataset-up/{} {REMOTE_ROOT}/dataset",
             shell_quote(&ds_name)
@@ -318,23 +447,13 @@ async fn drive_pod(
 
     let remote_spec = build_remote_spec(spec);
     let spec_yaml = serde_yaml::to_string(&remote_spec)?;
-    let tmp_spec = std::env::temp_dir().join(format!("modl-pod-spec-{instance_id}.yaml"));
+    let tmp_spec = std::env::temp_dir().join(format!("modl-pod-spec-{}.yaml", pod.instance_id));
     std::fs::write(&tmp_spec, &spec_yaml)?;
-    rsync_to(&ssh, &tmp_spec, &format!("{REMOTE_ROOT}/spec.yaml"))?;
+    rsync_to(ssh, &tmp_spec, &format!("{REMOTE_ROOT}/spec.yaml"))?;
     let _ = std::fs::remove_file(&tmp_spec);
 
     // ---------------------------------------------------------------
-    // 5. Bootstrap: ai-toolkit @ pinned SHA + Python deps
-    // ---------------------------------------------------------------
-    println!(
-        "{} Bootstrapping pod (ai-toolkit @ {} + deps, a few minutes)...",
-        style("→").cyan(),
-        &AITOOLKIT_PIN_SHA[..8]
-    );
-    run_ssh_streaming(&ssh, &bootstrap_script())?;
-
-    // ---------------------------------------------------------------
-    // 6. Launch training under nohup, stream events
+    // 5. Launch training under nohup, stream events
     // ---------------------------------------------------------------
     let job_id = format!("pod-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"));
     let db = Database::open()?;
@@ -355,9 +474,9 @@ async fn drive_pod(
     let token_prefix = match hf_token {
         Some(t) => {
             run_ssh_stdin(
-                &ssh,
+                ssh,
                 &format!("umask 077 && cat > {REMOTE_ROOT}/.hf_token"),
-                t,
+                &t,
             )?;
             format!("HF_TOKEN=\"$(cat {REMOTE_ROOT}/.hf_token)\" ")
         }
@@ -375,29 +494,29 @@ async fn drive_pod(
     // From here on the job row exists — no error may leave it stuck at
     // "running" (phantom running jobs in `modl ls` / the UI training tab).
     let result = (|| -> Result<()> {
-        run_ssh_quiet(&ssh, &launch)?;
+        run_ssh_quiet(ssh, &launch)?;
         println!(
             "{} Training started on pod — {}",
             style("→").cyan(),
             style(&job_id).dim()
         );
 
-        match stream_events(&ssh, &job_id, &db)? {
+        match stream_events(ssh, &job_id, &db)? {
             TrainOutcome::Completed => {}
             TrainOutcome::Failed(msg) => {
-                let tail = run_ssh_capture(&ssh, &format!("tail -n 30 {REMOTE_ROOT}/stderr.log"))
+                let tail = run_ssh_capture(ssh, &format!("tail -n 30 {REMOTE_ROOT}/stderr.log"))
                     .unwrap_or_default();
                 bail!("Pod training failed: {msg}\n\nLast worker stderr:\n{tail}");
             }
         }
 
         // ---------------------------------------------------------------
-        // 7. Sync artifacts back + register locally
+        // 6. Sync artifacts back + register locally
         // ---------------------------------------------------------------
         println!("{} Syncing artifacts back...", style("→").cyan());
         let local_out = PathBuf::from(&spec.output.destination_dir);
         std::fs::create_dir_all(&local_out)?;
-        rsync_from(&ssh, &format!("{REMOTE_ROOT}/output/"), &local_out)?;
+        rsync_from(ssh, &format!("{REMOTE_ROOT}/output/"), &local_out)?;
 
         let final_lora = find_final_lora(&local_out, &spec.output.lora_name)?;
         let store_root = crate::core::paths::modl_root();
@@ -430,9 +549,114 @@ async fn drive_pod(
     result
 }
 
-fn preflight(spec: &TrainJobSpec) -> Result<()> {
-    vast::api_key()?;
+// ===========================================================================
+// Stage 4 — teardown (destroy + prune pods.json)
+// ===========================================================================
 
+/// Destroy the instance (billing stops) and remove it from `pods.json`.
+///
+/// The record is only pruned on a successful destroy — a still-billing
+/// instance must stay visible to `pod ls` and the stale-pod nag. A failed
+/// destroy is an error so callers (e.g. `pod up --fresh`) don't proceed to
+/// rent a second pod while the first one still bills.
+pub async fn teardown(pod: &Pod) -> Result<()> {
+    println!(
+        "{} Destroying instance {}...",
+        style("→").cyan(),
+        pod.instance_id
+    );
+    match vast::destroy_instance(pod.instance_id).await {
+        Ok(()) => {
+            println!("{} Pod destroyed — billing stopped.", style("✓").green());
+            let _ = pod_state::remove(pod.instance_id);
+            Ok(())
+        }
+        Err(e) => bail!(
+            "Could not destroy instance {}: {e}\n  It is still billing — destroy it manually: modl pod rm {}",
+            pod.instance_id,
+            pod.instance_id
+        ),
+    }
+}
+
+// ===========================================================================
+// One-shot orchestration — provision → bootstrap → train → teardown
+// ===========================================================================
+
+/// One-shot `modl train --pod` (no active pod reused): provision a fresh pod,
+/// bootstrap, train, and — unless `--keep-pod` — destroy it. `--keep-pod`
+/// persists a `pods.json` record so the instance becomes a reusable pod.
+pub async fn run_pod_training(spec: TrainJobSpec, opts: PodOptions) -> Result<()> {
+    let min_vram_gb = min_vram_for_train(&spec);
+    if let Some(gb) = min_vram_gb {
+        println!(
+            "{} {} needs ≥{}GB VRAM for training ({})",
+            style("→").cyan(),
+            spec.model.base_model_id,
+            gb,
+            if spec.params.quantize {
+                "quantized"
+            } else {
+                "bf16"
+            }
+        );
+    }
+
+    let pod = provision(&opts, min_vram_gb).await?;
+    let started_at = std::time::Instant::now();
+
+    // Everything after boot runs inside a fallible block so the pod is
+    // destroyed on error unless --keep-pod was passed.
+    let result = bootstrap(&pod).and_then(|()| run_train_job(&pod, &spec));
+
+    if opts.keep_pod {
+        // --keep-pod is the manual bridge into persistent mode: record the
+        // instance so `train --pod` / `pod run` reuse it (and `pod ls` shows it).
+        let mut kept = pod.clone();
+        kept.bootstrap_fingerprint = Some(bootstrap_fingerprint());
+        if let Err(e) = pod_state::upsert(kept.to_record(&opts.label)) {
+            eprintln!("{} Could not record kept pod: {e}", style("⚠").yellow());
+        }
+        println!(
+            "{} --keep-pod: instance {} still running & billing.\n  Reuse:  modl train --pod {} …  /  modl pod run …\n  Kill:   modl pod rm {}",
+            style("⚠").yellow(),
+            pod.instance_id,
+            opts.gpu_type,
+            pod.instance_id
+        );
+    } else if let Err(e) = teardown(&pod).await {
+        // Don't clobber the training result — the LoRA may already be
+        // registered locally. The pod stays tracked and nagged about.
+        eprintln!("{} {e}", style("✗").red());
+    }
+
+    let hours = started_at.elapsed().as_secs_f64() / 3600.0;
+    println!(
+        "  Pod time: {:.0}m — estimated cost ${:.2}",
+        hours * 60.0,
+        hours * pod.dph_total
+    );
+
+    result
+}
+
+/// VRAM floor for a training job, from models.toml. Presets enable
+/// quantization, so fp8 is the realistic floor; bf16 otherwise.
+pub fn min_vram_for_train(spec: &TrainJobSpec) -> Option<u32> {
+    crate::core::model_family::find_model(&spec.model.base_model_id).map(|m| {
+        if spec.params.quantize {
+            m.vram_fp8_gb
+        } else {
+            m.vram_bf16_gb
+        }
+    })
+}
+
+// ===========================================================================
+// Shared helpers
+// ===========================================================================
+
+fn check_local_tools() -> Result<()> {
     for tool in ["ssh", "rsync"] {
         let ok = Command::new(tool)
             .arg("-V")
@@ -449,13 +673,8 @@ fn preflight(spec: &TrainJobSpec) -> Result<()> {
                 .map(|s| s.success())
                 .unwrap_or(false);
         if !ok {
-            bail!("`{tool}` not found — pod training needs OpenSSH and rsync installed locally.");
+            bail!("`{tool}` not found — pod jobs need OpenSSH and rsync installed locally.");
         }
-    }
-
-    let ds = Path::new(&spec.dataset.path);
-    if !ds.is_dir() {
-        bail!("Dataset directory not found: {}", spec.dataset.path);
     }
     Ok(())
 }
@@ -526,9 +745,9 @@ enum TrainOutcome {
 /// before the first event is emitted) leaves a healthy `tail -F` following a
 /// file that will never grow — without a liveness probe that hangs forever
 /// on a billing pod. So when the stream goes quiet we ask the pod whether
-/// the worker PID is still alive, and only a definitive "dead" fails the job
-/// (SSH errors during the probe are treated as alive so a flaky link can't
-/// kill a healthy run).
+/// the worker PID is still alive, and only a definitive dead answer fails
+/// the job (SSH errors during the probe count as alive so a flaky link
+/// can't kill a healthy run).
 fn stream_events(ssh: &SshTarget, job_id: &str, db: &Database) -> Result<TrainOutcome> {
     let mut reconnects = 0u32;
     let mut last_seq: u64 = 0;
@@ -567,7 +786,7 @@ fn stream_events(ssh: &SshTarget, job_id: &str, db: &Database) -> Result<TrainOu
                 Err(RecvTimeoutError::Timeout) => {
                     // Quiet stream — normal during long steps or model
                     // downloads, as long as the worker is still running.
-                    if !worker_is_dead(ssh) {
+                    if !matches!(probe_worker(ssh), WorkerProbe::Dead) {
                         continue;
                     }
                     // Drain any in-flight lines: the worker may have just
@@ -673,17 +892,24 @@ fn handle_event_line(
     None
 }
 
-/// True only on a definitive "dead" answer from the pod. SSH failures return
-/// false — a flaky link must not fail a healthy job; the launch step writes
-/// the pidfile before we ever get here.
-fn worker_is_dead(ssh: &SshTarget) -> bool {
+enum WorkerProbe {
+    Alive,
+    Dead,
+    Unknown,
+}
+
+/// Ask the pod whether the worker process (from this or a previous job) is
+/// running. `Unknown` on SSH failure — callers pick the safe direction:
+/// the liveness loop only acts on `Dead`, the relaunch guard only on `Alive`.
+fn probe_worker(ssh: &SshTarget) -> WorkerProbe {
     let cmd = format!(
         "if [ -f {REMOTE_ROOT}/worker.pid ] && kill -0 \"$(cat {REMOTE_ROOT}/worker.pid)\" 2>/dev/null; \
          then echo alive; else echo dead; fi"
     );
     match run_ssh_capture(ssh, &cmd) {
-        Ok(out) => out.contains("dead"),
-        Err(_) => false,
+        Ok(out) if out.contains("alive") => WorkerProbe::Alive,
+        Ok(out) if out.contains("dead") => WorkerProbe::Dead,
+        _ => WorkerProbe::Unknown,
     }
 }
 
@@ -785,7 +1011,7 @@ fn wait_for_ssh(ssh: &SshTarget) -> Result<()> {
     }
 }
 
-fn run_ssh_quiet(ssh: &SshTarget, cmd: &str) -> Result<()> {
+pub(crate) fn run_ssh_quiet(ssh: &SshTarget, cmd: &str) -> Result<()> {
     let out = Command::new("ssh")
         .args(ssh.base_args())
         .arg(cmd)
@@ -800,7 +1026,21 @@ fn run_ssh_quiet(ssh: &SshTarget, cmd: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_ssh_capture(ssh: &SshTarget, cmd: &str) -> Result<String> {
+/// Run a command on a pod over SSH with inherited stdio (for `modl pod exec`).
+/// Returns the remote command's exit status so the caller can propagate it.
+pub fn ssh_exec(host: &str, port: u16, command: &str) -> Result<std::process::ExitStatus> {
+    let ssh = SshTarget {
+        host: host.to_string(),
+        port,
+    };
+    Command::new("ssh")
+        .args(ssh.base_args())
+        .arg(command)
+        .status()
+        .context("ssh command failed to spawn")
+}
+
+pub(crate) fn run_ssh_capture(ssh: &SshTarget, cmd: &str) -> Result<String> {
     let out = Command::new("ssh")
         .args(ssh.base_args())
         .arg(cmd)
@@ -849,7 +1089,7 @@ fn run_ssh_streaming(ssh: &SshTarget, script: &str) -> Result<()> {
     Ok(())
 }
 
-fn rsync_to(ssh: &SshTarget, local: &Path, remote: &str) -> Result<()> {
+pub(crate) fn rsync_to(ssh: &SshTarget, local: &Path, remote: &str) -> Result<()> {
     let status = Command::new("rsync")
         .args(["-az", "--delete", "-e", &ssh.rsync_transport()])
         .arg(local)
@@ -862,7 +1102,7 @@ fn rsync_to(ssh: &SshTarget, local: &Path, remote: &str) -> Result<()> {
     Ok(())
 }
 
-fn rsync_from(ssh: &SshTarget, remote: &str, local: &Path) -> Result<()> {
+pub(crate) fn rsync_from(ssh: &SshTarget, remote: &str, local: &Path) -> Result<()> {
     let status = Command::new("rsync")
         .args(["-az", "-e", &ssh.rsync_transport()])
         .arg(format!("root@{}:{}", ssh.host, remote))
@@ -921,7 +1161,7 @@ fn walk_safetensors(dir: &Path) -> Vec<PathBuf> {
     found
 }
 
-fn shell_quote(s: &str) -> String {
+pub(crate) fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
@@ -996,6 +1236,41 @@ mod tests {
         assert!(script.contains("unset HF_HUB_OFFLINE"));
         assert!(script.contains("uv venv --quiet --python 3.11"));
         assert!(script.contains(TRAINER_TORCH_VERSION));
+    }
+
+    #[test]
+    fn fingerprint_is_a_hash_not_the_script() {
+        let fp = bootstrap_fingerprint();
+        // 64 hex chars, and contains none of the raw script text.
+        assert_eq!(fp.len(), 64);
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(!fp.contains(AITOOLKIT_PIN_SHA));
+        assert!(!fp.contains("torch"));
+        // Deterministic for the same script.
+        assert_eq!(fp, bootstrap_fingerprint());
+    }
+
+    #[test]
+    fn pod_record_roundtrip() {
+        let pod = Pod {
+            instance_id: 999,
+            gpu_name: "RTX 3090".into(),
+            dph_total: 0.19,
+            ssh: SshTarget {
+                host: "ssh5.vast.ai".into(),
+                port: 4242,
+            },
+            created_at: "2026-07-15T00:00:00+00:00".into(),
+            bootstrap_fingerprint: Some("deadbeef".into()),
+        };
+        let rec = pod.to_record("modl-pod-test");
+        assert_eq!(rec.instance_id, 999);
+        assert_eq!(rec.ssh_port, 4242);
+        assert_eq!(rec.label, "modl-pod-test");
+        let back = Pod::from(rec);
+        assert_eq!(back.instance_id, 999);
+        assert_eq!(back.ssh.host, "ssh5.vast.ai");
+        assert_eq!(back.dph_total, 0.19);
     }
 
     #[test]
