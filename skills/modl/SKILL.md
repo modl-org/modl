@@ -83,6 +83,8 @@ modl is a local-first CLI for AI image generation: pull models, generate images,
 4. **Long-running commands need monitoring** — `modl generate`, `modl edit`, `modl train`, and `modl pull` can take seconds to hours. For training, use `modl train status --watch` to monitor.
 5. **File paths are absolute** — modl outputs go to `~/.modl/outputs/` by default. Always return full paths to the user.
 6. **Never delete outputs** — `~/.modl/outputs/` is the user's generation library, not a cache. Never remove files from it.
+7. **Prompt each model its way** — run `modl info <model>` for the canonical prompting guide before writing prompts (prose vs tags, negative-prompt support, text-in-quotes). See Per-Model Prompting below.
+8. **Batch work goes through workflows** — for more than ~2 related generations/edits, write a YAML spec and use `modl run` (with `--dry-run` first to validate) instead of looping individual commands. Use `seeds: [...]` for variations, then `modl status <run-id>` to collect results.
 
 ## Quick Reference
 
@@ -124,12 +126,12 @@ modl is a local-first CLI for AI image generation: pull models, generate images,
 **For high quality finals:**
 - `flux-dev` — 28 steps, excellent quality, most LoRA support.
 - `z-image` — 20 steps, strong on realistic/artistic styles.
-- `chroma` — 40 steps, Apache 2.0 Flux fork, supports negative prompts.
+- `chroma` — 20 steps, Apache 2.0 Flux fork, supports negative prompts.
 - `qwen-image` — 25 steps, best text rendering in images.
 - `ernie-image` — 50 steps, best for complex structured content (posters, infographics, multi-panel, character sheets). Needs long, detailed prompts.
 
 **For editing (instruction-based):**
-- `qwen-image-edit` — Best edit quality, 50 steps, needs 30GB+ VRAM.
+- `qwen-image-edit-2511` — Best edit quality, 40 steps, needs 30GB+ VRAM. The default for `modl edit`.
 - `klein-4b` — Fast edits, 4 steps, fits in 10GB VRAM.
 - `klein-9b` — Better edit quality, 4 steps, needs 16GB VRAM.
 
@@ -156,11 +158,11 @@ modl is a local-first CLI for AI image generation: pull models, generate images,
 | flux2-dev | 28 | 4.0 | 35 GB | Y | | | | Y |
 | klein-4b | 4 | 1.0 | 10 GB | Y | | | Y | Y |
 | klein-9b | 4 | 1.0 | 16 GB | Y | | | Y | Y |
-| chroma | 40 | 5.0 | 16 GB | Y | Y | Y | | Y |
+| chroma | 20 | 4.0 | 16 GB | Y | Y | Y | | Y |
 | z-image | 20 | 4.0 | 14 GB | Y | Y | Y | | Y |
 | z-image-turbo | 8 | 0.0 | 14 GB | Y | Y | Y | | Y |
 | qwen-image | 25 | 3.0 | 30 GB | Y | | | | Y |
-| qwen-image-edit | 50 | 4.0 | 30 GB | | | | Y | |
+| qwen-image-edit-2511 | 40 | 4.0 | 30 GB | | | | Y | |
 | ernie-image | 50 | 4.0 | 14 GB | Y | Y | Y | | |
 | ernie-image-turbo | 8 | 1.0 | 14 GB | Y | Y | Y | | |
 | sdxl | 30 | 7.5 | 5 GB | Y | Y | Y | | Y |
@@ -178,6 +180,22 @@ Default steps and guidance are shown — override with `--steps` and `--guidance
 | `4:3` | 1152x896 |
 | `3:4` | 896x1152 |
 | Custom | `WxH` (e.g. `1920x1080`) |
+
+### Per-Model Prompting
+
+Each model wants a different prompting style. **`modl info <model>` prints the canonical prompting guide** for any model (and `list_models` over MCP includes them) — check it before writing prompts for a model you haven't used in this session. Summary:
+
+| Model | Style | Negative prompts |
+|-------|-------|:----------------:|
+| flux-dev, flux2-dev | Long descriptive prose: subject, setting, lighting, camera, style | no effect |
+| flux-schnell, klein-4b/9b | Short focused prose, subject first (4-step distilled) | no effect |
+| chroma | Descriptive prose + aesthetic keywords | **works — use them** |
+| z-image | Prose with style/lighting detail, EN/ZH | works |
+| z-image-turbo | Short-to-medium prose (guidance 0.0) | no effect |
+| qwen-image, ernie-image | Long structured prompts; quote exact text to render, EN/ZH | works |
+| sdxl, sd-1.5 | Comma-separated tags, key tokens first; SD 1.5 truncates at ~75 tokens | **essential** |
+
+**Editing models (klein-4b/9b, qwen-image-edit-2511):** state the change as one imperative command per edit ("change the background to a white studio"), chain multiple edit steps in a workflow instead of stacking changes in one prompt, and say what to preserve ("keep the bracelet exactly identical: same texture, same pattern, same proportions"). For text edits with qwen-image-edit-2511, quote the exact replacement text.
 
 ### ERNIE Image Prompting Guide
 
@@ -282,7 +300,7 @@ Edit images using natural language instructions. Different from inpainting — n
 modl edit <prompt> --image <PATH> [OPTIONS]
 
   --image <PATH>              Source image (required, repeatable)
-  --base <MODEL>              Edit model (default: qwen-image-edit)
+  --base <MODEL>              Edit model (default: qwen-image-edit-2511)
   --seed <SEED>               Random seed
   --steps <N>                 Inference steps
   --guidance <SCALE>          Guidance scale
@@ -513,58 +531,79 @@ modl import <backup.tar.zst> [--dry-run] [--overwrite]
 Run a multi-step workflow from a YAML spec.
 
 ```
-modl run <SPEC.yaml> [--json]
-modl run a.yaml b.yaml c.yaml      # sequential multi-spec
-
-YAML format:
-  name: "optional-display-name"
-  steps:
-    - id: draft
-      generate:
-        prompt: "..."
-        base: flux-schnell
-        size: "1:1"
-        count: 1
-        seed: 42          # optional
-    - id: refine
-      edit:
-        prompt: "enhance lighting"
-        base: klein-9b
-        image:
-          step_output: draft   # ← reference previous step output
+modl run <SPEC.yaml>                    # execute
+modl run a.yaml b.yaml c.yaml           # sequential multi-spec
+modl run spec.yaml --dry-run            # validate + show plan, no execution
+modl run spec.yaml --dry-run --json     # machine-readable plan
+modl run spec.yaml --skip-existing      # resume — skip already-generated sub-jobs
 ```
 
-JSON output: `{"run_id": "run-20260506-143022", "steps": 2, "status": "queued"}`
+**YAML format** (flat fields — `generate:` takes the prompt directly; `edit:` takes the image ref with a separate `prompt:`):
+
+```yaml
+name: my-workflow
+model: flux2-klein-9b      # workflow-level default (required)
+lora: my-lora              # optional, inherited by all steps
+
+defaults:                  # optional, applied to every step
+  width: 1024
+  height: 1024
+
+# Named image variables — define once, reference anywhere as $name.
+# Values: base64 data URI (works over remote MCP) or server-side path.
+images:
+  product: "/server/refs/product.png"
+  style: "data:image/png;base64,iVBORw0..."
+
+steps:
+  - id: base
+    generate: "a woven gold bracelet on white studio background"
+    seeds: [42, 7, 99]         # one output per seed (variation exploration)
+
+  - id: refine
+    edit: "$base.outputs[0]"   # step-output ref: $step-id.outputs[N]
+    prompt: "warm morning daylight, soft shadows"
+
+  - id: hero
+    edit: "$product"           # image variable ref: $name (no dot)
+    prompt: "place on travertine stone surface"
+    model: qwen-image-edit-2511  # per-step model override (disables workflow lora)
+```
+
+Image refs in `edit:` — three forms: `$step-id.outputs[N]` (prior step output), `$name` (from `images:` map), or a bare server-side path.
+
+Run IDs look like `{timestamp}-{workflow-name}`. Logs: `~/.modl/run-logs/<run-id>.log`.
 
 ### modl status
 
-Check the state of a workflow run.
+Check aggregate state of a workflow run.
 
 ```
-modl status <run_id> [--json] [--watch]
+modl status <run_id> [--json]
+MODL_BASE_URL=http://server:3939 modl status <run_id> --json   # artifact HTTP URLs
 ```
 
-`aggregate` values: `pending`, `running`, `completed`, `partial_failure`, `cancelled`
+Aggregate values: `pending`, `running`, `completed`, `partial_failure`, `cancelled`. `partial_failure` = all steps terminated, at least one errored.
 
-### modl outputs export / ls
+### modl outputs export
 
 ```
-modl outputs export <run_id>           # download as ZIP
-modl outputs ls --run <run_id> --json  # list with URLs
+modl outputs export <run_id> --dest ./out                        # copy local artifacts
+modl outputs export <run_id> --server http://s:3939 --dest ./out # fetch ZIP remotely
 ```
 
 ### MCP Server
 
 modl exposes 15 tools over stdio JSON-RPC 2.0. Activate via `modl mcp` (configured in Claude Code's MCP settings).
 
-**Workflow tools:**
-- `run_workflow` — submit YAML spec, returns `run_id` (fire-and-forget)
-- `job_status` — poll a job or run_id for progress
-- `list_run_outputs` — fetch artifact URLs for a completed run
+**Workflow tools (fire-and-forget pattern):**
+- `run_workflow` — submit YAML spec, returns `run_id` immediately
+- `job_status` — poll aggregate status for a run
+- `list_run_outputs` — fetch artifact paths/URLs for a completed run
 
-Set `MODL_BASE_URL=http://server:3939` so returned URLs are reachable from the client.
+Submit, then poll `job_status` later — the run survives client disconnects. Set `MODL_BASE_URL=http://server:3939` on the server so returned URLs are reachable from the client.
 
-**Image ref limitation (issue #105):** `edit.image.path` must point to a path on the server where modl runs. Over a remote MCP/SSH connection, client-side file paths don't exist on the server. Workaround: use `step_output` refs to chain generate→edit within the same workflow, or pre-copy the source image to the server first.
+**Image refs over remote MCP:** client-side file paths don't exist on the server. Use the workflow `images:` map with base64 data URIs — encode each reference image once (`base64 -i photo.png | tr -d '\n'` on Mac), define it under `images:`, reference it as `$name` in any edit step. `$step-id.outputs[N]` chain refs and pre-copied server paths also work.
 
 ## Common Workflows
 
@@ -635,6 +674,22 @@ modl process compose --background transparent --canvas-size 1024x1024 \
   --layer book.png --position 0.7,0.55 --scale 0.4 --json
 ```
 
+### Fire-and-Forget Batch (workflow)
+
+```bash
+# 1. Write the spec (see modl run YAML format), validate it
+modl run batch.yaml --dry-run
+
+# 2. Execute — returns a run_id; the run is tracked in SQLite
+modl run batch.yaml
+
+# 3. Check later (survives disconnects; resume partial runs with --skip-existing)
+modl status <run-id> --json
+
+# 4. Collect artifacts
+modl outputs export <run-id> --dest ./results
+```
+
 ### Image Analysis
 
 ```bash
@@ -657,7 +712,7 @@ modl vision ground "the red car on the left" photo.jpg --json
 3. User wants text in image? → `qwen-image` (25 steps)
 4. User wants negative prompts? → `chroma` (40 steps)
 5. User has < 12GB VRAM? → `sdxl` (5 GB) or `sd-1.5` (3 GB)
-6. User wants to edit an existing image? → `modl edit` with `klein-4b` or `qwen-image-edit`
+6. User wants to edit an existing image? → `modl edit` with `klein-9b` (fast) or `qwen-image-edit-2511` (best)
 7. User wants to inpaint a specific region? → `modl generate --mask` with `flux-fill-dev`
 
 ### "Train a LoRA" — which settings?

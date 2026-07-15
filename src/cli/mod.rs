@@ -696,7 +696,7 @@ pub enum Commands {
         /// LoRA strength/weight (0.0 = no effect, 1.0 = full strength)
         #[arg(long, default_value = "1.0")]
         lora_strength: f32,
-        /// Base model to use (default: qwen-image-edit)
+        /// Base model to use (default: qwen-image-edit-2511)
         #[arg(long)]
         base: Option<String>,
         /// Random seed for reproducibility
