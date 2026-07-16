@@ -50,8 +50,6 @@ async fn run_on_pod(args: &EditArgs<'_>) -> Result<()> {
     }
     for (flag, set) in [
         ("--mask", args.mask.is_some()),
-        ("--lora", args.lora.is_some()),
-        ("--fast", args.fast.is_some()),
         ("--blend", args.blend != BlendMode::Pixel),
         ("--cloud", args.cloud),
         ("--attach-gpu", args.attach_gpu),
@@ -59,6 +57,17 @@ async fn run_on_pod(args: &EditArgs<'_>) -> Result<()> {
         if set {
             anyhow::bail!("{flag} isn't supported with --pod yet — run locally or drop the flag.");
         }
+    }
+    if args.fast.is_some() && args.lora.is_some() {
+        anyhow::bail!(
+            "Cannot use --lora and --fast together. --fast applies a Lightning LoRA which conflicts with a user LoRA."
+        );
+    }
+    // Workflow `lora:` refs carry no weight — the pod applies full strength.
+    if args.lora.is_some() && args.lora_strength != 1.0 {
+        anyhow::bail!(
+            "--lora-strength isn't supported with --pod yet — LoRAs run at full strength there."
+        );
     }
     let model = args.base.unwrap_or("qwen-image-edit-2511");
     let local_image = resolve_image_input(&args.images[0]).await?;
@@ -88,6 +97,8 @@ async fn run_on_pod(args: &EditArgs<'_>) -> Result<()> {
         model,
         args.prompt,
         std::path::Path::new(&local_image),
+        args.lora,
+        args.fast,
         width,
         height,
         args.steps,
@@ -266,20 +277,7 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
             )
         })?;
 
-        let sched_overrides: std::collections::HashMap<String, serde_json::Value> = lightning
-            .scheduler_overrides
-            .iter()
-            .map(|(k, v)| {
-                let val = if *v == "null" {
-                    serde_json::Value::Null
-                } else if let Ok(f) = v.parse::<f64>() {
-                    serde_json::json!(f)
-                } else {
-                    serde_json::Value::String(v.to_string())
-                };
-                (k.to_string(), val)
-            })
-            .collect();
+        let sched_overrides = lightning.scheduler_overrides_json();
 
         (
             lora_ref,

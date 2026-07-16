@@ -112,7 +112,7 @@ pub fn collect_lora(
 
 /// Create symlinks for a LoRA file in common tool directories.
 /// Currently symlinks into any configured ComfyUI lora dirs.
-fn create_lora_symlinks(
+pub(crate) fn create_lora_symlinks(
     store_path: &Path,
     lora_name: &str,
     file_name: &str,

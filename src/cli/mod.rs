@@ -31,6 +31,7 @@ mod pod;
 mod popular;
 mod preprocess;
 mod push;
+mod register;
 mod remove_bg;
 mod run;
 mod run_status;
@@ -983,6 +984,29 @@ pub enum Commands {
         owner: Option<String>,
     },
 
+    /// Register a local model file into the store (content-addressed copy + DB + shared index)
+    ///
+    /// Makes a file that arrived outside `modl pull` referenceable by name:
+    /// `modl register my-lora.safetensors --name my-lora`, then use
+    /// `--lora my-lora` or `lora: my-lora` in workflows. Also used
+    /// internally when pushing LoRAs to pods.
+    Register {
+        /// Path to the model file (e.g. a LoRA .safetensors)
+        path: String,
+        /// Name to register under (what --lora / workflow `lora:` will reference)
+        #[arg(long)]
+        name: String,
+        /// Stable id (defaults to local/<type>/<name>)
+        #[arg(long)]
+        id: Option<String>,
+        /// Asset type
+        #[arg(long = "type", value_enum, default_value = "lora")]
+        asset_type: AssetType,
+        /// Expected SHA256 — registration fails if the file doesn't match
+        #[arg(long)]
+        sha256: Option<String>,
+    },
+
     /// List installed models
     Ls {
         /// Filter by asset type (checkpoint, lora, vae, text_encoder, etc.)
@@ -1549,6 +1573,13 @@ pub async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
+        Commands::Register {
+            path,
+            name,
+            id,
+            asset_type,
+            sha256,
+        } => register::run(&path, &name, id.as_deref(), &asset_type, sha256.as_deref()),
         Commands::Ls {
             r#type,
             summary,
