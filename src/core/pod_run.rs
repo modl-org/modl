@@ -34,8 +34,8 @@ use crate::core::pod::{
 /// Where the modl install lives on the pod (binary + `python/modl_worker`,
 /// same layout as the release tarball so the worker resolves next to the
 /// binary).
-const REMOTE_MODL_DIR: &str = "/root/modl-bin";
-const REMOTE_MODL: &str = "/root/modl-bin/modl";
+pub(crate) const REMOTE_MODL_DIR: &str = "/root/modl-bin";
+pub(crate) const REMOTE_MODL: &str = "/root/modl-bin/modl";
 /// How often to ask the pod's DB for the run status.
 const STATUS_POLL_SECS: u64 = 15;
 /// Consecutive failed status polls tolerated before giving up (flaky links

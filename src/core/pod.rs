@@ -26,14 +26,18 @@ use crate::core::db::Database;
 use crate::core::executor::parse_worker_event;
 use crate::core::job::{EventPayload, TrainJobSpec};
 use crate::core::pod_state::{self, PodRecord};
-use crate::core::runtime::{
-    AITOOLKIT_PIN_SHA, AITOOLKIT_REPO_URL, TRAINER_TORCH_VERSION, TRAINER_TORCHAUDIO_VERSION,
-    TRAINER_TORCHVISION_VERSION,
-};
 use crate::core::training::resolve_worker_python_root;
 use crate::core::vast;
 
 pub(crate) const REMOTE_ROOT: &str = "/root/modl-pod";
+/// Pods are always CUDA, and the trainer profile is a superset that
+/// `setup_generation()` reuses — so a pod carries exactly one PyTorch
+/// environment for both training and generation.
+const POD_RUNTIME_PROFILE: &str = "trainer-cu124";
+/// Managed-runtime paths on the pod (root user, default modl_root). These
+/// mirror `runtime_root()/envs/<profile>` and `runtime_root()/ai-toolkit`.
+const POD_RUNTIME_PY: &str = "/root/.modl/runtime/envs/trainer-cu124/bin/python";
+const POD_AITOOLKIT: &str = "/root/.modl/runtime/ai-toolkit";
 /// Default disk for one-shot train pods. `pod up` raises this (persistent
 /// pods accumulate an HF cache across jobs — that's the point).
 pub const POD_DISK_GB: f64 = 80.0;
@@ -326,11 +330,13 @@ pub async fn provision(opts: &PodOptions, min_vram_gb: Option<u32>) -> Result<Po
 // Stage 2 — bootstrap (rsync worker + ai-toolkit/deps, fingerprinted)
 // ===========================================================================
 
-/// Ship `modl_worker` and ensure the ai-toolkit + Python deps are installed.
+/// Ship `modl_worker`, install modl, and ensure the managed runtime.
 ///
-/// Idempotent + fingerprinted: the worker is always re-rsynced (cheap, picks
-/// up local edits), but the expensive venv/deps step is skipped when the
-/// remote `.bootstrap-fingerprint` marker matches the current script hash.
+/// The pod runs the same managed runtime as a local install — modl's trainer
+/// profile (torch + diffusers + ai-toolkit at the pinned SHA). Previously the
+/// pod built a second, duplicate PyTorch venv via a bespoke bootstrap script;
+/// now `modl runtime install` owns the environment and its own idempotency,
+/// so both training and generation share one env.
 pub fn bootstrap(pod: &Pod) -> Result<()> {
     let ssh = &pod.ssh;
 
@@ -344,50 +350,30 @@ pub fn bootstrap(pod: &Pod) -> Result<()> {
         &format!("{REMOTE_ROOT}/worker/"),
     )?;
 
-    // Fingerprint fast-path: same bootstrap script as last time ⇒ deps are
-    // already in place, skip the multi-minute install.
-    let want = bootstrap_fingerprint();
-    let have = run_ssh_capture(
-        ssh,
-        &format!("cat {REMOTE_ROOT}/.bootstrap-fingerprint 2>/dev/null"),
-    )
-    .unwrap_or_default();
-    if have.trim() == want {
-        println!(
-            "{} Pod already bootstrapped (fingerprint match) — reusing venv + ai-toolkit.",
-            style("✓").green()
-        );
-        let _ = pod_state::set_fingerprint(pod.instance_id, &want);
-        return Ok(());
-    }
+    crate::core::pod_run::ensure_modl(pod)?;
 
     println!(
-        "{} Bootstrapping pod (ai-toolkit @ {} + deps, a few minutes)...",
-        style("→").cyan(),
-        &AITOOLKIT_PIN_SHA[..8]
+        "{} Ensuring managed runtime ({POD_RUNTIME_PROFILE}) on pod...",
+        style("→").cyan()
     );
-    run_ssh_streaming(ssh, &bootstrap_script())?;
-
-    // Record the fingerprint so the next bootstrap can fast-path.
-    run_ssh_quiet(
+    run_ssh_streaming(
         ssh,
         &format!(
-            "printf %s {} > {REMOTE_ROOT}/.bootstrap-fingerprint",
-            shell_quote(&want)
+            "{} runtime install --profile {POD_RUNTIME_PROFILE}",
+            crate::core::pod_run::REMOTE_MODL
         ),
-    )?;
-    let _ = pod_state::set_fingerprint(pod.instance_id, &want);
+    )
+    .context("`modl runtime install` failed on the pod")?;
+
+    let _ = pod_state::set_fingerprint(pod.instance_id, &bootstrap_fingerprint());
     Ok(())
 }
 
-/// sha256 of [`bootstrap_script`]. Since the script embeds the ai-toolkit SHA
-/// and torch/diffusers pins, this changes whenever any dependency pin changes,
-/// forcing an automatic re-bootstrap.
+/// Marker recorded on the pod record after a successful bootstrap. The
+/// runtime install owns real idempotency; this only says which modl version
+/// and profile last set the pod up.
 pub fn bootstrap_fingerprint() -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(bootstrap_script().as_bytes());
-    format!("{:x}", hasher.finalize())
+    format!("modl-{}:{}", env!("CARGO_PKG_VERSION"), POD_RUNTIME_PROFILE)
 }
 
 // ===========================================================================
@@ -483,10 +469,11 @@ pub fn run_train_job(pod: &Pod, spec: &TrainJobSpec) -> Result<()> {
         None => String::new(),
     };
     let launch = format!(
-        "cd {REMOTE_ROOT} && rm -f events.jsonl && \
+        "test -x {POD_RUNTIME_PY} || {{ echo 'managed runtime missing — rerun modl pod up' >&2; exit 9; }}; \
+         cd {REMOTE_ROOT} && rm -f events.jsonl && \
          {token_prefix}HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 \
-         PYTHONPATH={REMOTE_ROOT}/worker MODL_AITOOLKIT_ROOT={REMOTE_ROOT}/ai-toolkit \
-         nohup {REMOTE_ROOT}/venv/bin/python -m modl_worker.main train --config {REMOTE_ROOT}/spec.yaml --job-id {job_id} \
+         PYTHONPATH={REMOTE_ROOT}/worker MODL_AITOOLKIT_ROOT={POD_AITOOLKIT} \
+         nohup {POD_RUNTIME_PY} -m modl_worker.main train --config {REMOTE_ROOT}/spec.yaml --job-id {job_id} \
          >> {REMOTE_ROOT}/events.jsonl 2>> {REMOTE_ROOT}/stderr.log & \
          echo $! > {REMOTE_ROOT}/worker.pid; echo launched"
     );
@@ -715,39 +702,6 @@ fn build_remote_spec(spec: &TrainJobSpec) -> TrainJobSpec {
     remote.dataset.path = format!("{REMOTE_ROOT}/dataset");
     remote.output.destination_dir = format!("{REMOTE_ROOT}/output");
     remote
-}
-
-fn bootstrap_script() -> String {
-    format!(
-        r#"set -e
-export DEBIAN_FRONTEND=noninteractive
-unset HF_HUB_OFFLINE TRANSFORMERS_OFFLINE
-mkdir -p {REMOTE_ROOT}
-if [ ! -d {REMOTE_ROOT}/ai-toolkit/.git ]; then
-  echo "[pod] cloning ai-toolkit..."
-  git clone --quiet {AITOOLKIT_REPO_URL} {REMOTE_ROOT}/ai-toolkit
-fi
-cd {REMOTE_ROOT}/ai-toolkit
-git fetch --quiet origin {AITOOLKIT_PIN_SHA} || git fetch --quiet origin
-git checkout --quiet {AITOOLKIT_PIN_SHA}
-echo "[pod] installing uv (image python/pip vary too much to trust)..."
-python3 -m pip install --quiet uv 2>/dev/null || pip install --quiet uv
-echo "[pod] creating managed python 3.11 venv (host-independent, like the local runtime)..."
-python3 -m uv venv --quiet --python 3.11 {REMOTE_ROOT}/venv
-echo "[pod] installing torch {TRAINER_TORCH_VERSION} + ai-toolkit + worker deps (uv, parallel)..."
-# ai-toolkit pins diffusers to a git commit that predates what the worker
-# needs — strip its diffusers pin (throwaway clone, edit in place so the
-# `-r requirements_base.txt` include keeps working) and pin ours instead.
-sed -i -E '/^(diffusers|git\+.*diffusers)/d' requirements*.txt
-python3 -m uv pip install --quiet --python {REMOTE_ROOT}/venv/bin/python \
-  "torch=={TRAINER_TORCH_VERSION}" "torchvision=={TRAINER_TORCHVISION_VERSION}" \
-  "torchaudio=={TRAINER_TORCHAUDIO_VERSION}" \
-  -r requirements.txt \
-  "diffusers>=0.38.0" "transformers>=4.51" accelerate "safetensors>=0.5" \
-  pillow "gguf>=0.10.0" pyyaml
-echo "[pod] bootstrap complete"
-"#
-    )
 }
 
 enum TrainOutcome {
@@ -1246,25 +1200,20 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_script_pins_ai_toolkit() {
-        let script = bootstrap_script();
-        assert!(script.contains(AITOOLKIT_PIN_SHA));
-        assert!(script.contains("requirements.txt"));
-        assert!(script.contains("unset HF_HUB_OFFLINE"));
-        assert!(script.contains("uv venv --quiet --python 3.11"));
-        assert!(script.contains(TRAINER_TORCH_VERSION));
+    fn fingerprint_tracks_version_and_profile() {
+        let fp = bootstrap_fingerprint();
+        assert!(fp.contains(env!("CARGO_PKG_VERSION")));
+        assert!(fp.contains(POD_RUNTIME_PROFILE));
+        assert_eq!(fp, bootstrap_fingerprint());
     }
 
     #[test]
-    fn fingerprint_is_a_hash_not_the_script() {
-        let fp = bootstrap_fingerprint();
-        // 64 hex chars, and contains none of the raw script text.
-        assert_eq!(fp.len(), 64);
-        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
-        assert!(!fp.contains(AITOOLKIT_PIN_SHA));
-        assert!(!fp.contains("torch"));
-        // Deterministic for the same script.
-        assert_eq!(fp, bootstrap_fingerprint());
+    fn runtime_paths_agree_with_profile() {
+        // The launch command hardcodes the pod-side runtime layout; keep the
+        // pieces consistent with each other.
+        assert!(POD_RUNTIME_PY.contains(POD_RUNTIME_PROFILE));
+        assert!(POD_RUNTIME_PY.starts_with("/root/.modl/runtime/envs/"));
+        assert!(POD_AITOOLKIT.starts_with("/root/.modl/runtime/"));
     }
 
     #[test]
