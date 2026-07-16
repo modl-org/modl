@@ -444,15 +444,19 @@ fn tool_definitions() -> Value {
                 "properties": {
                     "gpu": {
                         "type": "string",
-                        "description": "GPU type (e.g. rtx3090, rtx4090, a100-80gb, h100) or 'auto' for best value with >=24GB VRAM"
+                        "description": "'auto' (recommended — best all-in value across GPU models with >=24GB VRAM, tune with min_vram) or a specific type (rtx3090, rtx4090, a100-80gb, h100)"
                     },
                     "max_price": {
                         "type": "number",
-                        "description": "Max hourly price in USD (default 3.0)"
+                        "description": "Max hourly GPU price in USD (default 3.0). Storage is quoted and capped separately (all-in = gpu + storage)."
                     },
                     "min_vram": {
                         "type": "integer",
                         "description": "Minimum VRAM in GB (default 24 for 'auto')"
+                    },
+                    "disk": {
+                        "type": "number",
+                        "description": "Disk to provision in GB (default 120 — fits the runtime env plus several fp8 models; storage bills hourly on the full amount, so go leaner for single-model sessions)"
                     },
                     "models": {
                         "type": "array",
@@ -1331,6 +1335,9 @@ fn tool_pod_up(args: &Value) -> Result<Value, (i32, String)> {
     }
     if let Some(v) = args.get("min_vram").and_then(|v| v.as_u64()) {
         cmd_args.extend(["--min-vram".into(), v.to_string()]);
+    }
+    if let Some(v) = args.get("disk").and_then(|v| v.as_f64()) {
+        cmd_args.extend(["--disk".into(), v.to_string()]);
     }
     for m in args
         .get("models")

@@ -160,9 +160,15 @@ pub async fn search_offers(
         // below it pass search, then fail at create_instance, burning a
         // failover attempt.
         "disk_space": {"gte": 80},
-        "reliability2": {"gte": 0.99},
+        "reliability2": {"gte": 0.98},
         "direct_port_count": {"gte": 1},
         "cuda_max_good": {"gte": 12.9},
+        // Storage bills on the provisioned disk from the moment of rent and
+        // is set per host — observed $0.13-$0.87/GB/month on a single search
+        // page. Above ~$0.50 it rivals the GPU rate on cheap cards; those
+        // hosts are never worth it (all-in ranking already penalizes them,
+        // this keeps them out of the fallback pool entirely).
+        "storage_cost": {"lte": 0.50},
         // Docker Hub is unreachable/throttled from mainland China — pulling
         // the pod image stalls indefinitely, so CN hosts fail every boot
         // despite passing every other filter (verified, 99%+ reliability).
