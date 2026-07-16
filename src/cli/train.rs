@@ -55,6 +55,7 @@ impl PodArgs {
             yes: self.yes,
             keep_pod: self.keep_pod,
             label,
+            confirm_rent: Some(super::pod::dialoguer_confirm()),
         }
     }
 }

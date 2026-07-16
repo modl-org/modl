@@ -10,11 +10,14 @@ use serde_json::json;
 
 const API_BASE: &str = "https://console.vast.ai/api/v0";
 
-/// Docker image for rented pods. Vast's minimal base image on a PINNED tag:
-/// the bootstrap builds its own python/torch venv, so the fat pytorch image
-/// buys nothing — and a stable digest means host docker caches actually hit
-/// (`:latest` churns and forces multi-GB re-pulls fleet-wide).
-pub const POD_IMAGE: &str = "vastai/base-image:cuda-12.9.2-auto";
+/// Docker image for rented pods. Vast's own default PyTorch template: hosts
+/// pre-cache whatever the console default pulls, so it boots in ~1 minute
+/// fleet-wide, while a pinned niche tag pulls 7.6GB cold (measured live
+/// 2026-07-16: an afternoon of 10-25+ min boots and abandoned rents; the
+/// modl-cloud orchestrator learned the same lesson and carries the same
+/// comment). The bootstrap builds its own python/torch venv either way, so
+/// the image only needs to exist quickly — `:latest` churn is irrelevant.
+pub const POD_IMAGE: &str = "vastai/pytorch:latest";
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // full marketplace row — some fields are display-only for now
@@ -32,6 +35,17 @@ pub struct Offer {
     pub inet_up: f64,
     pub reliability: f64,
     pub dlperf: f64,
+    /// Host's storage price in $/GB/month — billed on the provisioned disk
+    /// even while the instance is loading/stopped, and it varies several-fold
+    /// between hosts, so quotes that omit it mislead.
+    pub storage_cost: f64,
+}
+
+impl Offer {
+    /// Hourly storage cost for `disk_gb` of provisioned disk on this host.
+    pub fn storage_dph(&self, disk_gb: f64) -> f64 {
+        self.storage_cost * disk_gb / (30.0 * 24.0)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -111,21 +125,43 @@ async fn check(resp: reqwest::Response, what: &str) -> Result<serde_json::Value>
 
 /// Compute per-dollar value of an offer: AI throughput (dlperf) per $/hr.
 /// This is the ranking metric — a slightly slower host at half the price wins.
-pub fn offer_value(offer: &Offer) -> f64 {
-    if offer.dph_total <= 0.0 {
+/// Transfer a fresh pod performs before it earns anything: docker image
+/// (7.6GB) + managed runtime (~5GB of torch wheels) + one fp8 model
+/// (~15GB). All of it downloads at full GPU-hour billing.
+const STARTUP_TRANSFER_GB: f64 = 30.0;
+/// Horizon the startup transfer is amortized over when ranking offers —
+/// roughly a typical interactive pod session.
+const VALUE_SESSION_HOURS: f64 = 2.0;
+
+/// Perf per all-in dollar: GPU rate plus storage for the disk we'll actually
+/// provision, plus a tax for the GPU-time a slow link burns on the startup
+/// downloads. Storage varies several-fold between hosts (measured $0.13 to
+/// $0.87/GB/month on one search page) — at 3090 price points it can exceed
+/// the GPU rate. Likewise a cheap host on a slow link spends its discount
+/// on billed dead minutes: 30GB at 500 Mbps is 8 min (~7% of a session), at
+/// 100 Mbps it's 40 min (~33%). `inet_down` is the host's self-rated speed
+/// — real CDN throughput is often lower (hard floors in the search query
+/// still apply) — so this is a prior, not a guarantee.
+pub fn offer_value(offer: &Offer, disk_gb: f64) -> f64 {
+    let all_in = offer.dph_total + offer.storage_dph(disk_gb);
+    if all_in <= 0.0 {
         return 0.0;
     }
-    offer.dlperf / offer.dph_total
+    let pull_hours = STARTUP_TRANSFER_GB * 8000.0 / offer.inet_down.max(1.0) / 3600.0;
+    let pull_tax = all_in * (pull_hours / VALUE_SESSION_HOURS);
+    offer.dlperf / (all_in + pull_tax)
 }
 
 /// Search the marketplace for rentable offers matching a GPU type.
 ///
 /// `min_vram_gb` is a hard filter (job won't fit below it). Results are
-/// sorted by value (dlperf per dollar) — not raw speed, not raw price.
+/// sorted by all-in value (dlperf per dollar including storage for
+/// `disk_gb`) — not raw speed, not raw price.
 pub async fn search_offers(
     gpu_type: &str,
     max_price_per_hour: f64,
     min_vram_gb: Option<u32>,
+    disk_gb: f64,
 ) -> Result<Vec<Offer>> {
     let (client, key) = client()?;
 
@@ -136,8 +172,12 @@ pub async fn search_offers(
         "rentable": {"eq": true},
         "num_gpus": {"eq": 1},
         "dph_total": {"lte": max_price_per_hour},
-        "inet_down": {"gte": 500},
-        "inet_up": {"gte": 200},
+        // Fast links cut billed dead time on every transfer (image, runtime,
+        // model pulls, artifact sync). modl-cloud runs 2000 down in prod;
+        // pods keep a slightly wider pool and let the value ranking's
+        // link-speed tax sort within it.
+        "inet_down": {"gte": 1000},
+        "inet_up": {"gte": 300},
         // Must cover the POD_DISK_GB (80) requested at rent time — hosts
         // below it pass search, then fail at create_instance, burning a
         // failover attempt.
@@ -145,6 +185,17 @@ pub async fn search_offers(
         "reliability2": {"gte": 0.98},
         "direct_port_count": {"gte": 1},
         "cuda_max_good": {"gte": 12.9},
+        // Storage bills on the provisioned disk from the moment of rent and
+        // is set per host — observed $0.13-$0.87/GB/month on a single search
+        // page. Above ~$0.50 it rivals the GPU rate on cheap cards; those
+        // hosts are never worth it (all-in ranking already penalizes them,
+        // this keeps them out of the fallback pool entirely).
+        "storage_cost": {"lte": 0.50},
+        // Docker Hub is unreachable/throttled from mainland China — pulling
+        // the pod image stalls indefinitely, so CN hosts fail every boot
+        // despite passing every other filter (verified, 99%+ reliability).
+        // Measured live 2026-07-16: 4 consecutive CN duds, ~8 min each.
+        "geolocation": {"notin": ["CN"]},
         "order": [["dlperf", "desc"]],
         "limit": 40,
     });
@@ -166,8 +217,8 @@ pub async fn search_offers(
 
     let mut offers = parse_offers(&data);
     offers.sort_by(|a, b| {
-        offer_value(b)
-            .partial_cmp(&offer_value(a))
+        offer_value(b, disk_gb)
+            .partial_cmp(&offer_value(a, disk_gb))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     Ok(offers)
@@ -196,6 +247,10 @@ fn parse_offers(data: &serde_json::Value) -> Vec<Offer> {
                     .and_then(|v| v.as_f64())
                     .unwrap_or(0.0),
                 dlperf: o.get("dlperf").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                storage_cost: o
+                    .get("storage_cost")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0),
             })
         })
         .collect()
@@ -370,6 +425,45 @@ mod tests {
         let inst = parse_instance(&sparse, 777).unwrap();
         assert_eq!(inst.id, 777);
         assert!(inst.ssh_host.is_none());
+    }
+
+    fn offer_with(dph: f64, storage: f64, inet_down: f64, dlperf: f64) -> Offer {
+        Offer {
+            id: 1,
+            machine_id: 0,
+            gpu_name: "RTX 3090".into(),
+            num_gpus: 1,
+            gpu_ram_mb: 24576,
+            disk_gb: 200.0,
+            dph_total: dph,
+            inet_down,
+            inet_up: 500.0,
+            reliability: 0.99,
+            dlperf,
+            storage_cost: storage,
+        }
+    }
+
+    #[test]
+    fn value_penalizes_expensive_storage() {
+        // Same GPU price and perf; $0.87/GB/mo storage vs $0.20 — the cheap
+        // storage host must win once the provisioned disk is priced in.
+        let gouger = offer_with(0.12, 0.87, 1000.0, 44.0);
+        let fair = offer_with(0.12, 0.20, 1000.0, 44.0);
+        assert!(offer_value(&fair, 120.0) > offer_value(&gouger, 120.0));
+    }
+
+    #[test]
+    fn value_penalizes_slow_links() {
+        // Identical all-in pricing; 100 Mbps burns ~40 GPU-billed minutes on
+        // startup downloads vs ~2 min at 2 Gbps.
+        let slow = offer_with(0.12, 0.20, 100.0, 44.0);
+        let fast = offer_with(0.12, 0.20, 2000.0, 44.0);
+        assert!(offer_value(&fast, 120.0) > offer_value(&slow, 120.0));
+        // ...but a slightly slower link must not outweigh a big price gap.
+        let fast_pricey = offer_with(0.40, 0.20, 2000.0, 44.0);
+        let modest_cheap = offer_with(0.12, 0.20, 800.0, 44.0);
+        assert!(offer_value(&modest_cheap, 120.0) > offer_value(&fast_pricey, 120.0));
     }
 
     #[test]

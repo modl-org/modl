@@ -1,9 +1,12 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use console::style;
 
 use crate::core::db::Database;
 
-pub async fn run(run_id: &str, json: bool) -> Result<()> {
+pub async fn run(run_id: &str, json: bool, pod: bool) -> Result<()> {
+    if pod {
+        return run_on_pod(run_id, json).await;
+    }
     let db = Database::open()?;
 
     let jobs = db.list_jobs_by_run_id(run_id)?;
@@ -137,5 +140,57 @@ pub async fn run(run_id: &str, json: bool) -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+/// `modl status <run-id> --pod` — proxy the active pod's own status. A pod
+/// run's step-jobs live in the pod's DB; locally it only becomes visible
+/// once its artifacts are pulled home. The JSON is the pod's status payload
+/// verbatim plus `"target": "pod"` (artifact paths in it are pod-side).
+async fn run_on_pod(run_id: &str, json: bool) -> Result<()> {
+    let rec = crate::core::pod_state::active_pod()
+        .await?
+        .context("No active pod — pod run state dies with the pod (modl pod ls).")?;
+    let pod = crate::core::pod::Pod::from(rec.clone());
+
+    let mut v = crate::core::pod_run::run_status_json(&pod, run_id)?;
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("target".into(), serde_json::json!("pod"));
+        obj.insert("instance_id".into(), serde_json::json!(rec.instance_id));
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+
+    let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("?");
+    let steps = v.get("steps").cloned().unwrap_or_default();
+    println!("{}", style("Workflow run status (on pod)").bold().cyan());
+    println!();
+    println!("  {}  {}", style("Run ID:").dim(), run_id);
+    println!(
+        "  {}  {} (pod {})",
+        style("Status:").dim(),
+        status,
+        rec.instance_id
+    );
+    println!(
+        "  {}  {}/{} steps complete{}",
+        style("Steps:").dim(),
+        steps.get("completed").and_then(|x| x.as_u64()).unwrap_or(0),
+        steps.get("total").and_then(|x| x.as_u64()).unwrap_or(0),
+        match steps.get("failed").and_then(|x| x.as_u64()).unwrap_or(0) {
+            0 => String::new(),
+            n => format!(", {n} failed"),
+        }
+    );
+    if status == "completed" || status == "partial_failure" {
+        println!();
+        println!(
+            "  {} Bring artifacts home: {}",
+            style("ℹ").dim(),
+            style(format!("modl pod pull {run_id}")).cyan()
+        );
+    }
     Ok(())
 }
