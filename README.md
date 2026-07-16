@@ -112,6 +112,24 @@ modl pod rm <id>     # destroy a straggler
 
 Train 19B-class models (Flux 2 Dev, Qwen Image) on an A100/H100 for well under a dollar an hour — the trained LoRA lands in your local library like any local run.
 
+### Generate on a pod too — your whole rig, rented by the hour
+
+A persistent pod gets its own modl install and behaves like a remote copy of your machine: models are pulled into the pod's store (variant auto-selected for *its* GPU), workflows run entirely on the pod, and the images sync back when the run finishes.
+
+```bash
+modl pod up rtx4090 --model flux-schnell     # rent + set up + warm the store (~$0.35/hr)
+
+modl generate "a red apple on a rustic wooden table" --base flux-schnell --pod
+modl edit --image photo.png "make it golden" --pod
+modl run workflow.yaml --pod                 # multi-step workflows, chained on the pod
+
+modl pod rm <id>                             # destroy when done — pods bill until destroyed
+```
+
+Runs are fire-and-forget on the pod: close the laptop mid-generation and the job finishes anyway — artifacts land in `./pod-outputs/<run-id>/` the next time the command reconnects. `modl run workflow.yaml --pod --dry-run` validates a workflow's pod-compatibility without renting anything.
+
+Not yet supported on pods: LoRAs, controlnet/style-ref, inpainting masks.
+
 ---
 
 ## Supported Models
