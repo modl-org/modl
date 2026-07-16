@@ -122,16 +122,31 @@ async fn check(resp: reqwest::Response, what: &str) -> Result<serde_json::Value>
 
 /// Compute per-dollar value of an offer: AI throughput (dlperf) per $/hr.
 /// This is the ranking metric — a slightly slower host at half the price wins.
+/// Transfer a fresh pod performs before it earns anything: docker image
+/// (7.6GB) + managed runtime (~5GB of torch wheels) + one fp8 model
+/// (~15GB). All of it downloads at full GPU-hour billing.
+const STARTUP_TRANSFER_GB: f64 = 30.0;
+/// Horizon the startup transfer is amortized over when ranking offers —
+/// roughly a typical interactive pod session.
+const VALUE_SESSION_HOURS: f64 = 2.0;
+
 /// Perf per all-in dollar: GPU rate plus storage for the disk we'll actually
-/// provision. Storage varies several-fold between hosts (measured $0.13 to
+/// provision, plus a tax for the GPU-time a slow link burns on the startup
+/// downloads. Storage varies several-fold between hosts (measured $0.13 to
 /// $0.87/GB/month on one search page) — at 3090 price points it can exceed
-/// the GPU rate, so ranking on the GPU line alone picks expensive hosts.
+/// the GPU rate. Likewise a cheap host on a slow link spends its discount
+/// on billed dead minutes: 30GB at 500 Mbps is 8 min (~7% of a session), at
+/// 100 Mbps it's 40 min (~33%). `inet_down` is the host's self-rated speed
+/// — real CDN throughput is often lower (hard floors in the search query
+/// still apply) — so this is a prior, not a guarantee.
 pub fn offer_value(offer: &Offer, disk_gb: f64) -> f64 {
     let all_in = offer.dph_total + offer.storage_dph(disk_gb);
     if all_in <= 0.0 {
         return 0.0;
     }
-    offer.dlperf / all_in
+    let pull_hours = STARTUP_TRANSFER_GB * 8000.0 / offer.inet_down.max(1.0) / 3600.0;
+    let pull_tax = all_in * (pull_hours / VALUE_SESSION_HOURS);
+    offer.dlperf / (all_in + pull_tax)
 }
 
 /// Search the marketplace for rentable offers matching a GPU type.
@@ -403,6 +418,45 @@ mod tests {
         let inst = parse_instance(&sparse, 777).unwrap();
         assert_eq!(inst.id, 777);
         assert!(inst.ssh_host.is_none());
+    }
+
+    fn offer_with(dph: f64, storage: f64, inet_down: f64, dlperf: f64) -> Offer {
+        Offer {
+            id: 1,
+            machine_id: 0,
+            gpu_name: "RTX 3090".into(),
+            num_gpus: 1,
+            gpu_ram_mb: 24576,
+            disk_gb: 200.0,
+            dph_total: dph,
+            inet_down,
+            inet_up: 500.0,
+            reliability: 0.99,
+            dlperf,
+            storage_cost: storage,
+        }
+    }
+
+    #[test]
+    fn value_penalizes_expensive_storage() {
+        // Same GPU price and perf; $0.87/GB/mo storage vs $0.20 — the cheap
+        // storage host must win once the provisioned disk is priced in.
+        let gouger = offer_with(0.12, 0.87, 1000.0, 44.0);
+        let fair = offer_with(0.12, 0.20, 1000.0, 44.0);
+        assert!(offer_value(&fair, 120.0) > offer_value(&gouger, 120.0));
+    }
+
+    #[test]
+    fn value_penalizes_slow_links() {
+        // Identical all-in pricing; 100 Mbps burns ~40 GPU-billed minutes on
+        // startup downloads vs ~2 min at 2 Gbps.
+        let slow = offer_with(0.12, 0.20, 100.0, 44.0);
+        let fast = offer_with(0.12, 0.20, 2000.0, 44.0);
+        assert!(offer_value(&fast, 120.0) > offer_value(&slow, 120.0));
+        // ...but a slightly slower link must not outweigh a big price gap.
+        let fast_pricey = offer_with(0.40, 0.20, 2000.0, 44.0);
+        let modest_cheap = offer_with(0.12, 0.20, 800.0, 44.0);
+        assert!(offer_value(&modest_cheap, 120.0) > offer_value(&fast_pricey, 120.0));
     }
 
     #[test]
