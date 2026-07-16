@@ -384,13 +384,17 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "run_workflow",
-            "description": "Submit a batch workflow YAML to modl run. Returns immediately with a run_id — the job continues in the background. Use job_status to poll for completion. Useful for fire-and-forget batch runs: submit from laptop, close lid, check back later.",
+            "description": "Submit a batch workflow YAML to modl run. Returns immediately with a run_id — the job continues in the background. Use job_status to poll for completion. Useful for fire-and-forget batch runs: submit from laptop, close lid, check back later. With pod: true the workflow executes on the active rented GPU pod (pod_up first) — model pulls and step chaining happen pod-side, artifacts sync home automatically when the run finishes.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "spec_yaml": {
                         "type": "string",
-                        "description": "Full YAML content of the workflow spec (the contents of a .yaml file)"
+                        "description": "Full YAML content of the workflow spec (the contents of a .yaml file). For pod runs, reference images must be base64 data URIs in the images: map (local file paths don't exist on the pod)."
+                    },
+                    "pod": {
+                        "type": "boolean",
+                        "description": "Run on the active BYO pod instead of this machine. Requires an active pod (pod_up). Poll with job_status(pod: true)."
                     }
                 },
                 "required": ["spec_yaml"]
@@ -398,13 +402,17 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "job_status",
-            "description": "Check the status of a workflow run submitted via run_workflow. Returns aggregate status (pending/running/completed/partial_failure) and artifact URLs. Set MODL_BASE_URL env var on the server for HTTP URLs.",
+            "description": "Check the status of a workflow run submitted via run_workflow. Returns aggregate status (pending/running/completed/partial_failure) and artifact URLs. Set MODL_BASE_URL env var on the server for HTTP URLs. For pod runs pass pod: true — status is read from the pod itself, plus synced_home/local_images once artifacts have landed locally.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "run_id": {
                         "type": "string",
                         "description": "Run ID returned by run_workflow"
+                    },
+                    "pod": {
+                        "type": "boolean",
+                        "description": "The run was submitted with pod: true"
                     }
                 },
                 "required": ["run_id"]
@@ -412,13 +420,98 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "list_run_outputs",
-            "description": "List artifact paths or URLs for a completed workflow run. If MODL_BASE_URL is set on the server, returns HTTP URLs downloadable over Tailscale.",
+            "description": "List artifact paths or URLs for a completed workflow run. If MODL_BASE_URL is set on the server, returns HTTP URLs downloadable over Tailscale. For pod runs pass pod: true — lists the locally-synced artifact paths once the run has finished and synced home.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "run_id": {
                         "type": "string",
                         "description": "Run ID to list outputs for"
+                    },
+                    "pod": {
+                        "type": "boolean",
+                        "description": "The run was submitted with pod: true"
+                    }
+                },
+                "required": ["run_id"]
+            }
+        },
+        {
+            "name": "pod_up",
+            "description": "Rent + bootstrap a GPU pod on the user's Vast.ai account (BILLS MONEY until pod_rm). Returns immediately — provisioning + bootstrap take 5-15 minutes; poll pod_ls until the pod shows ready: true. An already-active pod is reused (no double rent). Requires VASTAI_API_KEY on the server.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "gpu": {
+                        "type": "string",
+                        "description": "GPU type (e.g. rtx3090, rtx4090, a100-80gb, h100) or 'auto' for best value with >=24GB VRAM"
+                    },
+                    "max_price": {
+                        "type": "number",
+                        "description": "Max hourly price in USD (default 3.0)"
+                    },
+                    "min_vram": {
+                        "type": "integer",
+                        "description": "Minimum VRAM in GB (default 24 for 'auto')"
+                    },
+                    "models": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Model IDs to pre-pull into the pod's store after bootstrap (optional — workflows pull what they need anyway)"
+                    }
+                },
+                "required": ["gpu"]
+            }
+        },
+        {
+            "name": "pod_ls",
+            "description": "List GPU pod instances on the user's Vast.ai account: status, price, running cost, and whether the active modl pod is bootstrapped (ready: true means jobs can be submitted). Instances bill until destroyed with pod_rm.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
+            "name": "pod_rm",
+            "description": "Destroy a GPU pod instance — billing stops. Use pod_ls to find instance IDs. Destroy pods promptly when work is done; artifacts not yet pulled home die with the pod.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "instance_id": {
+                        "type": "integer",
+                        "description": "Vast.ai instance ID (from pod_up or pod_ls)"
+                    }
+                },
+                "required": ["instance_id"]
+            }
+        },
+        {
+            "name": "pod_pull",
+            "description": "Fetch a finished pod run's artifacts home (re-attach path — pod runs normally sync home automatically when the submitting process survives). Artifacts land in ~/.modl/outputs and register in the local library.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": "string",
+                        "description": "Run ID of a completed pod run"
+                    }
+                },
+                "required": ["run_id"]
+            }
+        },
+        {
+            "name": "pod_logs",
+            "description": "Tail a pod run's log (model pulls, step progress, errors). Useful while job_status shows pending/running, or post-mortem on a failed run.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": "string",
+                        "description": "Run ID of a pod run"
+                    },
+                    "lines": {
+                        "type": "integer",
+                        "description": "Trailing lines to return (default 100)"
                     }
                 },
                 "required": ["run_id"]
@@ -950,11 +1043,37 @@ fn tool_remove_bg(args: &Value) -> Result<Value, (i32, String)> {
     }
 }
 
+/// Local path of the JSON result a detached pod run writes on completion
+/// (`modl run --pod --json` stdout). Existence = the run finished AND its
+/// artifacts were synced home.
+fn pod_result_path(run_id: &str) -> std::path::PathBuf {
+    crate::core::paths::modl_root()
+        .join("run-logs")
+        .join(format!("{run_id}.result.json"))
+}
+
+/// Read + parse the pod run result file, if the run has synced home yet.
+fn read_pod_result(run_id: &str) -> Option<Value> {
+    let text = std::fs::read_to_string(pod_result_path(run_id)).ok()?;
+    serde_json::from_str(text.trim()).ok()
+}
+
 fn tool_run_workflow(args: &Value) -> Result<Value, (i32, String)> {
     let spec_yaml = args
         .get("spec_yaml")
         .and_then(|v| v.as_str())
         .ok_or((-32602, "Missing required parameter: spec_yaml".to_string()))?;
+    let pod = args.get("pod").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // Fail fast on the common mistake instead of a dead run minutes later.
+    // (pods.json is the local record; the spawned run re-verifies with Vast.)
+    if pod && crate::core::pod_state::load().is_empty() {
+        return Err((
+            -32602,
+            "No active pod — call pod_up first, then poll pod_ls until it shows ready: true."
+                .to_string(),
+        ));
+    }
 
     // Pre-generate the run_id. Includes a short random suffix to prevent
     // collisions when two workflows are submitted within the same second.
@@ -975,20 +1094,48 @@ fn tool_run_workflow(args: &Value) -> Result<Value, (i32, String)> {
 
     let bin = modl_bin().map_err(|e| (-32603, e.to_string()))?;
 
+    let mut cmd_args: Vec<&str> = vec!["run", spec_path.to_str().unwrap_or("")];
+    cmd_args.extend(["--run-id", &run_id]);
+    // Pod runs poll to completion and sync artifacts home, then print a JSON
+    // result on stdout — capture it to a file job_status/list_run_outputs
+    // can read (local runs are queryable in the local DB; pod runs aren't).
+    let stdout: std::process::Stdio = if pod {
+        cmd_args.push("--pod");
+        cmd_args.push("--json");
+        std::fs::File::create(pod_result_path(&run_id))
+            .map(Into::into)
+            .unwrap_or_else(|_| std::process::Stdio::null())
+    } else {
+        std::process::Stdio::null()
+    };
+
     // Capture stderr via pipe for a short window so we can detect immediate
     // failures (bad YAML, missing model, etc.) before returning run_id.
     let mut child = std::process::Command::new(&bin)
-        .args(["run", spec_path.to_str().unwrap_or(""), "--run-id", &run_id])
+        .args(&cmd_args)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
+        .stdout(stdout)
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| (-32603, format!("Failed to spawn modl run: {e}")))?;
 
-    // Wait up to 500 ms — enough to catch YAML parse errors and missing files
-    // without blocking for the actual GPU work.
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    if let Ok(Some(status)) = child.try_wait() {
+    // Wait long enough to catch YAML parse errors and missing files without
+    // blocking for the actual GPU work. Pod submissions get a longer window:
+    // the spec's pod-compatibility checks run after a Vast API round-trip.
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(if pod { 3000 } else { 500 });
+    let mut early_exit = None;
+    loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            early_exit = Some(status);
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if let Some(status) = early_exit {
         // Process already exited — read stderr to report what went wrong.
         let stderr_text = child
             .stderr
@@ -1000,6 +1147,7 @@ fn tool_run_workflow(args: &Value) -> Result<Value, (i32, String)> {
             })
             .unwrap_or_default();
         if !status.success() {
+            let _ = std::fs::remove_file(pod_result_path(&run_id));
             return Err((
                 -32603,
                 format!("modl run failed immediately: {}", stderr_text.trim()),
@@ -1028,15 +1176,24 @@ fn tool_run_workflow(args: &Value) -> Result<Value, (i32, String)> {
         let _ = child.wait();
     });
 
+    let mut result = json!({
+        "run_id": run_id,
+        "status": "submitted",
+        "spec": spec_path.to_string_lossy(),
+        "log": log_path.to_string_lossy(),
+    });
+    if pod {
+        let obj = result.as_object_mut().expect("result is an object");
+        obj.insert("target".into(), json!("pod"));
+        obj.insert(
+            "hint".into(),
+            json!("Poll job_status with pod: true — artifacts sync home automatically when the run finishes."),
+        );
+    }
     Ok(json!({
         "content": [{
             "type": "text",
-            "text": serde_json::to_string_pretty(&json!({
-                "run_id": run_id,
-                "status": "submitted",
-                "spec": spec_path.to_string_lossy(),
-                "log": log_path.to_string_lossy(),
-            })).unwrap_or_default()
+            "text": serde_json::to_string_pretty(&result).unwrap_or_default()
         }]
     }))
 }
@@ -1046,6 +1203,11 @@ fn tool_job_status(args: &Value) -> Result<Value, (i32, String)> {
         .get("run_id")
         .and_then(|v| v.as_str())
         .ok_or((-32602, "Missing required parameter: run_id".to_string()))?;
+    let pod = args.get("pod").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    if pod {
+        return pod_job_status(run_id);
+    }
 
     let (stdout, stderr, success) =
         run_modl(&["status", "--json", run_id]).map_err(|e| (-32603, e))?;
@@ -1066,11 +1228,72 @@ fn tool_job_status(args: &Value) -> Result<Value, (i32, String)> {
     }
 }
 
+/// job_status for a pod run: the pod's own status, annotated with whether
+/// the artifacts have synced home yet. Once the detached runner has written
+/// the result file, the local paths are authoritative even if the pod is
+/// already destroyed.
+fn pod_job_status(run_id: &str) -> Result<Value, (i32, String)> {
+    let local = read_pod_result(run_id);
+
+    let (stdout, stderr, success) =
+        run_modl(&["status", "--json", "--pod", run_id]).map_err(|e| (-32603, e))?;
+
+    let mut result = if success {
+        serde_json::from_str::<Value>(&stdout).unwrap_or_else(|_| json!({ "run_id": run_id }))
+    } else if let Some(local) = &local {
+        // Pod gone or unreachable, but the run already synced home — report
+        // from the local result instead of failing the poll.
+        let mut v = local.clone();
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert(
+                "note".into(),
+                json!("Pod status unavailable — reporting from the synced local result."),
+            );
+        }
+        v
+    } else {
+        let msg = if stderr.is_empty() { &stdout } else { &stderr };
+        return Err((-32603, format!("Pod status check failed: {}", msg.trim())));
+    };
+
+    if let Some(obj) = result.as_object_mut() {
+        obj.insert("synced_home".into(), json!(local.is_some()));
+        if let Some(images) = local.as_ref().and_then(|l| l.get("images")) {
+            obj.insert("local_images".into(), images.clone());
+        }
+    }
+
+    Ok(json!({
+        "content": [{"type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default()}]
+    }))
+}
+
 fn tool_list_run_outputs(args: &Value) -> Result<Value, (i32, String)> {
     let run_id = args
         .get("run_id")
         .and_then(|v| v.as_str())
         .ok_or((-32602, "Missing required parameter: run_id".to_string()))?;
+    let pod = args.get("pod").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    if pod {
+        let Some(local) = read_pod_result(run_id) else {
+            return Err((
+                -32603,
+                format!(
+                    "Run {run_id} has not synced home yet — poll job_status (pod: true) until it completes, or pod_pull to fetch it explicitly."
+                ),
+            ));
+        };
+        let images = local.get("images").cloned().unwrap_or_else(|| json!([]));
+        let count = images.as_array().map(|a| a.len()).unwrap_or(0);
+        let text = format!(
+            "{count} artifact(s) for pod run {run_id} (synced to this machine):\n{}",
+            serde_json::to_string_pretty(&images).unwrap_or_default()
+        );
+        return Ok(json!({
+            "content": [{"type": "text", "text": text}]
+        }));
+    }
 
     let (stdout, stderr, success) =
         run_modl(&["status", "--json", run_id]).map_err(|e| (-32603, e))?;
@@ -1098,6 +1321,198 @@ fn tool_list_run_outputs(args: &Value) -> Result<Value, (i32, String)> {
             "content": [{"type": "text", "text": stdout.trim()}]
         }))
     }
+}
+
+/// Rent + bootstrap a pod, fire-and-forget: provisioning takes 5-15 minutes,
+/// far beyond a reasonable tool-call budget, so the work detaches and the
+/// agent polls pod_ls until `ready: true`.
+fn tool_pod_up(args: &Value) -> Result<Value, (i32, String)> {
+    let gpu = args
+        .get("gpu")
+        .and_then(|v| v.as_str())
+        .ok_or((-32602, "Missing required parameter: gpu".to_string()))?;
+
+    let mut cmd_args: Vec<String> = vec![
+        "pod".into(),
+        "up".into(),
+        gpu.into(),
+        "--yes".into(),
+        "--json".into(),
+    ];
+    if let Some(v) = args.get("max_price").and_then(|v| v.as_f64()) {
+        cmd_args.extend(["--max-price".into(), v.to_string()]);
+    }
+    if let Some(v) = args.get("min_vram").and_then(|v| v.as_u64()) {
+        cmd_args.extend(["--min-vram".into(), v.to_string()]);
+    }
+    for m in args
+        .get("models")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str())
+    {
+        cmd_args.extend(["--model".into(), m.into()]);
+    }
+
+    let stamp = Local::now().format("%Y%m%d-%H%M%S");
+    let run_log_dir = crate::core::paths::modl_root().join("run-logs");
+    let _ = std::fs::create_dir_all(&run_log_dir);
+    let result_path = run_log_dir.join(format!("pod-up-{stamp}.result.json"));
+    let log_path = run_log_dir.join(format!("pod-up-{stamp}.log"));
+
+    let bin = modl_bin().map_err(|e| (-32603, e.to_string()))?;
+    let stdout: std::process::Stdio = std::fs::File::create(&result_path)
+        .map(Into::into)
+        .unwrap_or_else(|_| std::process::Stdio::null());
+    let mut child = std::process::Command::new(&bin)
+        .args(&cmd_args)
+        .stdin(std::process::Stdio::null())
+        .stdout(stdout)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| (-32603, format!("Failed to spawn modl pod up: {e}")))?;
+
+    // Catch immediate failures (no Vast key, bad GPU type) before detaching.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
+    loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            let stderr_text = child
+                .stderr
+                .take()
+                .and_then(|mut r| {
+                    let mut buf = String::new();
+                    std::io::Read::read_to_string(&mut r, &mut buf).ok()?;
+                    Some(buf)
+                })
+                .unwrap_or_default();
+            if !status.success() {
+                let _ = std::fs::remove_file(&result_path);
+                return Err((
+                    -32603,
+                    format!(
+                        "pod up failed immediately: {}",
+                        strip_ansi(&stderr_text).trim()
+                    ),
+                ));
+            }
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    // Forward remaining stderr (provisioning narration) to the log file.
+    if let Some(mut stderr_pipe) = child.stderr.take() {
+        let log_path_clone = log_path.clone();
+        std::thread::spawn(move || {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path_clone)
+            {
+                let _ = std::io::copy(&mut stderr_pipe, &mut f);
+            }
+        });
+    }
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+
+    Ok(json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::to_string_pretty(&json!({
+                "status": "provisioning",
+                "gpu": gpu,
+                "log": log_path.to_string_lossy(),
+                "hint": "Provisioning + bootstrap take 5-15 minutes and BILL until pod_rm. Poll pod_ls until this pod shows ready: true, then submit with run_workflow (pod: true).",
+            })).unwrap_or_default()
+        }]
+    }))
+}
+
+fn tool_pod_ls(_args: &Value) -> Result<Value, (i32, String)> {
+    let (stdout, stderr, success) = run_modl(&["pod", "ls", "--json"]).map_err(|e| (-32603, e))?;
+    if !success {
+        let msg = if stderr.is_empty() { &stdout } else { &stderr };
+        return Err((-32603, format!("pod ls failed: {}", strip_ansi(msg).trim())));
+    }
+    Ok(json!({
+        "content": [{"type": "text", "text": stdout.trim()}]
+    }))
+}
+
+fn tool_pod_rm(args: &Value) -> Result<Value, (i32, String)> {
+    let instance_id = args.get("instance_id").and_then(|v| v.as_u64()).ok_or((
+        -32602,
+        "Missing required parameter: instance_id".to_string(),
+    ))?;
+
+    let id = instance_id.to_string();
+    let (stdout, stderr, success) =
+        run_modl(&["pod", "rm", &id, "--yes"]).map_err(|e| (-32603, e))?;
+    if !success {
+        let msg = if stderr.is_empty() { &stdout } else { &stderr };
+        return Err((-32603, format!("pod rm failed: {}", strip_ansi(msg).trim())));
+    }
+    Ok(json!({
+        "content": [{"type": "text", "text": format!("Instance {instance_id} destroyed — billing stopped.")}]
+    }))
+}
+
+fn tool_pod_pull(args: &Value) -> Result<Value, (i32, String)> {
+    let run_id = args
+        .get("run_id")
+        .and_then(|v| v.as_str())
+        .ok_or((-32602, "Missing required parameter: run_id".to_string()))?;
+
+    let (stdout, stderr, success) =
+        run_modl(&["pod", "pull", run_id, "--json"]).map_err(|e| (-32603, e))?;
+    if !success {
+        let msg = if stderr.is_empty() { &stdout } else { &stderr };
+        return Err((
+            -32603,
+            format!("pod pull failed: {}", strip_ansi(msg).trim()),
+        ));
+    }
+    if let Ok(result) = serde_json::from_str::<Value>(&stdout) {
+        Ok(json!({
+            "content": [{"type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_else(|_| stdout.clone())}]
+        }))
+    } else {
+        Ok(json!({
+            "content": [{"type": "text", "text": strip_ansi(&stdout).trim()}]
+        }))
+    }
+}
+
+fn tool_pod_logs(args: &Value) -> Result<Value, (i32, String)> {
+    let run_id = args
+        .get("run_id")
+        .and_then(|v| v.as_str())
+        .ok_or((-32602, "Missing required parameter: run_id".to_string()))?;
+    let lines = args
+        .get("lines")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(100)
+        .to_string();
+
+    let (stdout, stderr, success) =
+        run_modl(&["pod", "logs", run_id, "--lines", &lines]).map_err(|e| (-32603, e))?;
+    if !success {
+        let msg = if stderr.is_empty() { &stdout } else { &stderr };
+        return Err((
+            -32603,
+            format!("pod logs failed: {}", strip_ansi(msg).trim()),
+        ));
+    }
+    let text = strip_ansi(&stdout);
+    Ok(json!({
+        "content": [{"type": "text", "text": if text.trim().is_empty() { "(log is empty so far)" } else { text.trim() }}]
+    }))
 }
 
 fn tool_enhance(args: &Value) -> Result<Value, (i32, String)> {
@@ -1186,6 +1601,11 @@ fn handle_request(request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
                 "run_workflow" => tool_run_workflow(&arguments),
                 "job_status" => tool_job_status(&arguments),
                 "list_run_outputs" => tool_list_run_outputs(&arguments),
+                "pod_up" => tool_pod_up(&arguments),
+                "pod_ls" => tool_pod_ls(&arguments),
+                "pod_rm" => tool_pod_rm(&arguments),
+                "pod_pull" => tool_pod_pull(&arguments),
+                "pod_logs" => tool_pod_logs(&arguments),
                 _ => Err((-32601, format!("Unknown tool: {}", name))),
             }
         }
@@ -1360,7 +1780,64 @@ mod tests {
         assert!(names.contains(&"run_workflow"));
         assert!(names.contains(&"job_status"));
         assert!(names.contains(&"list_run_outputs"));
-        assert_eq!(tool_list.len(), 15);
+        assert!(names.contains(&"pod_up"));
+        assert!(names.contains(&"pod_ls"));
+        assert!(names.contains(&"pod_rm"));
+        assert!(names.contains(&"pod_pull"));
+        assert!(names.contains(&"pod_logs"));
+        assert_eq!(tool_list.len(), 20);
+    }
+
+    #[test]
+    fn test_pod_up_missing_gpu() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            method: "tools/call".into(),
+            params: Some(json!({"name": "pod_up", "arguments": {}})),
+            id: Some(json!(20)),
+        };
+        let resp = handle_request(&req).unwrap();
+        assert!(resp.error.is_some());
+        assert!(resp.error.unwrap().message.contains("gpu"));
+    }
+
+    #[test]
+    fn test_pod_rm_missing_instance_id() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            method: "tools/call".into(),
+            params: Some(json!({"name": "pod_rm", "arguments": {}})),
+            id: Some(json!(21)),
+        };
+        let resp = handle_request(&req).unwrap();
+        assert!(resp.error.is_some());
+        assert!(resp.error.unwrap().message.contains("instance_id"));
+    }
+
+    #[test]
+    fn test_pod_pull_missing_run_id() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            method: "tools/call".into(),
+            params: Some(json!({"name": "pod_pull", "arguments": {}})),
+            id: Some(json!(22)),
+        };
+        let resp = handle_request(&req).unwrap();
+        assert!(resp.error.is_some());
+        assert!(resp.error.unwrap().message.contains("run_id"));
+    }
+
+    #[test]
+    fn test_pod_logs_missing_run_id() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            method: "tools/call".into(),
+            params: Some(json!({"name": "pod_logs", "arguments": {}})),
+            id: Some(json!(23)),
+        };
+        let resp = handle_request(&req).unwrap();
+        assert!(resp.error.is_some());
+        assert!(resp.error.unwrap().message.contains("run_id"));
     }
 
     #[test]

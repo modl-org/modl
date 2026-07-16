@@ -11,17 +11,55 @@ use crate::core::pod::{self, PodOptions};
 use crate::core::pod_state::{self, PodRecord};
 use crate::core::vast;
 
-pub async fn ls() -> Result<()> {
+/// The CLI's interactive rent confirmation — a dialoguer prompt injected into
+/// [`PodOptions`] so `core::pod` never touches a TTY itself.
+pub(crate) fn dialoguer_confirm() -> crate::core::pod::ConfirmRent {
+    Box::new(|prompt: &str| {
+        dialoguer::Confirm::new()
+            .with_prompt(prompt.to_string())
+            .default(true)
+            .interact()
+            .context("Cancelled")
+    })
+}
+
+pub async fn ls(json: bool) -> Result<()> {
     let instances = vast::list_instances().await?;
-    if instances.is_empty() {
-        println!("No Vast.ai instances on this account.");
-        return Ok(());
-    }
 
     // Local records let us mark the active pod and show its age/label.
     let records = pod_state::load();
     let rec_by_id: std::collections::HashMap<u64, &PodRecord> =
         records.iter().map(|r| (r.instance_id, r)).collect();
+
+    if json {
+        let out: Vec<serde_json::Value> = instances
+            .iter()
+            .map(|i| {
+                let rec = rec_by_id.get(&i.id);
+                serde_json::json!({
+                    "instance_id": i.id,
+                    "gpu_name": i.gpu_name,
+                    "status": i.actual_status,
+                    "dph_total": i.dph_total,
+                    "ssh_host": i.ssh_host,
+                    "ssh_port": i.ssh_port,
+                    // Tracked in pods.json — the pod train/run/pull reuse.
+                    "active": rec.is_some(),
+                    "label": rec.map(|r| r.label.clone()),
+                    "cost_so_far": rec.map(|r| r.cost_so_far()),
+                    // Bootstrapped and ready for jobs (fingerprint recorded).
+                    "ready": rec.map(|r| r.bootstrap_fingerprint.is_some()).unwrap_or(false),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    if instances.is_empty() {
+        println!("No Vast.ai instances on this account.");
+        return Ok(());
+    }
 
     println!(
         "{:<3}{:<12} {:<14} {:<10} {:>8} {:>8}  {}",
@@ -65,6 +103,7 @@ pub async fn ls() -> Result<()> {
 }
 
 /// `modl pod up <gpu|auto>` — rent + bootstrap a persistent pod.
+#[allow(clippy::too_many_arguments)]
 pub async fn up(
     gpu: String,
     max_price: f64,
@@ -73,11 +112,12 @@ pub async fn up(
     fresh: bool,
     models: Vec<String>,
     yes: bool,
+    json: bool,
 ) -> Result<()> {
     // 1. Reuse is automatic — an existing pod short-circuits unless --fresh.
     if let Some(rec) = pod_state::active_pod().await? {
         if !fresh {
-            println!(
+            eprintln!(
                 "{} Pod {} already up — {}, ${:.3}/hr. Reuse is automatic; pass {} to replace it.",
                 style("✓").green(),
                 rec.instance_id,
@@ -88,10 +128,17 @@ pub async fn up(
             if !models.is_empty() {
                 crate::core::pod_run::prepare(&pod::Pod::from(rec.clone()), &models)?;
             }
-            print_summary(&rec);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&up_result_json(&rec, true))?
+                );
+            } else {
+                print_summary(&rec);
+            }
             return Ok(());
         }
-        println!(
+        eprintln!(
             "{} --fresh: destroying active pod {} before provisioning a new one…",
             style("→").cyan(),
             rec.instance_id
@@ -108,7 +155,7 @@ pub async fn up(
         min_vram
     };
     if auto {
-        println!(
+        eprintln!(
             "{} auto: picking the best-value GPU with ≥{}GB VRAM (override with --min-vram).",
             style("→").cyan(),
             min_vram_gb.unwrap()
@@ -122,6 +169,7 @@ pub async fn up(
         yes,
         keep_pod: true, // pod up is persistent by definition — never auto-destroys
         label: format!("modl-pod-{}", gpu),
+        confirm_rent: Some(dialoguer_confirm()),
     };
 
     // 3. Provision + bootstrap.
@@ -141,15 +189,38 @@ pub async fn up(
     }
 
     // 6. Summary.
-    println!(
+    eprintln!(
         "{} Pod {} up — {}, ${:.3}/hr, billing until destroyed",
         style("✓").green().bold(),
         pod_obj.instance_id,
         pod_obj.gpu_name,
         pod_obj.dph_total
     );
-    print_summary(&rec);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&up_result_json(&rec, false))?
+        );
+    } else {
+        print_summary(&rec);
+    }
     Ok(())
+}
+
+/// Machine-readable `pod up` result — everything an agent needs to reuse,
+/// monitor, and eventually destroy the pod.
+fn up_result_json(rec: &PodRecord, reused: bool) -> serde_json::Value {
+    serde_json::json!({
+        "instance_id": rec.instance_id,
+        "gpu_name": rec.gpu_name,
+        "dph_total": rec.dph_total,
+        "ssh_host": rec.ssh_host,
+        "ssh_port": rec.ssh_port,
+        "label": rec.label,
+        "created_at": rec.created_at,
+        "ready": rec.bootstrap_fingerprint.is_some(),
+        "reused": reused,
+    })
 }
 
 /// `modl pod exec [--id N] -- <cmd…>` — ssh passthrough for debugging.
@@ -189,7 +260,7 @@ pub async fn exec(id: Option<u64>, cmd: Vec<String>) -> Result<()> {
 /// active pod. The re-attach path: runs are fire-and-forget on the pod, so
 /// if the watching command died (closed laptop, dropped link), this brings
 /// the results home directly over SSH.
-pub async fn pull(run_id: String, dest: Option<std::path::PathBuf>) -> Result<()> {
+pub async fn pull(run_id: String, dest: Option<std::path::PathBuf>, json: bool) -> Result<()> {
     let rec = pod_state::active_pod().await?.context(
         "No active pod — the run's pod may already be destroyed (artifacts die with it).",
     )?;
@@ -198,7 +269,7 @@ pub async fn pull(run_id: String, dest: Option<std::path::PathBuf>) -> Result<()
     let status = crate::core::pod_run::run_status(&pod_obj, &run_id)?;
     match status.as_str() {
         "completed" => {}
-        "partial_failure" => println!(
+        "partial_failure" => eprintln!(
             "{} Run ended with partial failures — pulling the artifacts that completed.",
             style("⚠").yellow()
         ),
@@ -212,7 +283,49 @@ pub async fn pull(run_id: String, dest: Option<std::path::PathBuf>) -> Result<()
         ),
     }
 
-    crate::core::pod_run::export_run(&pod_obj, &run_id, dest.as_deref())?;
+    let (local_dir, artifacts) =
+        crate::core::pod_run::export_run(&pod_obj, &run_id, dest.as_deref())?;
+    if json {
+        // Same shape as `run --pod --json` so agents parse one schema.
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "status": status,
+                "run_id": run_id,
+                "output_dir": local_dir,
+                "images": artifacts,
+            }))?
+        );
+    }
+    Ok(())
+}
+
+/// `modl pod logs <run-id> [-f]` — tail a fire-and-forget run's log on the
+/// active pod. The re-attach story for watching: `pod pull` brings artifacts
+/// home, this brings the log stream back after the submitting watcher died.
+pub async fn logs(run_id: String, follow: bool, lines: u32) -> Result<()> {
+    let rec = pod_state::active_pod()
+        .await?
+        .context("No active pod — run logs live on the pod and die with it.")?;
+
+    let log = format!("{}/runs/{}.log", pod::REMOTE_ROOT, run_id);
+    let quoted = crate::core::pod::shell_quote(&log);
+    let tail_flags = if follow {
+        format!("-n {lines} -F")
+    } else {
+        format!("-n {lines}")
+    };
+    // One round-trip: a missing log gets a clear error instead of tail noise.
+    let cmd = format!(
+        "if [ -f {quoted} ]; then tail {tail_flags} {quoted}; \
+         else echo 'No log for run {run_id} on this pod — check the run id (modl pod exec -- ls {}/runs/)' >&2; exit 2; fi",
+        pod::REMOTE_ROOT
+    );
+    let status = pod::ssh_exec(&rec.ssh_host, rec.ssh_port, &cmd)?;
+    if !status.success() {
+        // Ctrl-C on -f lands here too — only propagate real failures.
+        std::process::exit(status.code().unwrap_or(1));
+    }
     Ok(())
 }
 

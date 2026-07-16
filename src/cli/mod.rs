@@ -589,6 +589,9 @@ pub enum PodCommands {
         /// Skip the rent-confirmation prompt
         #[arg(long)]
         yes: bool,
+        /// Emit a machine-readable pod record on stdout (progress on stderr)
+        #[arg(long)]
+        json: bool,
     },
     /// Run a command on a pod over SSH (defaults to the active pod)
     ///
@@ -602,15 +605,34 @@ pub enum PodCommands {
         cmd: Vec<String>,
     },
     /// List Vast.ai instances on your account (they bill until destroyed)
-    Ls,
+    Ls {
+        /// Emit machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Fetch a finished run's artifacts from the active pod (re-attach after
     /// a closed laptop or dropped link — runs finish on the pod regardless)
     Pull {
         /// Run ID printed when the run was submitted (pod-YYYYMMDD-…)
         run_id: String,
-        /// Local destination directory (default: ./pod-outputs/<run-id>)
+        /// Local destination directory (default: import into ~/.modl/outputs)
         #[arg(long)]
         dest: Option<std::path::PathBuf>,
+        /// Emit a machine-readable result on stdout (progress on stderr)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Tail a run's log on the active pod (re-attach to a fire-and-forget
+    /// run's output after the submitting watcher died)
+    Logs {
+        /// Run ID printed when the run was submitted
+        run_id: String,
+        /// Keep following the log (like tail -F); Ctrl-C to stop
+        #[arg(long, short = 'f')]
+        follow: bool,
+        /// Number of trailing lines to show
+        #[arg(long, default_value_t = 100)]
+        lines: u32,
     },
     /// Destroy an instance (billing stops)
     Rm {
@@ -1280,6 +1302,10 @@ See `modl/docs/guides/workflows.md` for the full reference.")]
         /// Emit machine-readable JSON
         #[arg(long)]
         json: bool,
+        /// Query the active pod's own status instead of the local DB (pod
+        /// runs live in the pod's DB until their artifacts are pulled home)
+        #[arg(long)]
+        pod: bool,
     },
 
     // ── Hidden ───────────────────────────────────────────────────────
@@ -1649,10 +1675,16 @@ pub async fn run(cli: Cli) -> Result<()> {
                 fresh,
                 models,
                 yes,
-            } => pod::up(gpu, max_price, disk, min_vram, fresh, models, yes).await,
+                json,
+            } => pod::up(gpu, max_price, disk, min_vram, fresh, models, yes, json).await,
             PodCommands::Exec { id, cmd } => pod::exec(id, cmd).await,
-            PodCommands::Ls => pod::ls().await,
-            PodCommands::Pull { run_id, dest } => pod::pull(run_id, dest).await,
+            PodCommands::Ls { json } => pod::ls(json).await,
+            PodCommands::Pull { run_id, dest, json } => pod::pull(run_id, dest, json).await,
+            PodCommands::Logs {
+                run_id,
+                follow,
+                lines,
+            } => pod::logs(run_id, follow, lines).await,
             PodCommands::Rm { id, yes } => pod::rm(id, yes).await,
             PodCommands::Ssh { id } => pod::ssh(id).await,
         },
@@ -1708,7 +1740,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
-        Commands::Status { run_id, json } => run_status::run(&run_id, json).await,
+        Commands::Status { run_id, json, pod } => run_status::run(&run_id, json, pod).await,
 
         // ── Hidden ───────────────────────────────────────────────────
         Commands::Init { defaults, root } => init::run(defaults, root.as_deref()).await,

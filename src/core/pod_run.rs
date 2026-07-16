@@ -720,16 +720,31 @@ fn wait_for_run(pod: &Pod, run_id: &str, log: &str, pidfile: &str) -> Result<Str
 }
 
 pub(crate) fn run_status(pod: &Pod, run_id: &str) -> Result<String> {
-    let out = run_ssh_capture(
-        &pod.ssh,
-        &format!("{REMOTE_MODL} status {} --json", shell_quote(run_id)),
-    )?;
-    let v: serde_json::Value =
-        serde_json::from_str(out.trim()).context("modl status returned invalid JSON")?;
+    let v = run_status_json(pod, run_id)?;
     v.get("status")
         .and_then(|s| s.as_str())
         .map(|s| s.to_string())
         .context("modl status JSON missing 'status'")
+}
+
+/// The pod's own `modl status --json` for a run, verbatim. Pod runs live in
+/// the pod's DB — the local DB only learns about them when artifacts are
+/// pulled home — so status queries for in-flight runs must ask the pod.
+pub fn run_status_json(pod: &Pod, run_id: &str) -> Result<serde_json::Value> {
+    let out = run_ssh_capture(
+        &pod.ssh,
+        &format!("{REMOTE_MODL} status {} --json", shell_quote(run_id)),
+    )?;
+    serde_json::from_str(out.trim()).with_context(|| {
+        format!(
+            "Pod did not return status JSON for run {run_id} — the run may not exist there{}",
+            if out.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" (got: {})", out.trim())
+            }
+        )
+    })
 }
 
 /// Best-effort `tail -F` of the remote run log through a reader thread.

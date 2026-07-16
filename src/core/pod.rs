@@ -49,6 +49,12 @@ const SSH_TIMEOUT_SECS: u64 = 6 * 60;
 /// Seconds of event silence before probing whether the worker is still alive.
 const LIVENESS_CHECK_SECS: u64 = 60;
 
+/// Rental confirmation injected by the caller. Receives a human-readable
+/// price line; returns whether to proceed. Core never talks to a TTY itself —
+/// the CLI injects a dialoguer prompt, non-interactive callers (MCP, web UI)
+/// inject nothing and must pass `yes` explicitly to rent.
+pub type ConfirmRent = Box<dyn Fn(&str) -> Result<bool> + Send + Sync>;
+
 /// Rental configuration shared by `train --pod` (one-shot) and `pod up`.
 pub struct PodOptions {
     pub gpu_type: String,
@@ -58,6 +64,9 @@ pub struct PodOptions {
     pub keep_pod: bool,
     /// Vast instance label (shows in `pod ls` / the Vast console).
     pub label: String,
+    /// Interactive rent confirmation. Only consulted when `yes` is false;
+    /// `None` + `yes: false` refuses to rent rather than block on a TTY.
+    pub confirm_rent: Option<ConfirmRent>,
 }
 
 /// SSH target for a booted pod. Fields are `pub(crate)` so `pod_executor`
@@ -150,7 +159,7 @@ pub async fn provision(opts: &PodOptions, min_vram_gb: Option<u32>) -> Result<Po
     // ---------------------------------------------------------------
     // 1. Find and confirm an offer
     // ---------------------------------------------------------------
-    println!(
+    eprintln!(
         "{} Searching Vast.ai for {} offers (max ${:.2}/hr, ranked by perf-per-dollar)...",
         style("→").cyan(),
         opts.gpu_type,
@@ -169,7 +178,7 @@ pub async fn provision(opts: &PodOptions, min_vram_gb: Option<u32>) -> Result<Po
     }
 
     let best = &offers[0];
-    println!(
+    eprintln!(
         "  {} — {:.0}GB VRAM, {:.0}GB disk, {:.0} Mbps down, ${:.3}/hr (reliability {:.1}%, value {:.0} dlperf/$)",
         style(&best.gpu_name).bold(),
         best.gpu_ram_mb as f64 / 1024.0,
@@ -181,14 +190,17 @@ pub async fn provision(opts: &PodOptions, min_vram_gb: Option<u32>) -> Result<Po
     );
 
     if !opts.yes {
-        let ok = dialoguer::Confirm::new()
-            .with_prompt(format!(
-                "Rent this pod on your Vast.ai account (~${:.3}/hr, billed until destroyed)?",
+        let prompt = format!(
+            "Rent this pod on your Vast.ai account (~${:.3}/hr, billed until destroyed)?",
+            best.dph_total
+        );
+        let ok = match &opts.confirm_rent {
+            Some(confirm) => confirm(&prompt)?,
+            None => bail!(
+                "Refusing to rent a pod (~${:.3}/hr) without confirmation — pass --yes / yes: true to opt in.",
                 best.dph_total
-            ))
-            .default(true)
-            .interact()
-            .context("Cancelled")?;
+            ),
+        };
         if !ok {
             bail!("Aborted before renting a pod.");
         }
@@ -214,7 +226,7 @@ pub async fn provision(opts: &PodOptions, min_vram_gb: Option<u32>) -> Result<Po
             continue; // same physical box as one that just failed to boot
         }
         if offer.dph_total > price_cap {
-            println!(
+            eprintln!(
                 "{} Skipping fallback offer {} at ${:.3}/hr — more than 25% over the confirmed ${:.3}/hr",
                 style("!").yellow(),
                 offer.id,
@@ -235,7 +247,7 @@ pub async fn provision(opts: &PodOptions, min_vram_gb: Option<u32>) -> Result<Po
         {
             Ok(id) => id,
             Err(e) => {
-                println!(
+                eprintln!(
                     "{} Offer {} unavailable ({e}), trying next...",
                     style("!").yellow(),
                     offer.id
@@ -244,7 +256,7 @@ pub async fn provision(opts: &PodOptions, min_vram_gb: Option<u32>) -> Result<Po
             }
         };
 
-        println!(
+        eprintln!(
             "{} Rented instance {} (${:.3}/hr). If anything goes wrong: modl pod rm {}",
             style("✓").green(),
             style(id).bold(),
@@ -266,7 +278,7 @@ pub async fn provision(opts: &PodOptions, min_vram_gb: Option<u32>) -> Result<Po
             bootstrap_fingerprint: None,
             label: opts.label.clone(),
         }) {
-            println!(
+            eprintln!(
                 "{} Could not record pod {id} in pods.json: {e}",
                 style("⚠").yellow()
             );
@@ -278,8 +290,8 @@ pub async fn provision(opts: &PodOptions, min_vram_gb: Option<u32>) -> Result<Po
                 break;
             }
             Err(e) => {
-                println!("{} {e}", style("!").yellow());
-                println!(
+                eprintln!("{} {e}", style("!").yellow());
+                eprintln!(
                     "{} Host never booted — destroying instance {} and trying the next offer...",
                     style("!").yellow(),
                     id
@@ -291,7 +303,7 @@ pub async fn provision(opts: &PodOptions, min_vram_gb: Option<u32>) -> Result<Po
                     Ok(()) => {
                         let _ = pod_state::remove(id);
                     }
-                    Err(e) => println!(
+                    Err(e) => eprintln!(
                         "{} Could not destroy {id}: {e} — still billing, check with: modl pod ls",
                         style("✗").red()
                     ),
@@ -312,7 +324,7 @@ pub async fn provision(opts: &PodOptions, min_vram_gb: Option<u32>) -> Result<Po
     };
     // Refresh the record with the SSH target now that we have one.
     if let Err(e) = pod_state::upsert(pod.to_record(&opts.label)) {
-        println!(
+        eprintln!(
             "{} Could not update pods.json for {instance_id}: {e}",
             style("⚠").yellow()
         );
@@ -342,7 +354,7 @@ pub fn bootstrap(pod: &Pod) -> Result<()> {
 
     // Always refresh the worker — small, and it picks up local worker edits
     // between jobs on a persistent pod.
-    println!("{} Uploading worker...", style("→").cyan());
+    eprintln!("{} Uploading worker...", style("→").cyan());
     run_ssh_quiet(ssh, &format!("mkdir -p {REMOTE_ROOT}/worker"))?;
     rsync_to(
         ssh,
@@ -352,7 +364,7 @@ pub fn bootstrap(pod: &Pod) -> Result<()> {
 
     crate::core::pod_run::ensure_modl(pod)?;
 
-    println!(
+    eprintln!(
         "{} Ensuring managed runtime ({POD_RUNTIME_PROFILE}) on pod...",
         style("→").cyan()
     );
@@ -392,7 +404,7 @@ pub fn run_train_job(pod: &Pod, spec: &TrainJobSpec) -> Result<()> {
 
     let hf_token = huggingface_token();
     if hf_token.is_none() {
-        println!(
+        eprintln!(
             "{} No HuggingFace token found — gated base models (Flux, Klein) will fail to download on the pod. Add one with: modl auth add huggingface",
             style("⚠").yellow()
         );
@@ -413,7 +425,7 @@ pub fn run_train_job(pod: &Pod, spec: &TrainJobSpec) -> Result<()> {
     // 4. Ship dataset + spec
     // ---------------------------------------------------------------
     let dataset_path = PathBuf::from(&spec.dataset.path);
-    println!("{} Uploading dataset...", style("→").cyan());
+    eprintln!("{} Uploading dataset...", style("→").cyan());
     run_ssh_quiet(ssh, &format!("mkdir -p {REMOTE_ROOT}/dataset"))?;
     rsync_to(ssh, &dataset_path, &format!("{REMOTE_ROOT}/dataset-up/"))?;
     // rsync of a dir path (no trailing slash) nests it: dataset-up/<basename>.
@@ -481,7 +493,7 @@ pub fn run_train_job(pod: &Pod, spec: &TrainJobSpec) -> Result<()> {
     // "running" (phantom running jobs in `modl ls` / the UI training tab).
     let result = (|| -> Result<()> {
         run_ssh_quiet(ssh, &launch)?;
-        println!(
+        eprintln!(
             "{} Training started on pod — {}",
             style("→").cyan(),
             style(&job_id).dim()
@@ -499,7 +511,7 @@ pub fn run_train_job(pod: &Pod, spec: &TrainJobSpec) -> Result<()> {
         // ---------------------------------------------------------------
         // 6. Sync artifacts back + register locally
         // ---------------------------------------------------------------
-        println!("{} Syncing artifacts back...", style("→").cyan());
+        eprintln!("{} Syncing artifacts back...", style("→").cyan());
         let local_out = PathBuf::from(&spec.output.destination_dir);
         std::fs::create_dir_all(&local_out)?;
         rsync_from(ssh, &format!("{REMOTE_ROOT}/output/"), &local_out)?;
@@ -517,12 +529,12 @@ pub fn run_train_job(pod: &Pod, spec: &TrainJobSpec) -> Result<()> {
         )?;
         db.update_job_status(&job_id, "completed")?;
 
-        println!(
+        eprintln!(
             "{} LoRA registered: {}",
             style("✓").green().bold(),
             collected.store_path.display()
         );
-        println!(
+        eprintln!(
             "  Try it: modl generate \"{} ...\" --lora {} --base {}",
             spec.params.trigger_word, spec.output.lora_name, spec.model.base_model_id
         );
@@ -546,14 +558,14 @@ pub fn run_train_job(pod: &Pod, spec: &TrainJobSpec) -> Result<()> {
 /// destroy is an error so callers (e.g. `pod up --fresh`) don't proceed to
 /// rent a second pod while the first one still bills.
 pub async fn teardown(pod: &Pod) -> Result<()> {
-    println!(
+    eprintln!(
         "{} Destroying instance {}...",
         style("→").cyan(),
         pod.instance_id
     );
     match vast::destroy_instance(pod.instance_id).await {
         Ok(()) => {
-            println!("{} Pod destroyed — billing stopped.", style("✓").green());
+            eprintln!("{} Pod destroyed — billing stopped.", style("✓").green());
             let _ = pod_state::remove(pod.instance_id);
             Ok(())
         }
@@ -575,7 +587,7 @@ pub async fn teardown(pod: &Pod) -> Result<()> {
 pub async fn run_pod_training(spec: TrainJobSpec, opts: PodOptions) -> Result<()> {
     let min_vram_gb = min_vram_for_train(&spec);
     if let Some(gb) = min_vram_gb {
-        println!(
+        eprintln!(
             "{} {} needs ≥{}GB VRAM for training ({})",
             style("→").cyan(),
             spec.model.base_model_id,
@@ -603,7 +615,7 @@ pub async fn run_pod_training(spec: TrainJobSpec, opts: PodOptions) -> Result<()
         if let Err(e) = pod_state::upsert(kept.to_record(&opts.label)) {
             eprintln!("{} Could not record kept pod: {e}", style("⚠").yellow());
         }
-        println!(
+        eprintln!(
             "{} --keep-pod: instance {} still running & billing.\n  Reuse:  modl train --pod {} …  /  modl pod run …\n  Kill:   modl pod rm {}",
             style("⚠").yellow(),
             pod.instance_id,
@@ -619,7 +631,7 @@ pub async fn run_pod_training(spec: TrainJobSpec, opts: PodOptions) -> Result<()
             if std::fs::create_dir_all(&local_out).is_ok()
                 && rsync_from(&pod.ssh, &format!("{REMOTE_ROOT}/output/"), &local_out).is_ok()
             {
-                println!(
+                eprintln!(
                     "{} Salvaged partial artifacts → {}",
                     style("→").cyan(),
                     local_out.display()
@@ -634,7 +646,7 @@ pub async fn run_pod_training(spec: TrainJobSpec, opts: PodOptions) -> Result<()
     }
 
     let hours = started_at.elapsed().as_secs_f64() / 3600.0;
-    println!(
+    eprintln!(
         "  Pod time: {:.0}m — estimated cost ${:.2}",
         hours * 60.0,
         hours * pod.dph_total
@@ -801,7 +813,7 @@ fn stream_events(ssh: &SshTarget, job_id: &str, db: &Database) -> Result<TrainOu
                 reconnects
             );
         }
-        println!(
+        eprintln!(
             "{} SSH stream dropped — reconnecting ({reconnects})...",
             style("!").yellow()
         );
@@ -842,16 +854,16 @@ fn handle_event_line(
             ..
         } => {
             let loss_str = loss.map(|l| format!("  loss {l:.4}")).unwrap_or_default();
-            println!("  [{stage}] step {step}/{total_steps}{loss_str}");
+            eprintln!("  [{stage}] step {step}/{total_steps}{loss_str}");
         }
         EventPayload::Log { level, message } if level != "debug" => {
-            println!("  {}", style(message).dim());
+            eprintln!("  {}", style(message).dim());
         }
         EventPayload::Warning { message, .. } => {
-            println!("  {} {message}", style("⚠").yellow());
+            eprintln!("  {} {message}", style("⚠").yellow());
         }
         EventPayload::Artifact { path, .. } => {
-            println!("  {} checkpoint: {path}", style("•").cyan());
+            eprintln!("  {} checkpoint: {path}", style("•").cyan());
         }
         EventPayload::Completed { .. } => return Some(TrainOutcome::Completed),
         EventPayload::Error { message, .. } => {
@@ -884,7 +896,7 @@ fn probe_worker(ssh: &SshTarget) -> WorkerProbe {
 }
 
 async fn wait_for_instance(instance_id: u64) -> Result<SshTarget> {
-    println!(
+    eprintln!(
         "{} Waiting for instance to boot (usually 1-3 minutes)...",
         style("→").cyan()
     );
@@ -909,7 +921,7 @@ async fn wait_for_instance(instance_id: u64) -> Result<SshTarget> {
                         "Vast API failed {poll_failures} consecutive status polls for instance {instance_id}"
                     )));
                 }
-                println!(
+                eprintln!(
                     "{} Vast API error while polling ({poll_failures}/5), retrying...",
                     style("!").yellow()
                 );
@@ -918,7 +930,7 @@ async fn wait_for_instance(instance_id: u64) -> Result<SshTarget> {
             }
         };
         if inst.actual_status != last_status {
-            println!("  status: {}", inst.actual_status);
+            eprintln!("  status: {}", inst.actual_status);
             last_status = inst.actual_status.clone();
         }
         if inst.actual_status == "running"
@@ -950,7 +962,7 @@ async fn wait_for_instance(instance_id: u64) -> Result<SshTarget> {
 }
 
 fn wait_for_ssh(ssh: &SshTarget) -> Result<()> {
-    println!(
+    eprintln!(
         "{} Waiting for SSH at {}:{}...",
         style("→").cyan(),
         ssh.host,
