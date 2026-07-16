@@ -582,6 +582,9 @@ pub enum PodCommands {
         /// Replace an already-active pod instead of reusing it
         #[arg(long)]
         fresh: bool,
+        /// Warm the pod's store with a model after bootstrap (repeatable)
+        #[arg(long = "model")]
+        models: Vec<String>,
         /// Skip the rent-confirmation prompt
         #[arg(long)]
         yes: bool,
@@ -712,6 +715,10 @@ pub enum Commands {
         /// GPU type for remote execution (e.g. a100, a10g, h100, rtx4090)
         #[arg(long, default_value = "a100")]
         gpu_type: String,
+        /// Run on the active BYO-key pod (`modl pod up`) — the model is
+        /// pulled into the pod's store, nothing needs to be installed locally
+        #[arg(long, conflicts_with_all = ["cloud", "attach_gpu"])]
+        pod: bool,
         /// Output result as JSON (suppresses progress output)
         #[arg(long)]
         json: bool,
@@ -789,6 +796,9 @@ pub enum Commands {
         /// GPU type for remote execution (e.g. a100, a10g, h100, rtx4090)
         #[arg(long, default_value = "a100")]
         gpu_type: String,
+        /// Run on the active BYO-key pod (`modl pod up`)
+        #[arg(long, conflicts_with_all = ["cloud", "attach_gpu"])]
+        pod: bool,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -1196,6 +1206,11 @@ See `modl/docs/guides/workflows.md` for the full reference.")]
         /// Only meaningful with --dry-run today; ignored otherwise.
         #[arg(long)]
         json: bool,
+        /// Run on the active BYO-key pod (`modl pod up`) — the workflow,
+        /// model pulls, and step chaining all execute on the pod; artifacts
+        /// sync back when the run finishes
+        #[arg(long)]
+        pod: bool,
         /// Execute steps in YAML declaration order instead of the scheduler's
         /// optimized order. Use when you need outputs in a specific sequence
         /// for external tooling, or to debug scheduler behavior. Default is
@@ -1315,6 +1330,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             no_worker,
             attach_gpu,
             gpu_type,
+            pod,
             json,
         } => {
             generate::run(generate::GenerateArgs {
@@ -1344,6 +1360,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 no_worker,
                 attach_gpu,
                 gpu_type: &gpu_type,
+                pod,
                 json,
             })
             .await
@@ -1367,6 +1384,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             no_worker,
             attach_gpu,
             gpu_type,
+            pod,
             json,
         } => {
             edit::run(edit::EditArgs {
@@ -1388,6 +1406,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 no_worker,
                 attach_gpu,
                 gpu_type: &gpu_type,
+                pod,
                 json,
             })
             .await
@@ -1586,8 +1605,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                 disk,
                 min_vram,
                 fresh,
+                models,
                 yes,
-            } => pod::up(gpu, max_price, disk, min_vram, fresh, yes).await,
+            } => pod::up(gpu, max_price, disk, min_vram, fresh, models, yes).await,
             PodCommands::Exec { id, cmd } => pod::exec(id, cmd).await,
             PodCommands::Ls => pod::ls().await,
             PodCommands::Rm { id, yes } => pod::rm(id, yes).await,
@@ -1628,6 +1648,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             auto_pull,
             dry_run,
             json,
+            pod,
             in_order,
             force,
             run_id,
@@ -1640,6 +1661,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 in_order,
                 !force,
                 run_id.as_deref(),
+                pod,
             )
             .await
         }

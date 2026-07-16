@@ -605,6 +605,26 @@ Submit, then poll `job_status` later — the run survives client disconnects. Se
 
 **Image refs over remote MCP:** client-side file paths don't exist on the server. Use the workflow `images:` map with base64 data URIs — encode each reference image once (`base64 -i photo.png | tr -d '\n'` on Mac), define it under `images:`, reference it as `$name` in any edit step. `$step-id.outputs[N]` chain refs and pre-copied server paths also work.
 
+## Pods (BYO Vast.ai GPU — no local GPU needed)
+
+A pod is a Vast.ai instance rented with *your* API key (`~/.vast_api_key`). The pod gets its own modl install (binary + worker from the release tarball), so it runs the exact same code as a local machine: models are `modl pull`ed into the pod's store, the workflow engine runs pod-side, and artifacts sync back when the run finishes. Pods bill until destroyed — `modl pod rm` is the habit.
+
+```bash
+modl pod up rtx4090 --model flux-schnell   # rent + bootstrap + warm the store
+modl generate "a red apple" --base flux-schnell --pod
+modl edit --image photo.png "make it golden" --pod
+modl run workflow.yaml --pod               # whole workflow executes on the pod
+modl run workflow.yaml --pod --dry-run     # validate + list models, no pod needed
+modl pod ls                                # every instance billing on your account
+modl pod rm <id>                           # destroy — billing stops
+```
+
+- `--pod` on generate needs an explicit `--base <model-id>` (the model is pulled pod-side).
+- The run is fire-and-forget on the pod (`nohup` + status polling) — a dropped connection never kills it.
+- Artifacts land in `./pod-outputs/<run-id>/` locally after the run completes.
+- Not yet supported with `--pod`: `--lora`, `--init-image`/`--mask`, `--controlnet`, `--style-ref`, multi-image edit.
+- Training: `modl train --pod` (separate path — ships the worker directly, syncs the LoRA back, auto-destroys unless `--keep-pod`).
+
 ## Common Workflows
 
 ### Generate + Refine Pipeline

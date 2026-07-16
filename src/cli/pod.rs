@@ -71,6 +71,7 @@ pub async fn up(
     disk: f64,
     min_vram: Option<u32>,
     fresh: bool,
+    models: Vec<String>,
     yes: bool,
 ) -> Result<()> {
     // 1. Reuse is automatic — an existing pod short-circuits unless --fresh.
@@ -84,6 +85,9 @@ pub async fn up(
                 rec.dph_total,
                 style("--fresh").bold()
             );
+            if !models.is_empty() {
+                crate::core::pod_run::prepare(&pod::Pod::from(rec.clone()), &models)?;
+            }
             print_summary(&rec);
             return Ok(());
         }
@@ -130,7 +134,13 @@ pub async fn up(
     let rec = recorded.to_record(&opts.label);
     pod_state::upsert(rec.clone())?;
 
-    // 5. Summary.
+    // 5. Warm the store: install modl + pull the requested models so the
+    //    first job doesn't pay the download.
+    if !models.is_empty() {
+        crate::core::pod_run::prepare(&pod_obj, &models)?;
+    }
+
+    // 6. Summary.
     println!(
         "{} Pod {} up — {}, ${:.3}/hr, billing until destroyed",
         style("✓").green().bold(),

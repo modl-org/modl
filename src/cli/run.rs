@@ -188,6 +188,7 @@ impl PlanError {
 // Entry point
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     spec_paths: &[String],
     _auto_pull: bool,
@@ -196,7 +197,14 @@ pub async fn run(
     in_order: bool,
     skip_existing: bool,
     run_id_override: Option<&str>,
+    pod: bool,
 ) -> Result<()> {
+    if pod {
+        // Pod execution ships the YAML to the pod's own modl install — plan
+        // building, model resolution, and step chaining all happen there.
+        return run_on_pod(spec_paths, dry_run).await;
+    }
+
     let db = Database::open()?;
     let multi = spec_paths.len() > 1;
 
@@ -221,6 +229,63 @@ pub async fn run(
         execute_plan(plan, &db, in_order, skip_existing).await?;
     }
 
+    Ok(())
+}
+
+/// Run each workflow file on the active pod, sequentially, via the remote
+/// modl install (`core::pod_run`). With --dry-run, validate pod
+/// compatibility and list referenced models without renting anything.
+async fn run_on_pod(spec_paths: &[String], dry_run: bool) -> Result<()> {
+    use anyhow::Context as _;
+    use console::style;
+
+    if dry_run {
+        for path in spec_paths {
+            let yaml =
+                std::fs::read_to_string(path).with_context(|| format!("Failed to read {path}"))?;
+            crate::core::pod_run::check_pod_supported(&yaml)?;
+            let models = crate::core::pod_run::workflow_models(&yaml)?;
+            println!(
+                "{} {path}: pod-compatible — models: {}",
+                style("✓").green(),
+                models.join(", ")
+            );
+        }
+        return Ok(());
+    }
+
+    let rec = crate::core::pod_state::active_pod()
+        .await?
+        .context("No pod up — run `modl pod up <gpu>` first, or drop --pod to run locally.")?;
+    let pod = crate::core::pod::Pod::from(rec.clone());
+
+    for (i, path) in spec_paths.iter().enumerate() {
+        if spec_paths.len() > 1 {
+            if i > 0 {
+                println!();
+            }
+            println!("── {}/{}: {} ──", i + 1, spec_paths.len(), path);
+        }
+        let yaml =
+            std::fs::read_to_string(path).with_context(|| format!("Failed to read {path}"))?;
+        println!(
+            "{} Running {} on pod {} ({}, ${:.3}/hr)…",
+            style("→").cyan(),
+            path,
+            rec.instance_id,
+            rec.gpu_name,
+            rec.dph_total
+        );
+        crate::core::pod_run::run_workflow_on_pod(&pod, &yaml, None).await?;
+    }
+
+    println!(
+        "{} Pod {} still running (${:.3}/hr) — {} when done.",
+        style("⚠").yellow(),
+        rec.instance_id,
+        rec.dph_total,
+        style(format!("modl pod rm {}", rec.instance_id)).bold()
+    );
     Ok(())
 }
 

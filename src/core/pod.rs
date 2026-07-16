@@ -624,10 +624,27 @@ pub async fn run_pod_training(spec: TrainJobSpec, opts: PodOptions) -> Result<()
             opts.gpu_type,
             pod.instance_id
         );
-    } else if let Err(e) = teardown(&pod).await {
-        // Don't clobber the training result — the LoRA may already be
-        // registered locally. The pod stays tracked and nagged about.
-        eprintln!("{} {e}", style("✗").red());
+    } else {
+        if result.is_err() {
+            // Best-effort artifact rescue before the pod (and its disk) goes
+            // away — a run that died at step 900/1000 still holds valuable
+            // checkpoints.
+            let local_out = PathBuf::from(&spec.output.destination_dir);
+            if std::fs::create_dir_all(&local_out).is_ok()
+                && rsync_from(&pod.ssh, &format!("{REMOTE_ROOT}/output/"), &local_out).is_ok()
+            {
+                println!(
+                    "{} Salvaged partial artifacts → {}",
+                    style("→").cyan(),
+                    local_out.display()
+                );
+            }
+        }
+        if let Err(e) = teardown(&pod).await {
+            // Don't clobber the training result — the LoRA may already be
+            // registered locally. The pod stays tracked and nagged about.
+            eprintln!("{} {e}", style("✗").red());
+        }
     }
 
     let hours = started_at.elapsed().as_secs_f64() / 3600.0;
@@ -679,7 +696,7 @@ fn check_local_tools() -> Result<()> {
     Ok(())
 }
 
-fn huggingface_token() -> Option<String> {
+pub(crate) fn huggingface_token() -> Option<String> {
     if let Ok(t) = std::env::var("HF_TOKEN")
         && !t.trim().is_empty()
     {
@@ -1051,7 +1068,7 @@ pub(crate) fn run_ssh_capture(ssh: &SshTarget, cmd: &str) -> Result<String> {
 
 /// Run a remote command feeding `input` on stdin — for secrets that must not
 /// appear in any argv.
-fn run_ssh_stdin(ssh: &SshTarget, cmd: &str, input: &str) -> Result<()> {
+pub(crate) fn run_ssh_stdin(ssh: &SshTarget, cmd: &str, input: &str) -> Result<()> {
     use std::io::Write;
     let mut child = Command::new("ssh")
         .args(ssh.base_args())
@@ -1077,7 +1094,7 @@ fn run_ssh_stdin(ssh: &SshTarget, cmd: &str, input: &str) -> Result<()> {
 }
 
 /// Run a remote script with live output (bootstrap etc.).
-fn run_ssh_streaming(ssh: &SshTarget, script: &str) -> Result<()> {
+pub(crate) fn run_ssh_streaming(ssh: &SshTarget, script: &str) -> Result<()> {
     let status = Command::new("ssh")
         .args(ssh.base_args())
         .arg(format!("bash -c {}", shell_quote(script)))

@@ -255,6 +255,7 @@ async fn run_single_generate(sender: &broadcast::Sender<String>, req: GenerateRe
         no_worker: false,
         attach_gpu: false,
         gpu_type: "a100",
+        pod: false,
         json: true,
     })
     .await;
@@ -319,6 +320,7 @@ async fn run_single_edit(sender: &broadcast::Sender<String>, req: EditRequest) {
         no_worker: false,
         attach_gpu: false,
         gpu_type: "a100",
+        pod: false,
         json: true,
     })
     .await;

@@ -110,12 +110,97 @@ pub struct GenerateArgs<'a> {
     pub no_worker: bool,
     pub attach_gpu: bool,
     pub gpu_type: &'a str,
+    pub pod: bool,
     pub json: bool,
 }
 
 pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
-    let db = Database::open()?;
+    // Pod execution funnels through the remote modl install — model checks
+    // and the store live pod-side, so none of the local resolution below
+    // applies.
+    if args.pod {
+        return run_on_pod(&args).await;
+    }
 
+    let db = Database::open()?;
+    run_local(args, db).await
+}
+
+/// Generate on the active pod: build a one-step workflow and hand it to the
+/// remote modl (`core::pod_run`). The model is pulled into the pod's store,
+/// so nothing needs to be installed locally.
+async fn run_on_pod(args: &GenerateArgs<'_>) -> Result<()> {
+    let model = args.base.context(
+        "--pod needs an explicit --base <model-id> (e.g. flux-schnell) — it's pulled into the pod's store.",
+    )?;
+    for (flag, set) in [
+        ("--lora", args.lora.is_some()),
+        ("--init-image", args.init_image.is_some()),
+        ("--mask", args.mask.is_some()),
+        ("--controlnet", !args.controlnet.is_empty()),
+        ("--style-ref", !args.style_ref.is_empty()),
+        ("--cloud", args.cloud),
+        ("--attach-gpu", args.attach_gpu),
+    ] {
+        if set {
+            anyhow::bail!("{flag} isn't supported with --pod yet — run locally or drop the flag.");
+        }
+    }
+
+    let (width, height) = match args.size {
+        Some(s) => {
+            let (w, h) = model_resolve::resolve_size(s)?;
+            (Some(w), Some(h))
+        }
+        None => (None, None),
+    };
+    // count>1 maps to explicit seeds (one output per seed on the pod).
+    let seeds: Vec<u64> = match (args.seed, args.count) {
+        (Some(s), c) if c > 1 => (0..c as u64).map(|i| s + i).collect(),
+        (Some(s), _) => vec![s],
+        (None, c) if c > 1 => {
+            let base = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos() as u64)
+                .unwrap_or(0);
+            (0..c as u64).map(|i| base + i).collect()
+        }
+        (None, _) => vec![],
+    };
+
+    let spec = crate::core::pod_run::single_generate_spec(
+        model,
+        args.prompt,
+        width,
+        height,
+        args.steps,
+        args.guidance.map(|g| g as f64),
+        &seeds,
+    )?;
+
+    let rec = crate::core::pod_state::active_pod()
+        .await?
+        .context("No pod up — run `modl pod up <gpu>` first, or use --attach-gpu / --cloud.")?;
+    println!(
+        "{} Generating on pod {} ({}, ${:.3}/hr)…",
+        style("→").cyan(),
+        rec.instance_id,
+        rec.gpu_name,
+        rec.dph_total
+    );
+    let pod = crate::core::pod::Pod::from(rec.clone());
+    crate::core::pod_run::run_workflow_on_pod(&pod, &spec, None).await?;
+    println!(
+        "{} Pod {} still running (${:.3}/hr) — {} when done.",
+        style("⚠").yellow(),
+        rec.instance_id,
+        rec.dph_total,
+        style(format!("modl pod rm {}", rec.instance_id)).bold()
+    );
+    Ok(())
+}
+
+async fn run_local(args: GenerateArgs<'_>, db: Database) -> Result<()> {
     // Destructure for convenience
     let GenerateArgs {
         prompt,
@@ -144,6 +229,7 @@ pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
         no_worker,
         attach_gpu,
         gpu_type,
+        pod: _,
         json,
     } = args;
 
