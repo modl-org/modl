@@ -75,11 +75,12 @@ pub fn ensure_modl(pod: &Pod) -> Result<()> {
         shell_quote(&url)
     );
     if run_ssh_streaming(&pod.ssh, &install).is_err() {
-        // Dev build with no published asset — upload the local musl build.
-        let local = local_musl_binary()?;
+        // Dev build with no published asset — upload a locally-built binary.
+        let local = local_pod_binary()?;
         println!(
-            "{} No release asset for v{version} — uploading local musl build...",
-            style("!").yellow()
+            "{} No release asset for v{version} — uploading local build ({})...",
+            style("!").yellow(),
+            local.display()
         );
         run_ssh_quiet(&pod.ssh, &format!("mkdir -p {REMOTE_MODL_DIR}/python"))?;
         rsync_to(&pod.ssh, &local, REMOTE_MODL)?;
@@ -101,17 +102,33 @@ pub fn ensure_modl(pod: &Pod) -> Result<()> {
     Ok(())
 }
 
-/// Dev fallback: the workspace's own musl release build.
-fn local_musl_binary() -> Result<PathBuf> {
-    let p =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("target/x86_64-unknown-linux-musl/release/modl");
-    if p.exists() {
-        return Ok(p);
+/// Dev fallback: a locally-built binary that can run on the pod
+/// (x86_64-linux). Preference order: `MODL_POD_BINARY` override, the
+/// workspace musl build (static, always works), then the host gnu build —
+/// Vast images ship a recent glibc, so a gnu binary from a dev box works,
+/// it's just not guaranteed static.
+fn local_pod_binary() -> Result<PathBuf> {
+    if let Ok(p) = std::env::var("MODL_POD_BINARY") {
+        let p = PathBuf::from(p);
+        if p.exists() {
+            return Ok(p);
+        }
+        bail!("MODL_POD_BINARY points to missing path: {}", p.display());
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let musl = root.join("target/x86_64-unknown-linux-musl/release/modl");
+    if musl.exists() {
+        return Ok(musl);
+    }
+    let gnu = root.join("target/release/modl");
+    if cfg!(all(target_os = "linux", target_arch = "x86_64")) && gnu.exists() {
+        return Ok(gnu);
     }
     bail!(
-        "modl v{} has no published release asset and no local musl build.\n  \
+        "modl v{} has no published release asset and no local x86_64-linux build.\n  \
          Build one: cargo build --release --target x86_64-unknown-linux-musl\n  \
-         (or publish the release so pods can download it)",
+         (or `cargo build --release` on x86_64 Linux, or set MODL_POD_BINARY, \
+         or publish the release so pods can download it)",
         env!("CARGO_PKG_VERSION")
     )
 }
