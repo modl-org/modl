@@ -1242,6 +1242,20 @@ fn pod_job_status(run_id: &str) -> Result<Value, (i32, String)> {
             );
         }
         v
+    } else if crate::core::paths::modl_root()
+        .join("run-logs")
+        .join(format!("{run_id}.yaml"))
+        .is_file()
+    {
+        // We submitted this run but the pod's DB doesn't know it yet — the
+        // pod-side modl is still preparing (binary install, model pull,
+        // runtime setup), which dominates a cold pod's first minutes.
+        // "pending" is the truthful answer, not an error.
+        json!({
+            "run_id": run_id,
+            "status": "pending",
+            "note": "Pod is still preparing the run (model pull / runtime install) — pod_logs shows live progress.",
+        })
     } else {
         let msg = if stderr.is_empty() { &stdout } else { &stderr };
         return Err((-32603, format!("Pod status check failed: {}", msg.trim())));
