@@ -363,34 +363,45 @@ async fn run_on_pod(
         return Ok(());
     }
 
+    // Read + validate every spec BEFORE the Vast round-trip in active_pod():
+    // an invalid spec must fail in milliseconds, not after a slow API call —
+    // MCP's submit watch window is short, and anything slower reports a
+    // dead-on-arrival run as "submitted".
+    let mut specs: Vec<(&String, String)> = Vec::with_capacity(spec_paths.len());
+    for path in spec_paths {
+        let yaml =
+            std::fs::read_to_string(path).with_context(|| format!("Failed to read {path}"))?;
+        crate::core::pod_run::check_pod_supported(&yaml)
+            .with_context(|| format!("In workflow file: {path}"))?;
+        specs.push((path, yaml));
+    }
+
     let rec = crate::core::pod_state::active_pod()
         .await?
         .context("No pod up — run `modl pod up <gpu>` first, or drop --pod to run locally.")?;
     let pod = crate::core::pod::Pod::from(rec.clone());
 
-    for (i, path) in spec_paths.iter().enumerate() {
+    for (i, (path, yaml)) in specs.iter().enumerate() {
         if spec_paths.len() > 1 {
             if i > 0 {
                 eprintln!();
             }
             eprintln!("── {}/{}: {} ──", i + 1, spec_paths.len(), path);
         }
-        let yaml =
-            std::fs::read_to_string(path).with_context(|| format!("Failed to read {path}"))?;
         eprintln!(
             "{} Running {} on pod {} ({}, ${:.3}/hr)…",
             style("→").cyan(),
             path,
             rec.instance_id,
             rec.gpu_name,
-            rec.dph_total
+            rec.dph_all_in()
         );
         let opts = crate::core::pod_run::RemoteRunOptions {
             run_id: run_id_override.map(String::from),
             force: !skip_existing,
             in_order,
         };
-        let outcome = crate::core::pod_run::run_workflow_on_pod(&pod, &yaml, None, opts).await?;
+        let outcome = crate::core::pod_run::run_workflow_on_pod(&pod, yaml, None, opts).await?;
         if json {
             println!(
                 "{}",
@@ -403,7 +414,7 @@ async fn run_on_pod(
         "{} Pod {} still running (${:.3}/hr) — {} when done.",
         style("⚠").yellow(),
         rec.instance_id,
-        rec.dph_total,
+        rec.dph_all_in(),
         style(format!("modl pod rm {}", rec.instance_id)).bold()
     );
     Ok(())

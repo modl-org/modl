@@ -178,10 +178,9 @@ pub async fn search_offers(
         // link-speed tax sort within it.
         "inet_down": {"gte": 1000},
         "inet_up": {"gte": 300},
-        // Must cover the POD_DISK_GB (80) requested at rent time — hosts
-        // below it pass search, then fail at create_instance, burning a
-        // failover attempt.
-        "disk_space": {"gte": 80},
+        // Must cover the disk requested at rent time — hosts below it pass
+        // search, then fail at create_instance, burning a failover attempt.
+        "disk_space": {"gte": disk_gb},
         "reliability2": {"gte": 0.98},
         "direct_port_count": {"gte": 1},
         "cuda_max_good": {"gte": 12.9},
@@ -367,8 +366,19 @@ fn parse_instance(inst: &serde_json::Value, fallback_id: u64) -> Result<Instance
     })
 }
 
+/// What actually happened on a destroy request. Teardown treats both as
+/// success (idempotency), but user-facing surfaces must not confirm
+/// "billing stopped" for an id Vast has never heard of — a typo'd
+/// `pod rm` would false-confirm while the real pod bills on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestroyOutcome {
+    Destroyed,
+    /// Vast returned 404 — already destroyed, or the id never existed.
+    AlreadyGone,
+}
+
 /// Destroy (terminate) an instance. Billing stops.
-pub async fn destroy_instance(instance_id: u64) -> Result<()> {
+pub async fn destroy_instance(instance_id: u64) -> Result<DestroyOutcome> {
     let (client, key) = client()?;
     let resp = client
         .delete(format!("{API_BASE}/instances/{instance_id}/"))
@@ -380,10 +390,10 @@ pub async fn destroy_instance(instance_id: u64) -> Result<()> {
     // successful destroy — `pod rm` and teardown must be idempotent so the
     // local record can still be pruned instead of nagging forever.
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(());
+        return Ok(DestroyOutcome::AlreadyGone);
     }
     check(resp, "instance destroy").await?;
-    Ok(())
+    Ok(DestroyOutcome::Destroyed)
 }
 
 #[cfg(test)]

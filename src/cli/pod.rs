@@ -46,6 +46,9 @@ pub async fn ls(json: bool) -> Result<()> {
                     // Tracked in pods.json — the pod train/run/pull reuse.
                     "active": rec.is_some(),
                     "label": rec.map(|r| r.label.clone()),
+                    // All-in (gpu + storage) — dph_total above is Vast's live
+                    // GPU rate and excludes the storage line.
+                    "dph_all_in": rec.map(|r| r.dph_all_in()),
                     "cost_so_far": rec.map(|r| r.cost_so_far()),
                     // Bootstrapped and ready for jobs (fingerprint recorded).
                     "ready": rec.map(|r| r.bootstrap_fingerprint.is_some()).unwrap_or(false),
@@ -115,14 +118,15 @@ pub async fn up(
     json: bool,
 ) -> Result<()> {
     // 1. Reuse is automatic — an existing pod short-circuits unless --fresh.
+    let mut replacing: Option<PodRecord> = None;
     if let Some(rec) = pod_state::active_pod().await? {
         if !fresh {
             eprintln!(
-                "{} Pod {} already up — {}, ${:.3}/hr. Reuse is automatic; pass {} to replace it.",
+                "{} Pod {} already up — {}, ${:.3}/hr all-in. Reuse is automatic; pass {} to replace it.",
                 style("✓").green(),
                 rec.instance_id,
                 rec.gpu_name,
-                rec.dph_total,
+                rec.dph_all_in(),
                 style("--fresh").bold()
             );
             if !models.is_empty() {
@@ -138,12 +142,17 @@ pub async fn up(
             }
             return Ok(());
         }
+        // Don't destroy the working pod yet: if no offer fits the price cap,
+        // the rent is declined, or every host duds out, we'd end with zero
+        // pods and a lost warm cache. Provision the replacement first — a few
+        // minutes of double billing is strictly cheaper than losing the old
+        // pod for nothing.
         eprintln!(
-            "{} --fresh: destroying active pod {} before provisioning a new one…",
+            "{} --fresh: provisioning a replacement for pod {} — the old pod is destroyed only once the new one is up…",
             style("→").cyan(),
             rec.instance_id
         );
-        pod::teardown(&pod::Pod::from(rec)).await?;
+        replacing = Some(rec);
     }
 
     // 2. VRAM floor: for an explicit GPU the user chose deliberately (none);
@@ -182,6 +191,16 @@ pub async fn up(
     let rec = recorded.to_record(&opts.label);
     pod_state::upsert(rec.clone())?;
 
+    // 4b. --fresh: the replacement is up and bootstrapped — now destroy the
+    //     old pod. A failed teardown doesn't fail the command (the new pod is
+    //     live); the old record stays tracked and nagged about.
+    if let Some(old) = replacing
+        && old.instance_id != rec.instance_id
+        && let Err(e) = pod::teardown(&pod::Pod::from(old)).await
+    {
+        eprintln!("{} {e}", style("✗").red());
+    }
+
     // 5. Warm the store: install modl + pull the requested models so the
     //    first job doesn't pay the download.
     if !models.is_empty() {
@@ -190,11 +209,11 @@ pub async fn up(
 
     // 6. Summary.
     eprintln!(
-        "{} Pod {} up — {}, ${:.3}/hr, billing until destroyed",
+        "{} Pod {} up — {}, ${:.3}/hr all-in, billing until destroyed",
         style("✓").green().bold(),
         pod_obj.instance_id,
         pod_obj.gpu_name,
-        pod_obj.dph_total
+        pod_obj.dph_total + pod_obj.dph_storage
     );
     if json {
         println!(
@@ -214,6 +233,8 @@ fn up_result_json(rec: &PodRecord, reused: bool) -> serde_json::Value {
         "instance_id": rec.instance_id,
         "gpu_name": rec.gpu_name,
         "dph_total": rec.dph_total,
+        "dph_storage": rec.dph_storage,
+        "dph_all_in": rec.dph_all_in(),
         "ssh_host": rec.ssh_host,
         "ssh_port": rec.ssh_port,
         "label": rec.label,
@@ -341,13 +362,21 @@ pub async fn rm(instance_id: u64, yes: bool) -> Result<()> {
             return Ok(());
         }
     }
-    vast::destroy_instance(instance_id).await?;
+    let outcome = vast::destroy_instance(instance_id).await?;
     // Drop it from pods.json too, whether or not it was a tracked modl pod.
     let _ = pod_state::remove(instance_id);
-    println!(
-        "{} Instance {instance_id} destroyed — billing stopped.",
-        style("✓").green()
-    );
+    match outcome {
+        vast::DestroyOutcome::Destroyed => println!(
+            "{} Instance {instance_id} destroyed — billing stopped.",
+            style("✓").green()
+        ),
+        // Don't confirm "billing stopped" for an id Vast never knew: on a
+        // typo the REAL pod is still billing — send the user to pod ls.
+        vast::DestroyOutcome::AlreadyGone => println!(
+            "{} Instance {instance_id} not found on Vast (already destroyed, or a mistyped id).\n  Check what is still running: modl pod ls",
+            style("!").yellow()
+        ),
+    }
     Ok(())
 }
 

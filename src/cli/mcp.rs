@@ -1079,6 +1079,14 @@ fn tool_run_workflow(args: &Value) -> Result<Value, (i32, String)> {
         ));
     }
 
+    // Validate pod specs in-process, not via the spawned child: the child
+    // only reaches its spec checks after a Vast API round-trip, so a slow
+    // response outlives the early-exit watch window below and an invalid
+    // spec would be reported "submitted" — a run that can never complete.
+    if pod && let Err(e) = crate::core::pod_run::check_pod_supported(spec_yaml) {
+        return Err((-32602, format!("{e:#}")));
+    }
+
     // Pre-generate the run_id. Includes a short random suffix to prevent
     // collisions when two workflows are submitted within the same second.
     let run_id = format!(
@@ -1162,9 +1170,31 @@ fn tool_run_workflow(args: &Value) -> Result<Value, (i32, String)> {
 
     // Reap the child process when it exits so it doesn't linger as a zombie.
     // Rust's Drop on Child does NOT wait, so a long-running MCP server would
-    // accumulate defunct processes without this.
+    // accumulate defunct processes without this. For pod runs the reaper also
+    // records failure: the result file is only ever written by the child's
+    // stdout, so a runner that dies after the watch window (pod lost, sync
+    // failed) would otherwise leave job_status answering "pending" forever.
+    let reap_run_id = run_id.clone();
+    let reap_log = log_path.clone();
     std::thread::spawn(move || {
-        let _ = child.wait();
+        let exit = child.wait();
+        if !pod || exit.map(|s| s.success()).unwrap_or(false) {
+            return;
+        }
+        // Never clobber a real result — `run --pod --json` may have printed
+        // one (e.g. partial_failure) before exiting nonzero.
+        if read_pod_result(&reap_run_id).is_none() {
+            let _ = std::fs::write(
+                pod_result_path(&reap_run_id),
+                json!({
+                    "run_id": reap_run_id,
+                    "status": "failed",
+                    "note": "The detached pod runner exited before syncing results home — the log has the failure. If the pod is still up, pod_logs / pod_pull may recover the run.",
+                    "log": reap_log.to_string_lossy(),
+                })
+                .to_string(),
+            );
+        }
     });
 
     let mut result = json!({
@@ -1225,17 +1255,33 @@ fn tool_job_status(args: &Value) -> Result<Value, (i32, String)> {
 /// already destroyed.
 fn pod_job_status(run_id: &str) -> Result<Value, (i32, String)> {
     let local = read_pod_result(run_id);
+    // A "failed" result is the reaper's marker that the detached runner died
+    // — terminal for polling, but nothing has synced home.
+    let runner_failed = local
+        .as_ref()
+        .and_then(|l| l.get("status"))
+        .and_then(|s| s.as_str())
+        == Some("failed");
 
     let (stdout, stderr, success) =
         run_modl(&["status", "--json", "--pod", run_id]).map_err(|e| (-32603, e))?;
 
     let mut result = if success {
-        serde_json::from_str::<Value>(&stdout).unwrap_or_else(|_| json!({ "run_id": run_id }))
+        let mut v =
+            serde_json::from_str::<Value>(&stdout).unwrap_or_else(|_| json!({ "run_id": run_id }));
+        if runner_failed && let Some(obj) = v.as_object_mut() {
+            obj.insert(
+                "note".into(),
+                json!("The local watcher for this run died — artifacts will NOT sync home automatically. Use pod_pull once the pod-side run completes."),
+            );
+        }
+        v
     } else if let Some(local) = &local {
-        // Pod gone or unreachable, but the run already synced home — report
-        // from the local result instead of failing the poll.
+        // Pod gone or unreachable, but a local result exists (synced home, or
+        // the reaper's failure marker) — report it instead of failing the
+        // poll. Either way this is a terminal answer: stop polling.
         let mut v = local.clone();
-        if let Some(obj) = v.as_object_mut() {
+        if !runner_failed && let Some(obj) = v.as_object_mut() {
             obj.insert(
                 "note".into(),
                 json!("Pod status unavailable — reporting from the synced local result."),
@@ -1262,7 +1308,10 @@ fn pod_job_status(run_id: &str) -> Result<Value, (i32, String)> {
     };
 
     if let Some(obj) = result.as_object_mut() {
-        obj.insert("synced_home".into(), json!(local.is_some()));
+        obj.insert(
+            "synced_home".into(),
+            json!(local.is_some() && !runner_failed),
+        );
         if let Some(images) = local.as_ref().and_then(|l| l.get("images")) {
             obj.insert("local_images".into(), images.clone());
         }
@@ -1289,6 +1338,15 @@ fn tool_list_run_outputs(args: &Value) -> Result<Value, (i32, String)> {
                 ),
             ));
         };
+        if local.get("status").and_then(|s| s.as_str()) == Some("failed") {
+            let log = local.get("log").and_then(|l| l.as_str()).unwrap_or("");
+            return Err((
+                -32603,
+                format!(
+                    "Run {run_id} failed before syncing home — the log has the failure: {log}. If the pod is still up, pod_pull may recover completed artifacts."
+                ),
+            ));
+        }
         let images = local.get("images").cloned().unwrap_or_else(|| json!([]));
         let count = images.as_array().map(|a| a.len()).unwrap_or(0);
         let text = format!(
