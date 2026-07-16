@@ -10,11 +10,14 @@ use serde_json::json;
 
 const API_BASE: &str = "https://console.vast.ai/api/v0";
 
-/// Docker image for rented pods. Vast's minimal base image on a PINNED tag:
-/// the bootstrap builds its own python/torch venv, so the fat pytorch image
-/// buys nothing — and a stable digest means host docker caches actually hit
-/// (`:latest` churns and forces multi-GB re-pulls fleet-wide).
-pub const POD_IMAGE: &str = "vastai/base-image:cuda-12.9.2-auto";
+/// Docker image for rented pods. Vast's own default PyTorch template: hosts
+/// pre-cache whatever the console default pulls, so it boots in ~1 minute
+/// fleet-wide, while a pinned niche tag pulls 7.6GB cold (measured live
+/// 2026-07-16: an afternoon of 10-25+ min boots and abandoned rents; the
+/// modl-cloud orchestrator learned the same lesson and carries the same
+/// comment). The bootstrap builds its own python/torch venv either way, so
+/// the image only needs to exist quickly — `:latest` churn is irrelevant.
+pub const POD_IMAGE: &str = "vastai/pytorch:latest";
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // full marketplace row — some fields are display-only for now
@@ -169,8 +172,12 @@ pub async fn search_offers(
         "rentable": {"eq": true},
         "num_gpus": {"eq": 1},
         "dph_total": {"lte": max_price_per_hour},
-        "inet_down": {"gte": 500},
-        "inet_up": {"gte": 200},
+        // Fast links cut billed dead time on every transfer (image, runtime,
+        // model pulls, artifact sync). modl-cloud runs 2000 down in prod;
+        // pods keep a slightly wider pool and let the value ranking's
+        // link-speed tax sort within it.
+        "inet_down": {"gte": 1000},
+        "inet_up": {"gte": 300},
         // Must cover the POD_DISK_GB (80) requested at rent time — hosts
         // below it pass search, then fail at create_instance, burning a
         // failover attempt.
