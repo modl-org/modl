@@ -134,18 +134,28 @@ async fn run_on_pod(args: &GenerateArgs<'_>) -> Result<()> {
         "--pod needs an explicit --base <model-id> (e.g. flux-schnell) — it's pulled into the pod's store.",
     )?;
     for (flag, set) in [
-        ("--lora", args.lora.is_some()),
         ("--init-image", args.init_image.is_some()),
         ("--mask", args.mask.is_some()),
         ("--controlnet", !args.controlnet.is_empty()),
         ("--style-ref", !args.style_ref.is_empty()),
-        ("--fast", args.fast.is_some()),
         ("--cloud", args.cloud),
         ("--attach-gpu", args.attach_gpu),
     ] {
         if set {
             anyhow::bail!("{flag} isn't supported with --pod yet — run locally or drop the flag.");
         }
+    }
+    if args.fast.is_some() && args.lora.is_some() {
+        anyhow::bail!(
+            "--fast and --lora cannot be used together. \
+             The --fast flag auto-applies a Lightning distillation LoRA."
+        );
+    }
+    // Workflow `lora:` refs carry no weight — the pod applies full strength.
+    if args.lora.is_some() && args.lora_strength != 1.0 {
+        anyhow::bail!(
+            "--lora-strength isn't supported with --pod yet — LoRAs run at full strength there."
+        );
     }
 
     let (width, height) = match args.size {
@@ -172,6 +182,8 @@ async fn run_on_pod(args: &GenerateArgs<'_>) -> Result<()> {
     let spec = crate::core::pod_run::single_generate_spec(
         model,
         args.prompt,
+        args.lora,
+        args.fast,
         width,
         height,
         args.steps,
@@ -312,20 +324,7 @@ async fn run_local(args: GenerateArgs<'_>, db: Database) -> Result<()> {
             )
         })?;
 
-        let sched_overrides: std::collections::HashMap<String, serde_json::Value> = lightning
-            .scheduler_overrides
-            .iter()
-            .map(|(k, v)| {
-                let val = if *v == "null" {
-                    serde_json::Value::Null
-                } else if let Ok(f) = v.parse::<f64>() {
-                    serde_json::json!(f)
-                } else {
-                    serde_json::Value::String(v.to_string())
-                };
-                (k.to_string(), val)
-            })
-            .collect();
+        let sched_overrides = lightning.scheduler_overrides_json();
 
         (
             lora_ref,

@@ -123,12 +123,17 @@ modl generate "a red apple on a rustic wooden table" --base flux-schnell --pod
 modl edit --image photo.png "make it golden" --pod
 modl run workflow.yaml --pod                 # multi-step workflows, chained on the pod
 
+modl generate "OHWX on a beach" --base flux-dev --lora product-v1 --pod   # your LoRA, their GPU
+modl generate "a red apple" --base qwen-image --fast 4 --pod              # Lightning fast mode
+
 modl pod rm <id>                             # destroy when done — pods bill until destroyed
 ```
 
 Runs are fire-and-forget on the pod: close the laptop mid-generation and the job finishes anyway — fetch the results later with `modl pod pull <run-id>`. Everything moves directly between your machine and the pod over SSH; no cloud storage, no third-party relay. `modl run workflow.yaml --pod --dry-run` validates a workflow's pod-compatibility without renting anything.
 
-Not yet supported on pods: LoRAs, controlnet/style-ref, inpainting masks.
+LoRAs work on pods like they do locally: registry LoRAs are pulled on the pod, and your own trained LoRAs are pushed into the pod's store automatically the first time a workflow references them. This closes the loop with pod training — train on a pod, then `--lora <name>` on a pod, no manual file juggling.
+
+Not yet supported on pods: controlnet/style-ref, inpainting masks.
 
 ---
 

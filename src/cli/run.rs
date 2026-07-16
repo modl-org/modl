@@ -115,11 +115,34 @@ pub struct PlannedStep {
     /// Used for display ("show the override in the plan print") and for
     /// warm-worker accounting (model switches cost a reload).
     pub model_overridden: bool,
+    /// Lightning fast-mode resolution for steps with `fast:`. The Lightning
+    /// LoRA itself lands in `resolved_lora`; this carries the rest.
+    pub lightning: Option<ResolvedLightning>,
+}
+
+/// Plan-time resolution of a step's `fast:` field against the model's
+/// Lightning config from models.toml.
+#[derive(Debug, Clone)]
+pub struct ResolvedLightning {
+    pub steps: u32,
+    pub guidance: f32,
+    pub scheduler_overrides: HashMap<String, serde_json::Value>,
 }
 
 impl PlannedStep {
     pub fn expected_artifacts(&self) -> usize {
         self.sub_jobs.iter().map(|(_, c)| *c as usize).sum()
+    }
+
+    /// Default (steps, guidance) for this step: the Lightning resolution when
+    /// `fast:` is set, the effective model's defaults otherwise. Explicit
+    /// per-step `steps:`/`guidance:` still override these.
+    fn effective_defaults(&self) -> (u32, f32) {
+        let (steps, guidance) = model_family::model_defaults(&self.resolved_model.id);
+        match &self.lightning {
+            Some(l) => (l.steps, l.guidance),
+            None => (steps, guidance),
+        }
     }
 }
 
@@ -139,6 +162,13 @@ pub enum PlanError {
 
     #[error("LoRA `{lora}` not found in local store")]
     LoraNotFound { lora: String },
+
+    #[error("step `{step_id}`: Lightning LoRA `{lora}` (variant {variant}) is not installed")]
+    LightningLoraNotInstalled {
+        step_id: String,
+        lora: String,
+        variant: String,
+    },
 
     #[error(
         "step `{step_id}`: model `{model}` does not support `{kind}` (missing capability `{required}`)"
@@ -161,6 +191,7 @@ impl PlanError {
             PlanError::Parse(_) => "parse_error",
             PlanError::ModelNotInstalled { .. } => "model_not_installed",
             PlanError::LoraNotFound { .. } => "lora_not_found",
+            PlanError::LightningLoraNotInstalled { .. } => "lightning_lora_not_installed",
             PlanError::IncompatibleCapability { .. } => "incompatible_capability",
             PlanError::Other(_) => "other",
         }
@@ -172,6 +203,9 @@ impl PlanError {
             PlanError::ModelNotInstalled { model } => Some(format!("modl pull {model}")),
             PlanError::LoraNotFound { lora } => {
                 Some(format!("modl pull {lora} or train it with `modl train`"))
+            }
+            PlanError::LightningLoraNotInstalled { lora, variant, .. } => {
+                Some(format!("modl pull {lora} --variant {variant}"))
             }
             PlanError::IncompatibleCapability { kind, .. } => Some(format!(
                 "pick a model that supports `{kind}` (see `modl info <model>`)"
@@ -263,15 +297,22 @@ async fn run_on_pod(
     }
 
     if dry_run {
+        let db = Database::open()?;
         for path in spec_paths {
             let checked = std::fs::read_to_string(path)
                 .with_context(|| format!("Failed to read {path}"))
                 .and_then(|yaml| {
                     crate::core::pod_run::check_pod_supported(&yaml)?;
-                    crate::core::pod_run::workflow_models(&yaml)
+                    let models = crate::core::pod_run::workflow_models(&yaml)?;
+                    let loras = crate::core::pod_run::classify_workflow_loras(&yaml, &db)?;
+                    Ok((models, loras))
                 });
             match checked {
-                Ok(models) => {
+                Ok((models, loras)) => {
+                    let lora_pulls: Vec<&str> =
+                        loras.pulls.iter().map(|(id, _)| id.as_str()).collect();
+                    let lora_pushes: Vec<&str> =
+                        loras.pushes.iter().map(|p| p.name.as_str()).collect();
                     if json {
                         println!(
                             "{}",
@@ -280,6 +321,8 @@ async fn run_on_pod(
                                 "target": "pod",
                                 "spec": path,
                                 "models": models,
+                                "lora_pulls": lora_pulls,
+                                "lora_pushes": lora_pushes,
                             })
                         );
                     } else {
@@ -288,6 +331,12 @@ async fn run_on_pod(
                             style("✓").green(),
                             models.join(", ")
                         );
+                        if !lora_pulls.is_empty() {
+                            println!("  LoRAs pulled on pod: {}", lora_pulls.join(", "));
+                        }
+                        if !lora_pushes.is_empty() {
+                            println!("  LoRAs pushed to pod: {}", lora_pushes.join(", "));
+                        }
                     }
                 }
                 Err(e) => {
@@ -450,15 +499,17 @@ pub fn build_plan(
     let mut total_artifacts = 0usize;
 
     for step in &wf.steps {
-        let (step_model_override, step_lora_override, sub_jobs) = match &step.kind {
+        let (step_model_override, step_lora_override, step_fast, sub_jobs) = match &step.kind {
             StepKind::Generate(g) => (
                 g.model.clone(),
                 g.lora.clone(),
+                g.fast,
                 expand_seeds(g.seed, g.count, &g.seeds),
             ),
             StepKind::Edit(e) => (
                 e.model.clone(),
                 e.lora.clone(),
+                e.fast,
                 expand_seeds(e.seed, e.count, &e.seeds),
             ),
         };
@@ -485,15 +536,30 @@ pub fn build_plan(
         // capabilities) — same policy as `arch_key`.
         check_capability(&step.id, &resolved_model.id, &step.kind)?;
 
+        // Resolve `fast:` against the model's Lightning config. The parser
+        // already rejects `fast` + `lora` on the same step; an inherited
+        // workflow-level `lora` is overridden by the Lightning LoRA.
+        let (lightning, lightning_lora) = match step_fast {
+            Some(fast_steps) => {
+                let (l, lora) = resolve_fast(&step.id, &resolved_model.id, fast_steps, db)?;
+                (Some(l), Some(lora))
+            }
+            None => (None, None),
+        };
+
         // Resolve effective LoRA for this step
-        let resolved_lora = match step_lora_override {
-            Some(ref name) => Some(resolve_lora(name, db)?),
-            None => {
-                if model_overridden {
-                    // Auto-disable inherited LoRA on model override
-                    None
-                } else {
-                    default_lora.clone()
+        let resolved_lora = if let Some(lora) = lightning_lora {
+            Some(lora)
+        } else {
+            match step_lora_override {
+                Some(ref name) => Some(resolve_lora(name, db)?),
+                None => {
+                    if model_overridden {
+                        // Auto-disable inherited LoRA on model override
+                        None
+                    } else {
+                        default_lora.clone()
+                    }
                 }
             }
         };
@@ -506,6 +572,7 @@ pub fn build_plan(
             resolved_model,
             resolved_lora,
             model_overridden,
+            lightning,
         });
     }
 
@@ -702,6 +769,42 @@ fn resolve_lora(name: &str, db: &Database) -> Result<LoraRef, PlanError> {
         })
 }
 
+/// Resolve a step's `fast:` field: look up the model's Lightning config,
+/// pick the 4/8-step variant, and resolve the Lightning LoRA from the store.
+fn resolve_fast(
+    step_id: &str,
+    model_id: &str,
+    fast_steps: u32,
+    db: &Database,
+) -> Result<(ResolvedLightning, LoraRef), PlanError> {
+    let Some(cfg) = model_family::lightning_config(model_id) else {
+        let supported: Vec<&str> = model_family::lightning_configs()
+            .iter()
+            .map(|c| c.base_model_id.as_str())
+            .collect();
+        return Err(PlanError::Other(format!(
+            "step `{step_id}`: `fast` is not supported for `{model_id}`. Supported: {}",
+            supported.join(", ")
+        )));
+    };
+    let (variant, steps) = cfg.resolve(fast_steps);
+    let lora = model_resolve::resolve_lora(&cfg.lora_registry_id, 1.0, db)
+        .map_err(|e| PlanError::Other(format!("LoRA resolution error: {e}")))?
+        .ok_or_else(|| PlanError::LightningLoraNotInstalled {
+            step_id: step_id.to_string(),
+            lora: cfg.lora_registry_id.clone(),
+            variant: variant.to_string(),
+        })?;
+    Ok((
+        ResolvedLightning {
+            steps,
+            guidance: cfg.guidance,
+            scheduler_overrides: cfg.scheduler_overrides_json(),
+        },
+        lora,
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // execute_plan — the GPU work. Runs every step, streams events, registers
 // each step as a DB job row with workflow labels for UI filtering.
@@ -874,6 +977,7 @@ pub async fn execute_plan(
                         Some(resolved_model.base_path.clone()),
                         resolved_model.arch_key.clone(),
                         resolved_lora.clone(),
+                        planned.lightning.as_ref(),
                         g,
                         *seed,
                         *count,
@@ -949,6 +1053,7 @@ pub async fn execute_plan(
                         Some(resolved_model.base_path.clone()),
                         resolved_model.arch_key.clone(),
                         resolved_lora.clone(),
+                        planned.lightning.as_ref(),
                         e,
                         &source_path,
                         *seed,
@@ -1178,10 +1283,10 @@ fn print_plan_human(plan: &Plan, in_order: bool) {
         let expected = planned.expected_artifacts();
         let i = exec_idx; // used for the leading index column
         let reordered = !in_order && exec_idx != declared_idx;
-        // Use the step's *effective* model for the defaults lookup, so per-step
-        // model overrides fall back to the overridden model's defaults.
-        let (default_steps, default_guidance) =
-            model_family::model_defaults(&planned.resolved_model.id);
+        // Use the step's *effective* model for the defaults lookup (so
+        // per-step model overrides fall back to the overridden model's
+        // defaults), with `fast:` Lightning resolution applied on top.
+        let (default_steps, default_guidance) = planned.effective_defaults();
 
         let model_annotation = if planned.model_overridden {
             format!(" [model={}]", planned.resolved_model.id)
@@ -1189,7 +1294,9 @@ fn print_plan_human(plan: &Plan, in_order: bool) {
             String::new()
         };
         let lora_annotation = match &planned.resolved_lora {
-            Some(l) if planned.model_overridden => format!(" [lora={}]", l.name),
+            Some(l) if planned.model_overridden || planned.lightning.is_some() => {
+                format!(" [lora={}]", l.name)
+            }
             _ => String::new(),
         };
         let reorder_annotation = if reordered {
@@ -1279,8 +1386,7 @@ fn print_plan_json(plan: &Plan, in_order: bool) -> Result<()> {
         .iter()
         .zip(plan.planned_steps.iter())
         .map(|(step, planned)| {
-            let (default_steps, default_guidance) =
-                model_family::model_defaults(&planned.resolved_model.id);
+            let (default_steps, default_guidance) = planned.effective_defaults();
             let model_json = if planned.model_overridden {
                 Some(planned.resolved_model.id.clone())
             } else {
@@ -1534,6 +1640,7 @@ fn build_generate_spec(
     base_model_path: Option<String>,
     arch_key: Option<String>,
     lora: Option<LoraRef>,
+    lightning: Option<&ResolvedLightning>,
     step: &GenerateStep,
     seed: Option<u64>,
     count: u32,
@@ -1541,8 +1648,16 @@ fn build_generate_spec(
     labels: HashMap<String, String>,
 ) -> GenerateJobSpec {
     let (default_steps, default_guidance) = model_family::model_defaults(wf_model);
-    let steps = step.steps.unwrap_or(default_steps);
-    let guidance = step.guidance.unwrap_or(default_guidance);
+    // Explicit step fields win over `fast:` resolution, which wins over
+    // model defaults — same precedence as `modl generate --fast --steps`.
+    let steps = step
+        .steps
+        .or(lightning.map(|l| l.steps))
+        .unwrap_or(default_steps);
+    let guidance = step
+        .guidance
+        .or(lightning.map(|l| l.guidance))
+        .unwrap_or(default_guidance);
     let width = step.width.unwrap_or(1024);
     let height = step.height.unwrap_or(1024);
 
@@ -1567,7 +1682,9 @@ fn build_generate_spec(
             init_image: None,
             mask: None,
             strength: None,
-            scheduler_overrides: HashMap::new(),
+            scheduler_overrides: lightning
+                .map(|l| l.scheduler_overrides.clone())
+                .unwrap_or_default(),
             controlnet: Vec::new(),
             style_ref: Vec::new(),
             inpaint_method: None,
@@ -1588,6 +1705,7 @@ fn build_edit_spec(
     base_model_path: Option<String>,
     arch_key: Option<String>,
     lora: Option<LoraRef>,
+    lightning: Option<&ResolvedLightning>,
     step: &EditStep,
     source_path: &Path,
     seed: Option<u64>,
@@ -1596,8 +1714,15 @@ fn build_edit_spec(
     labels: HashMap<String, String>,
 ) -> EditJobSpec {
     let (default_steps, default_guidance) = model_family::model_defaults(wf_model);
-    let steps = step.steps.unwrap_or(default_steps);
-    let guidance = step.guidance.unwrap_or(default_guidance);
+    // Same precedence as build_generate_spec: explicit > fast > defaults.
+    let steps = step
+        .steps
+        .or(lightning.map(|l| l.steps))
+        .unwrap_or(default_steps);
+    let guidance = step
+        .guidance
+        .or(lightning.map(|l| l.guidance))
+        .unwrap_or(default_guidance);
 
     EditJobSpec {
         prompt: step.prompt.clone(),
@@ -1620,7 +1745,9 @@ fn build_edit_spec(
             height: step.height,
             mask_path: None,
             blend_mode: crate::core::job::BlendMode::Pixel,
-            scheduler_overrides: HashMap::new(),
+            scheduler_overrides: lightning
+                .map(|l| l.scheduler_overrides.clone())
+                .unwrap_or_default(),
         },
         runtime: RuntimeRef {
             profile: runtime::resolved_generation_profile().to_string(),
@@ -1890,6 +2017,7 @@ mod tests {
             prompt: "x".into(),
             model: None,
             lora: None,
+            fast: None,
             seed: None,
             seeds: None,
             width: None,
@@ -1906,6 +2034,7 @@ mod tests {
             prompt: "x".into(),
             model: None,
             lora: None,
+            fast: None,
             seed: None,
             seeds: None,
             width: None,
@@ -1979,6 +2108,7 @@ mod tests {
                 resolved_model: fake_resolved(m),
                 resolved_lora: None,
                 model_overridden: false,
+                lightning: None,
             })
             .collect()
     }

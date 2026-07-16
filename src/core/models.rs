@@ -165,6 +165,24 @@ impl LightningConfig {
             (&self.variant_8step, 8)
         }
     }
+
+    /// Scheduler overrides as JSON values for job specs: "null" → Null,
+    /// numeric strings → numbers, anything else stays a string.
+    pub fn scheduler_overrides_json(&self) -> std::collections::HashMap<String, serde_json::Value> {
+        self.scheduler_overrides
+            .iter()
+            .map(|(k, v)| {
+                let val = if *v == "null" {
+                    serde_json::Value::Null
+                } else if let Ok(f) = v.parse::<f64>() {
+                    serde_json::json!(f)
+                } else {
+                    serde_json::Value::String(v.to_string())
+                };
+                (k.to_string(), val)
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone)]
