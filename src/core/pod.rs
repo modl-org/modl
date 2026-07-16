@@ -41,9 +41,14 @@ const POD_AITOOLKIT: &str = "/root/.modl/runtime/ai-toolkit";
 /// Default disk for one-shot train pods. `pod up` raises this (persistent
 /// pods accumulate an HF cache across jobs — that's the point).
 pub const POD_DISK_GB: f64 = 80.0;
-/// Per-host boot budget. Duds get destroyed and the next offer is tried,
-/// so this can be tight — good hosts come up in 1-3 minutes.
-const PROVISION_TIMEOUT_SECS: u64 = 8 * 60;
+/// Per-host boot budget without visible progress (status/status_msg frozen).
+/// Duds get destroyed and the next offer is tried, so this can be tight —
+/// good hosts come up in 1-3 minutes.
+const PROVISION_STALL_SECS: u64 = 8 * 60;
+/// Absolute per-host boot cap even while progress is visible — the pod image
+/// is multi-GB, so an honest host with mediocre Hub peering can legitimately
+/// need more than the stall budget to finish pulling layers.
+const PROVISION_HARD_CAP_SECS: u64 = 20 * 60;
 /// Give up if SSH never accepts a connection after the instance reports running.
 const SSH_TIMEOUT_SECS: u64 = 6 * 60;
 /// Seconds of event silence before probing whether the worker is still alive.
@@ -165,7 +170,13 @@ pub async fn provision(opts: &PodOptions, min_vram_gb: Option<u32>) -> Result<Po
         opts.gpu_type,
         opts.max_price_per_hour
     );
-    let offers = vast::search_offers(&opts.gpu_type, opts.max_price_per_hour, min_vram_gb).await?;
+    let offers = vast::search_offers(
+        &opts.gpu_type,
+        opts.max_price_per_hour,
+        min_vram_gb,
+        opts.disk_gb,
+    )
+    .await?;
     if offers.is_empty() {
         bail!(
             "No rentable {} offers under ${:.2}/hr{}. Try a bigger GPU type or raise --max-price.",
@@ -178,27 +189,32 @@ pub async fn provision(opts: &PodOptions, min_vram_gb: Option<u32>) -> Result<Po
     }
 
     let best = &offers[0];
+    // Storage bills on the provisioned disk from the moment of rent (even
+    // while loading/stopped) and varies several-fold between hosts — quote
+    // the real all-in rate, not just the GPU line.
+    let best_total = best.dph_total + best.storage_dph(opts.disk_gb);
     eprintln!(
-        "  {} — {:.0}GB VRAM, {:.0}GB disk, {:.0} Mbps down, ${:.3}/hr (reliability {:.1}%, value {:.0} dlperf/$)",
+        "  {} — {:.0}GB VRAM, {:.0}GB disk, {:.0} Mbps down, ${:.3}/hr all-in (${:.3} gpu + ${:.3} storage for {:.0}GB; reliability {:.1}%, value {:.0} dlperf/$)",
         style(&best.gpu_name).bold(),
         best.gpu_ram_mb as f64 / 1024.0,
         best.disk_gb,
         best.inet_down,
+        best_total,
         best.dph_total,
+        best.storage_dph(opts.disk_gb),
+        opts.disk_gb,
         best.reliability * 100.0,
-        vast::offer_value(best)
+        vast::offer_value(best, opts.disk_gb)
     );
 
     if !opts.yes {
         let prompt = format!(
-            "Rent this pod on your Vast.ai account (~${:.3}/hr, billed until destroyed)?",
-            best.dph_total
+            "Rent this pod on your Vast.ai account (~${best_total:.3}/hr all-in, billed until destroyed)?"
         );
         let ok = match &opts.confirm_rent {
             Some(confirm) => confirm(&prompt)?,
             None => bail!(
-                "Refusing to rent a pod (~${:.3}/hr) without confirmation — pass --yes / yes: true to opt in.",
-                best.dph_total
+                "Refusing to rent a pod (~${best_total:.3}/hr all-in) without confirmation — pass --yes / yes: true to opt in."
             ),
         };
         if !ok {
@@ -216,8 +232,9 @@ pub async fn provision(opts: &PodOptions, min_vram_gb: Option<u32>) -> Result<Po
 
     // The user confirmed offers[0]'s price; fallback offers are ranked by
     // perf-per-dollar, not price, so without a cap a failed first rent could
-    // silently land on anything up to --max-price.
-    let price_cap = best.dph_total * 1.25;
+    // silently land on anything up to --max-price. All-in (gpu + storage),
+    // same as the confirmed quote.
+    let price_cap = best_total * 1.25;
 
     let mut booted: Option<(u64, vast::Offer, SshTarget)> = None;
     let mut bad_machines: std::collections::HashSet<u64> = std::collections::HashSet::new();
@@ -225,13 +242,14 @@ pub async fn provision(opts: &PodOptions, min_vram_gb: Option<u32>) -> Result<Po
         if offer.machine_id != 0 && bad_machines.contains(&offer.machine_id) {
             continue; // same physical box as one that just failed to boot
         }
-        if offer.dph_total > price_cap {
+        let offer_total = offer.dph_total + offer.storage_dph(opts.disk_gb);
+        if offer_total > price_cap {
             eprintln!(
-                "{} Skipping fallback offer {} at ${:.3}/hr — more than 25% over the confirmed ${:.3}/hr",
+                "{} Skipping fallback offer {} at ${:.3}/hr all-in — more than 25% over the confirmed ${:.3}/hr",
                 style("!").yellow(),
                 offer.id,
-                offer.dph_total,
-                best.dph_total
+                offer_total,
+                best_total
             );
             continue;
         }
@@ -900,9 +918,13 @@ async fn wait_for_instance(instance_id: u64) -> Result<SshTarget> {
         "{} Waiting for instance to boot (usually 1-3 minutes)...",
         style("→").cyan()
     );
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(PROVISION_TIMEOUT_SECS);
+    // Two clocks: a stall budget that resets on any visible progress
+    // (status or status_msg change — e.g. docker layers advancing), and a
+    // hard cap so a host drip-feeding progress can't hold the rent forever.
+    let started = std::time::Instant::now();
+    let mut last_progress = std::time::Instant::now();
     let mut last_status = String::new();
+    let mut last_msg = String::new();
     let mut poll_failures = 0u32;
 
     loop {
@@ -932,6 +954,7 @@ async fn wait_for_instance(instance_id: u64) -> Result<SshTarget> {
         if inst.actual_status != last_status {
             eprintln!("  status: {}", inst.actual_status);
             last_status = inst.actual_status.clone();
+            last_progress = std::time::Instant::now();
         }
         if inst.actual_status == "running"
             && let (Some(host), Some(port)) = (inst.ssh_host.clone(), inst.ssh_port)
@@ -941,20 +964,34 @@ async fn wait_for_instance(instance_id: u64) -> Result<SshTarget> {
         // Hosts sometimes fail at container init (runc/kernel mismatches,
         // broken nvidia runtime). The daemon error is terminal — don't
         // burn the whole boot budget waiting for it to change.
-        if let Some(msg) = &inst.status_msg
-            && (msg.contains("Error response from daemon")
+        if let Some(msg) = &inst.status_msg {
+            if msg.contains("Error response from daemon")
                 || msg.contains("OCI runtime")
-                || msg.contains("failed to start containers"))
-        {
+                || msg.contains("failed to start containers")
+            {
+                bail!(
+                    "Host failed to start the container: {}",
+                    msg.lines().next().unwrap_or(msg)
+                );
+            }
+            // Layer-pull progress shows up here — a changing message means
+            // the host is working, so keep waiting (up to the hard cap).
+            if *msg != last_msg {
+                last_msg = msg.clone();
+                last_progress = std::time::Instant::now();
+            }
+        }
+        if last_progress.elapsed().as_secs() > PROVISION_STALL_SECS {
             bail!(
-                "Host failed to start the container: {}",
-                msg.lines().next().unwrap_or(msg)
+                "Instance {instance_id} made no boot progress for {} minutes (status: {}).",
+                PROVISION_STALL_SECS / 60,
+                last_status
             );
         }
-        if std::time::Instant::now() > deadline {
+        if started.elapsed().as_secs() > PROVISION_HARD_CAP_SECS {
             bail!(
                 "Instance {instance_id} did not reach running state within {} minutes.",
-                PROVISION_TIMEOUT_SECS / 60
+                PROVISION_HARD_CAP_SECS / 60
             );
         }
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;

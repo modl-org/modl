@@ -32,6 +32,17 @@ pub struct Offer {
     pub inet_up: f64,
     pub reliability: f64,
     pub dlperf: f64,
+    /// Host's storage price in $/GB/month — billed on the provisioned disk
+    /// even while the instance is loading/stopped, and it varies several-fold
+    /// between hosts, so quotes that omit it mislead.
+    pub storage_cost: f64,
+}
+
+impl Offer {
+    /// Hourly storage cost for `disk_gb` of provisioned disk on this host.
+    pub fn storage_dph(&self, disk_gb: f64) -> f64 {
+        self.storage_cost * disk_gb / (30.0 * 24.0)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -111,21 +122,28 @@ async fn check(resp: reqwest::Response, what: &str) -> Result<serde_json::Value>
 
 /// Compute per-dollar value of an offer: AI throughput (dlperf) per $/hr.
 /// This is the ranking metric — a slightly slower host at half the price wins.
-pub fn offer_value(offer: &Offer) -> f64 {
-    if offer.dph_total <= 0.0 {
+/// Perf per all-in dollar: GPU rate plus storage for the disk we'll actually
+/// provision. Storage varies several-fold between hosts (measured $0.13 to
+/// $0.87/GB/month on one search page) — at 3090 price points it can exceed
+/// the GPU rate, so ranking on the GPU line alone picks expensive hosts.
+pub fn offer_value(offer: &Offer, disk_gb: f64) -> f64 {
+    let all_in = offer.dph_total + offer.storage_dph(disk_gb);
+    if all_in <= 0.0 {
         return 0.0;
     }
-    offer.dlperf / offer.dph_total
+    offer.dlperf / all_in
 }
 
 /// Search the marketplace for rentable offers matching a GPU type.
 ///
 /// `min_vram_gb` is a hard filter (job won't fit below it). Results are
-/// sorted by value (dlperf per dollar) — not raw speed, not raw price.
+/// sorted by all-in value (dlperf per dollar including storage for
+/// `disk_gb`) — not raw speed, not raw price.
 pub async fn search_offers(
     gpu_type: &str,
     max_price_per_hour: f64,
     min_vram_gb: Option<u32>,
+    disk_gb: f64,
 ) -> Result<Vec<Offer>> {
     let (client, key) = client()?;
 
@@ -142,9 +160,14 @@ pub async fn search_offers(
         // below it pass search, then fail at create_instance, burning a
         // failover attempt.
         "disk_space": {"gte": 80},
-        "reliability2": {"gte": 0.98},
+        "reliability2": {"gte": 0.99},
         "direct_port_count": {"gte": 1},
         "cuda_max_good": {"gte": 12.9},
+        // Docker Hub is unreachable/throttled from mainland China — pulling
+        // the pod image stalls indefinitely, so CN hosts fail every boot
+        // despite passing every other filter (verified, 99%+ reliability).
+        // Measured live 2026-07-16: 4 consecutive CN duds, ~8 min each.
+        "geolocation": {"notin": ["CN"]},
         "order": [["dlperf", "desc"]],
         "limit": 40,
     });
@@ -166,8 +189,8 @@ pub async fn search_offers(
 
     let mut offers = parse_offers(&data);
     offers.sort_by(|a, b| {
-        offer_value(b)
-            .partial_cmp(&offer_value(a))
+        offer_value(b, disk_gb)
+            .partial_cmp(&offer_value(a, disk_gb))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     Ok(offers)
@@ -196,6 +219,10 @@ fn parse_offers(data: &serde_json::Value) -> Vec<Offer> {
                     .and_then(|v| v.as_f64())
                     .unwrap_or(0.0),
                 dlperf: o.get("dlperf").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                storage_cost: o
+                    .get("storage_cost")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0),
             })
         })
         .collect()
