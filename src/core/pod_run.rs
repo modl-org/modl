@@ -63,7 +63,24 @@ pub fn ensure_modl(pod: &Pod) -> Result<()> {
     if let Ok(v) = run_ssh_capture(&pod.ssh, &format!("{REMOTE_MODL} --version 2>/dev/null"))
         && v.contains(version)
     {
-        return Ok(());
+        // Dev builds share a version string across commits, so when a local
+        // pod binary exists, verify the actual bytes match — otherwise a
+        // reused pod keeps running yesterday's code.
+        match local_pod_binary() {
+            Err(_) => return Ok(()), // release-installed CLI: version match is enough
+            Ok(local) => {
+                let local_sha = sha256_file(&local)?;
+                let remote_sha = run_ssh_capture(
+                    &pod.ssh,
+                    &format!("sha256sum {REMOTE_MODL} 2>/dev/null | cut -d' ' -f1"),
+                )
+                .unwrap_or_default();
+                if remote_sha.trim() == local_sha {
+                    return Ok(());
+                }
+                // fall through and reinstall
+            }
+        }
     }
 
     let url = format!(
@@ -131,6 +148,13 @@ fn local_pod_binary() -> Result<PathBuf> {
          or publish the release so pods can download it)",
         env!("CARGO_PKG_VERSION")
     )
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let bytes =
+        std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 /// Ship the HF token (stdin → 600-perm file, never argv) and register it in

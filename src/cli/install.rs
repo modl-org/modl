@@ -321,6 +321,19 @@ fn prompt_variant_selection(manifest: &Manifest, vram: Option<u64>) -> Result<St
         .and_then(|s| variants_for_selection.iter().position(|v| &v.id == s))
         .unwrap_or(0);
 
+    // Non-interactive contexts (pods over SSH, CI, scripts) can't render a
+    // picker — take the variant the picker would have highlighted anyway.
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        let picked = &variants_for_selection[default_idx];
+        println!(
+            "  {} {} has multiple variants — auto-selecting {} (non-interactive)",
+            style("→").cyan(),
+            style(&manifest.name).bold(),
+            style(&picked.id).bold()
+        );
+        return Ok(picked.id.clone());
+    }
+
     println!(
         "\n  {} {} has multiple variants:",
         style("?").yellow(),
