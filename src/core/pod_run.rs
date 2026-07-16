@@ -34,8 +34,8 @@ use crate::core::pod::{
 /// Where the modl install lives on the pod (binary + `python/modl_worker`,
 /// same layout as the release tarball so the worker resolves next to the
 /// binary).
-const REMOTE_MODL_DIR: &str = "/root/modl-bin";
-const REMOTE_MODL: &str = "/root/modl-bin/modl";
+pub(crate) const REMOTE_MODL_DIR: &str = "/root/modl-bin";
+pub(crate) const REMOTE_MODL: &str = "/root/modl-bin/modl";
 /// How often to ask the pod's DB for the run status.
 const STATUS_POLL_SECS: u64 = 15;
 /// Consecutive failed status polls tolerated before giving up (flaky links
@@ -302,13 +302,31 @@ pub async fn run_workflow_on_pod(
         );
     }
 
-    // Export on the pod, then bring the staged directory home.
+    let (local_dir, artifacts) = export_run(pod, &run_id, local_dest)?;
+
+    Ok(RemoteRunOutcome {
+        run_id,
+        status,
+        local_dir,
+        artifacts,
+    })
+}
+
+/// Export a finished run's artifacts on the pod and rsync them home
+/// (directly over SSH — no intermediary storage). Also the re-attach path:
+/// `modl pod pull <run-id>` fetches a run whose watcher died with the
+/// laptop lid.
+pub fn export_run(
+    pod: &Pod,
+    run_id: &str,
+    local_dest: Option<&Path>,
+) -> Result<(PathBuf, Vec<PathBuf>)> {
     let remote_export = format!("{REMOTE_ROOT}/export/{run_id}");
     run_ssh_streaming(
         &pod.ssh,
         &format!(
             "{REMOTE_MODL} outputs export {} --dest {}",
-            shell_quote(&run_id),
+            shell_quote(run_id),
             shell_quote(&remote_export)
         ),
     )
@@ -326,8 +344,8 @@ pub async fn run_workflow_on_pod(
     artifacts.sort();
     if artifacts.is_empty() {
         bail!(
-            "Run {run_id} reported {status} but the export came back empty — \
-             inspect the pod: modl pod exec -- cat {log}"
+            "Run {run_id} exported nothing — inspect the pod: \
+             modl pod exec -- {REMOTE_MODL} status {run_id}"
         );
     }
 
@@ -340,13 +358,7 @@ pub async fn run_workflow_on_pod(
     for a in &artifacts {
         println!("  {}", a.display());
     }
-
-    Ok(RemoteRunOutcome {
-        run_id,
-        status,
-        local_dir,
-        artifacts,
-    })
+    Ok((local_dir, artifacts))
 }
 
 /// Poll `modl status --json` on the pod until the run reaches a terminal
@@ -430,7 +442,7 @@ fn wait_for_run(pod: &Pod, run_id: &str, log: &str, pidfile: &str) -> Result<Str
     }
 }
 
-fn run_status(pod: &Pod, run_id: &str) -> Result<String> {
+pub(crate) fn run_status(pod: &Pod, run_id: &str) -> Result<String> {
     let out = run_ssh_capture(
         &pod.ssh,
         &format!("{REMOTE_MODL} status {} --json", shell_quote(run_id)),

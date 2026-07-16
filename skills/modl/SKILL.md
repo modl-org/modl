@@ -620,8 +620,8 @@ modl pod rm <id>                           # destroy — billing stops
 ```
 
 - `--pod` on generate needs an explicit `--base <model-id>` (the model is pulled pod-side).
-- The run is fire-and-forget on the pod (`nohup` + status polling) — a dropped connection never kills it.
-- Artifacts land in `./pod-outputs/<run-id>/` locally after the run completes.
+- The run is fire-and-forget on the pod (`nohup` + status polling) — a dropped connection never kills it. If the watching command died (closed laptop), fetch the finished run with `modl pod pull <run-id>`.
+- Artifacts land in `./pod-outputs/<run-id>/` locally, moved directly over SSH (no cloud storage in between).
 - Not yet supported with `--pod`: `--lora`, `--init-image`/`--mask`, `--controlnet`, `--style-ref`, multi-image edit.
 - Training: `modl train --pod` (separate path — ships the worker directly, syncs the LoRA back, auto-destroys unless `--keep-pod`).
 
