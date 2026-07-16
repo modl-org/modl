@@ -45,10 +45,14 @@ pub const POD_DISK_GB: f64 = 80.0;
 /// Duds get destroyed and the next offer is tried, so this can be tight —
 /// good hosts come up in 1-3 minutes.
 const PROVISION_STALL_SECS: u64 = 8 * 60;
-/// Absolute per-host boot cap even while progress is visible — the pod image
-/// is multi-GB, so an honest host with mediocre Hub peering can legitimately
-/// need more than the stall budget to finish pulling layers.
-const PROVISION_HARD_CAP_SECS: u64 = 20 * 60;
+/// Absolute per-host boot cap even while progress is visible. The pod image
+/// is 7.6GB compressed — an honest uncached host at real-world Hub speeds
+/// legitimately needs 10-25 minutes, and abandoning an advancing pull only
+/// to restart from zero on the next host costs more than waiting (storage
+/// bills pennies/hour; measured live 2026-07-16 when a healthy California
+/// host was killed at a 20-minute cap mid-pull). This cap only guards
+/// against a host drip-feeding progress forever.
+const PROVISION_HARD_CAP_SECS: u64 = 30 * 60;
 /// Give up if SSH never accepts a connection after the instance reports running.
 const SSH_TIMEOUT_SECS: u64 = 6 * 60;
 /// Seconds of event silence before probing whether the worker is still alive.
