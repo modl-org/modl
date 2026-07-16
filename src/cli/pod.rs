@@ -185,6 +185,37 @@ pub async fn exec(id: Option<u64>, cmd: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+/// `modl pod pull <run-id>` — fetch a finished run's artifacts from the
+/// active pod. The re-attach path: runs are fire-and-forget on the pod, so
+/// if the watching command died (closed laptop, dropped link), this brings
+/// the results home directly over SSH.
+pub async fn pull(run_id: String, dest: Option<std::path::PathBuf>) -> Result<()> {
+    let rec = pod_state::active_pod().await?.context(
+        "No active pod — the run's pod may already be destroyed (artifacts die with it).",
+    )?;
+    let pod_obj = pod::Pod::from(rec.clone());
+
+    let status = crate::core::pod_run::run_status(&pod_obj, &run_id)?;
+    match status.as_str() {
+        "completed" => {}
+        "partial_failure" => println!(
+            "{} Run ended with partial failures — pulling the artifacts that completed.",
+            style("⚠").yellow()
+        ),
+        "running" | "pending" => bail!(
+            "Run {run_id} is still {status} on pod {} — try again when it finishes.",
+            rec.instance_id
+        ),
+        other => bail!(
+            "Run {run_id} on pod {} has status '{other}' — nothing to pull.",
+            rec.instance_id
+        ),
+    }
+
+    crate::core::pod_run::export_run(&pod_obj, &run_id, dest.as_deref())?;
+    Ok(())
+}
+
 pub async fn rm(instance_id: u64, yes: bool) -> Result<()> {
     if !yes {
         let ok = dialoguer::Confirm::new()

@@ -602,6 +602,15 @@ pub enum PodCommands {
     },
     /// List Vast.ai instances on your account (they bill until destroyed)
     Ls,
+    /// Fetch a finished run's artifacts from the active pod (re-attach after
+    /// a closed laptop or dropped link — runs finish on the pod regardless)
+    Pull {
+        /// Run ID printed when the run was submitted (pod-YYYYMMDD-…)
+        run_id: String,
+        /// Local destination directory (default: ./pod-outputs/<run-id>)
+        #[arg(long)]
+        dest: Option<std::path::PathBuf>,
+    },
     /// Destroy an instance (billing stops)
     Rm {
         /// Instance ID (from `modl pod ls` or the train --pod output)
@@ -1610,6 +1619,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             } => pod::up(gpu, max_price, disk, min_vram, fresh, models, yes).await,
             PodCommands::Exec { id, cmd } => pod::exec(id, cmd).await,
             PodCommands::Ls => pod::ls().await,
+            PodCommands::Pull { run_id, dest } => pod::pull(run_id, dest).await,
             PodCommands::Rm { id, yes } => pod::rm(id, yes).await,
             PodCommands::Ssh { id } => pod::ssh(id).await,
         },
