@@ -122,11 +122,20 @@ pub fn ensure_modl(pod: &Pod) -> Result<()> {
         run_ssh_quiet(&pod.ssh, &format!("chmod +x {REMOTE_MODL}"))?;
     }
 
-    let v = run_ssh_capture(&pod.ssh, &format!("{REMOTE_MODL} --version"))?;
+    // 2>&1: the failure detail (e.g. a GLIBC version error from a non-static
+    // dev binary on an older-libc image) arrives on stderr.
+    let v = run_ssh_capture(&pod.ssh, &format!("{REMOTE_MODL} --version 2>&1"))?;
     if !v.contains(version) {
         bail!(
-            "modl on the pod reports '{}' but this CLI is v{version} — install failed?",
-            v.trim()
+            "modl on the pod reports '{}' but this CLI is v{version} — install failed?{}",
+            v.trim(),
+            if v.contains("GLIBC") {
+                "\n  The uploaded dev binary is dynamically linked against a newer glibc than \
+                 the pod image ships. Build a static one:\n    \
+                 cargo build --release --target x86_64-unknown-linux-musl"
+            } else {
+                ""
+            }
         );
     }
     Ok(())
