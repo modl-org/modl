@@ -467,15 +467,48 @@ pub fn check_pod_supported(yaml: &str) -> Result<()> {
         }
     }
     for step in steps.into_iter().flatten() {
-        let Some(src) = step.get("edit").and_then(|e| e.as_str()) else {
-            continue;
-        };
-        if !src.starts_with('$') && !src.starts_with("data:image/") {
-            let id = step.get("id").and_then(|i| i.as_str()).unwrap_or("?");
-            bail!(
-                "step `{id}`: edit source `{src}` is a local file path — it won't exist on the pod.\n  \
-                 Add it to the `images:` map as a base64 data URI and reference it as `$name`."
-            );
+        let id = step.get("id").and_then(|i| i.as_str()).unwrap_or("?");
+        // (field label, ref string) pairs across every image slot.
+        let mut refs: Vec<(&str, &str)> = Vec::new();
+        match step.get("edit") {
+            Some(serde_yaml::Value::String(s)) => refs.push(("edit source", s)),
+            Some(serde_yaml::Value::Sequence(seq)) => {
+                refs.extend(
+                    seq.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|s| ("edit source", s)),
+                );
+            }
+            _ => {}
+        }
+        if let Some(s) = step.get("init_image").and_then(|v| v.as_str()) {
+            refs.push(("init_image", s));
+        }
+        if let Some(s) = step.get("mask").and_then(|v| v.as_str())
+            && s != "auto"
+            && s != "from-alpha"
+        {
+            refs.push(("mask", s));
+        }
+        for key in ["controlnet", "style_ref"] {
+            for entry in step
+                .get(key)
+                .and_then(|v| v.as_sequence())
+                .into_iter()
+                .flatten()
+            {
+                if let Some(s) = entry.get("image").and_then(|v| v.as_str()) {
+                    refs.push((key, s));
+                }
+            }
+        }
+        for (what, src) in refs {
+            if !src.starts_with('$') && !src.starts_with("data:image/") {
+                bail!(
+                    "step `{id}`: {what} `{src}` is a local file path — it won't exist on the pod.\n  \
+                     Add it to the `images:` map as a base64 data URI and reference it as `$name`."
+                );
+            }
         }
     }
     Ok(())
@@ -805,6 +838,56 @@ fn walk_files(dir: &Path) -> Vec<PathBuf> {
     found
 }
 
+/// Read a local image file and encode it as a `data:image/...;base64,...` URI
+/// (the MCP-safe image-ref form — client paths don't exist on pods).
+fn image_data_uri(path: &Path) -> Result<String> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let mime = match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        _ => "image/png",
+    };
+    use base64::Engine as _;
+    Ok(format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+fn insert_seeds(step: &mut serde_yaml::Mapping, seeds: &[u64]) {
+    match seeds {
+        [] => {}
+        [one] => {
+            step.insert("seed".into(), (*one).into());
+        }
+        many => {
+            step.insert(
+                "seeds".into(),
+                serde_yaml::Value::Sequence(many.iter().map(|s| (*s).into()).collect()),
+            );
+        }
+    }
+}
+
+/// Image inputs for a `generate --pod` spec. All paths are local files that
+/// get inlined into the workflow's `images:` map as base64 data URIs.
+#[derive(Default)]
+pub struct GenImageInputs<'a> {
+    pub init_image: Option<&'a Path>,
+    pub mask: Option<&'a Path>,
+    pub strength: Option<f32>,
+    /// Fully-resolved ControlNet inputs (`image` is a local path).
+    pub controlnet: &'a [crate::core::job::ControlNetInput],
+    /// Fully-resolved style-ref inputs (`image` is a local path).
+    pub style_ref: &'a [crate::core::job::StyleRefInput],
+}
+
 /// Build a one-step generate workflow so `modl generate --pod` funnels
 /// through the same remote surface as `modl run --pod`.
 #[allow(clippy::too_many_arguments)]
@@ -818,32 +901,71 @@ pub fn single_generate_spec(
     steps: Option<u32>,
     guidance: Option<f64>,
     seeds: &[u64],
+    image_inputs: &GenImageInputs<'_>,
 ) -> Result<String> {
+    let mut images = serde_yaml::Mapping::new();
+    let mut inline = |name: &str, path: &Path| -> Result<()> {
+        images.insert(name.into(), image_data_uri(path)?.into());
+        Ok(())
+    };
+
     let mut step = serde_yaml::Mapping::new();
     step.insert("id".into(), "gen".into());
     step.insert("generate".into(), prompt.into());
+    if let Some(p) = image_inputs.init_image {
+        inline("init", p)?;
+        step.insert("init_image".into(), "$init".into());
+    }
+    if let Some(p) = image_inputs.mask {
+        inline("mask", p)?;
+        step.insert("mask".into(), "$mask".into());
+    }
+    insert_opt(
+        &mut step,
+        "strength",
+        image_inputs.strength.map(|v| f64::from(v).into()),
+    );
+    if !image_inputs.controlnet.is_empty() {
+        let mut entries = Vec::with_capacity(image_inputs.controlnet.len());
+        for (i, cn) in image_inputs.controlnet.iter().enumerate() {
+            let name = format!("cn-{}", i + 1);
+            inline(&name, Path::new(&cn.image))?;
+            let mut entry = serde_yaml::Mapping::new();
+            entry.insert("image".into(), format!("${name}").into());
+            entry.insert("type".into(), cn.control_type.as_str().into());
+            entry.insert("strength".into(), f64::from(cn.strength).into());
+            entry.insert("end".into(), f64::from(cn.control_end).into());
+            entries.push(serde_yaml::Value::Mapping(entry));
+        }
+        step.insert("controlnet".into(), serde_yaml::Value::Sequence(entries));
+    }
+    if !image_inputs.style_ref.is_empty() {
+        let mut entries = Vec::with_capacity(image_inputs.style_ref.len());
+        for (i, sr) in image_inputs.style_ref.iter().enumerate() {
+            let name = format!("style-{}", i + 1);
+            inline(&name, Path::new(&sr.image))?;
+            let mut entry = serde_yaml::Mapping::new();
+            entry.insert("image".into(), format!("${name}").into());
+            entry.insert("strength".into(), f64::from(sr.strength).into());
+            entry.insert("type".into(), sr.style_type.as_str().into());
+            entries.push(serde_yaml::Value::Mapping(entry));
+        }
+        step.insert("style_ref".into(), serde_yaml::Value::Sequence(entries));
+    }
     insert_opt(&mut step, "lora", lora.map(|v| v.into()));
     insert_opt(&mut step, "fast", fast.map(|v| v.into()));
     insert_opt(&mut step, "width", width.map(|v| v.into()));
     insert_opt(&mut step, "height", height.map(|v| v.into()));
     insert_opt(&mut step, "steps", steps.map(|v| v.into()));
     insert_opt(&mut step, "guidance", guidance.map(|v| v.into()));
-    match seeds {
-        [] => {}
-        [one] => {
-            step.insert("seed".into(), (*one).into());
-        }
-        many => {
-            step.insert(
-                "seeds".into(),
-                serde_yaml::Value::Sequence(many.iter().map(|s| (*s).into()).collect()),
-            );
-        }
-    }
+    insert_seeds(&mut step, seeds);
 
     let mut root = serde_yaml::Mapping::new();
     root.insert("name".into(), "pod-generate".into());
     root.insert("model".into(), model.into());
+    if !images.is_empty() {
+        root.insert("images".into(), serde_yaml::Value::Mapping(images));
+    }
     root.insert(
         "steps".into(),
         serde_yaml::Value::Sequence(vec![serde_yaml::Value::Mapping(step)]),
@@ -851,13 +973,16 @@ pub fn single_generate_spec(
     serde_yaml::to_string(&serde_yaml::Value::Mapping(root)).context("Failed to build spec")
 }
 
-/// Build a one-step edit workflow with the input image inlined as a base64
-/// data URI (the MCP-safe image-ref form — client paths don't exist on pods).
+/// Build a one-step edit workflow with every input image inlined as a base64
+/// data URI. `mask` is a local path, or the `auto`/`from-alpha` sentinels
+/// which pass through as-is.
 #[allow(clippy::too_many_arguments)]
 pub fn single_edit_spec(
     model: &str,
     prompt: &str,
-    image_path: &Path,
+    image_paths: &[PathBuf],
+    mask: Option<&str>,
+    blend: Option<crate::core::job::BlendMode>,
     lora: Option<&str>,
     fast: Option<u32>,
     width: Option<u32>,
@@ -866,49 +991,62 @@ pub fn single_edit_spec(
     guidance: Option<f64>,
     seeds: &[u64],
 ) -> Result<String> {
-    let bytes = std::fs::read(image_path)
-        .with_context(|| format!("Failed to read {}", image_path.display()))?;
-    let mime = match image_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("webp") => "image/webp",
-        _ => "image/png",
-    };
-    use base64::Engine as _;
-    let data_uri = format!(
-        "data:{mime};base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    );
-
     let mut images = serde_yaml::Mapping::new();
-    images.insert("input".into(), data_uri.into());
+
+    // Single image keeps the historical `$input` name; multi-image edits get
+    // `$input-1`, `$input-2`, … in order.
+    let source_refs: Vec<String> = match image_paths {
+        [one] => {
+            images.insert("input".into(), image_data_uri(one)?.into());
+            vec!["$input".to_string()]
+        }
+        many => many
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let name = format!("input-{}", i + 1);
+                images.insert(name.as_str().into(), image_data_uri(p)?.into());
+                Ok(format!("${name}"))
+            })
+            .collect::<Result<_>>()?,
+    };
 
     let mut step = serde_yaml::Mapping::new();
     step.insert("id".into(), "edit".into());
-    step.insert("edit".into(), "$input".into());
+    match source_refs.as_slice() {
+        [one] => {
+            step.insert("edit".into(), one.as_str().into());
+        }
+        many => {
+            step.insert(
+                "edit".into(),
+                serde_yaml::Value::Sequence(many.iter().map(|s| s.as_str().into()).collect()),
+            );
+        }
+    }
     step.insert("prompt".into(), prompt.into());
+    match mask {
+        None => {}
+        Some(sentinel @ ("auto" | "from-alpha")) => {
+            step.insert("mask".into(), sentinel.into());
+        }
+        Some(path) => {
+            images.insert("mask".into(), image_data_uri(Path::new(path))?.into());
+            step.insert("mask".into(), "$mask".into());
+        }
+    }
+    if let Some(b) = blend
+        && b != crate::core::job::BlendMode::Pixel
+    {
+        step.insert("blend".into(), "latent".into());
+    }
     insert_opt(&mut step, "lora", lora.map(|v| v.into()));
     insert_opt(&mut step, "fast", fast.map(|v| v.into()));
     insert_opt(&mut step, "width", width.map(|v| v.into()));
     insert_opt(&mut step, "height", height.map(|v| v.into()));
     insert_opt(&mut step, "steps", steps.map(|v| v.into()));
     insert_opt(&mut step, "guidance", guidance.map(|v| v.into()));
-    match seeds {
-        [] => {}
-        [one] => {
-            step.insert("seed".into(), (*one).into());
-        }
-        many => {
-            step.insert(
-                "seeds".into(),
-                serde_yaml::Value::Sequence(many.iter().map(|s| (*s).into()).collect()),
-            );
-        }
-    }
+    insert_seeds(&mut step, seeds);
 
     let mut root = serde_yaml::Mapping::new();
     root.insert("name".into(), "pod-edit".into());
@@ -1051,6 +1189,7 @@ steps:
             Some(4),
             None,
             &[7],
+            &Default::default(),
         )
         .unwrap();
         let models = workflow_models(&spec).unwrap();
@@ -1075,6 +1214,7 @@ steps:
             None,
             None,
             &[],
+            &Default::default(),
         )
         .unwrap();
         assert!(spec.contains("lora: alice"));
@@ -1089,6 +1229,7 @@ steps:
             None,
             None,
             &[],
+            &Default::default(),
         )
         .unwrap();
         assert!(spec.contains("fast: 4"));
@@ -1101,7 +1242,9 @@ steps:
         let spec = single_edit_spec(
             "klein-9b",
             "make it golden",
-            &tmp,
+            std::slice::from_ref(&tmp),
+            None,
+            None,
             None,
             None,
             None,
@@ -1130,7 +1273,9 @@ steps:
         let spec = single_edit_spec(
             "klein-9b",
             "p",
-            &tmp,
+            std::slice::from_ref(&tmp),
+            None,
+            None,
             None,
             None,
             Some(1820),
@@ -1148,6 +1293,130 @@ steps:
         assert!(spec.contains("seeds:"));
         assert!(spec.contains("- 7"));
         assert!(spec.contains("- 8"));
+    }
+
+    #[test]
+    fn generate_spec_inlines_image_inputs() {
+        let dir = std::env::temp_dir().join(format!("modl-podrun-gen-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let init = dir.join("init.png");
+        let mask = dir.join("mask.png");
+        let pose = dir.join("ref_pose.png");
+        for p in [&init, &mask, &pose] {
+            std::fs::write(p, b"fakepng").unwrap();
+        }
+        let cn = [crate::core::job::ControlNetInput {
+            image: pose.to_string_lossy().to_string(),
+            control_type: "pose".to_string(),
+            strength: 0.9,
+            control_end: 0.7,
+        }];
+        let inputs = GenImageInputs {
+            init_image: Some(&init),
+            mask: Some(&mask),
+            strength: Some(0.6),
+            controlnet: &cn,
+            style_ref: &[],
+        };
+        let spec = single_generate_spec(
+            "flux-dev",
+            "p",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+            &inputs,
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(spec.contains("init: data:image/png;base64,"));
+        assert!(spec.contains("init_image: $init"));
+        assert!(spec.contains("mask: $mask"));
+        assert!(spec.contains("strength: 0.6"));
+        assert!(spec.contains("cn-1: data:image/png;base64,"));
+        assert!(spec.contains("image: $cn-1"));
+        assert!(spec.contains("type: pose"));
+        // The whole spec must pass the pod-support check (no bare paths).
+        check_pod_supported(&spec).unwrap();
+    }
+
+    #[test]
+    fn edit_spec_inlines_multiple_images_and_mask() {
+        let dir = std::env::temp_dir().join(format!("modl-podrun-edit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.png");
+        let b = dir.join("b.jpg");
+        let m = dir.join("m.png");
+        for p in [&a, &b, &m] {
+            std::fs::write(p, b"fakepng").unwrap();
+        }
+        let spec = single_edit_spec(
+            "klein-9b",
+            "blend them",
+            &[a.clone(), b.clone()],
+            Some(m.to_string_lossy().as_ref()),
+            Some(crate::core::job::BlendMode::Latent),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(spec.contains("input-1: data:image/png;base64,"));
+        assert!(spec.contains("input-2: data:image/jpeg;base64,"));
+        assert!(spec.contains("- $input-1"));
+        assert!(spec.contains("- $input-2"));
+        assert!(spec.contains("mask: $mask"));
+        assert!(spec.contains("blend: latent"));
+        check_pod_supported(&spec).unwrap();
+    }
+
+    #[test]
+    fn edit_spec_passes_mask_sentinel_through() {
+        let tmp =
+            std::env::temp_dir().join(format!("modl-podrun-test3-{}.png", std::process::id()));
+        std::fs::write(&tmp, b"fakepng").unwrap();
+        let spec = single_edit_spec(
+            "klein-9b",
+            "p",
+            std::slice::from_ref(&tmp),
+            Some("from-alpha"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+        std::fs::remove_file(&tmp).unwrap();
+        assert!(spec.contains("mask: from-alpha"));
+        check_pod_supported(&spec).unwrap();
+    }
+
+    #[test]
+    fn rejects_bare_paths_in_new_image_slots() {
+        for yaml in [
+            "name: t\nmodel: m\nsteps:\n  - id: a\n    generate: p\n    init_image: photo.png\n",
+            "name: t\nmodel: m\nsteps:\n  - id: a\n    generate: p\n    init_image: $x\n    mask: m.png\n",
+            "name: t\nmodel: m\nsteps:\n  - id: a\n    generate: p\n    controlnet:\n      - image: pose.png\n        type: pose\n",
+            "name: t\nmodel: m\nsteps:\n  - id: a\n    edit: [\"$x\", \"b.png\"]\n    prompt: p\n",
+        ] {
+            let err = check_pod_supported(yaml).unwrap_err().to_string();
+            assert!(err.contains("local file path"), "{yaml}: {err}");
+        }
+        // Sentinel masks are fine.
+        let ok = "name: t\nmodel: m\nsteps:\n  - id: a\n    edit: \"$x\"\n    prompt: p\n    mask: from-alpha\n";
+        check_pod_supported(ok).unwrap();
     }
 
     #[test]

@@ -30,7 +30,9 @@ use crate::core::outputs::{SidecarMetadata, write_sidecar_yaml};
 
 /// Key used for the skip-existing completion index: (prompt, seed, base_model_id).
 type CompletionKey = (String, u64, String);
-use crate::core::workflow::{EditStep, GenerateStep, ImageRef, StepKind, Workflow, parse_file};
+use crate::core::workflow::{
+    EditMask, EditStep, GenerateStep, ImageRef, StepKind, Workflow, parse_file,
+};
 use crate::core::{model_family, model_resolve, paths, registry, runtime};
 
 // ---------------------------------------------------------------------------
@@ -536,6 +538,24 @@ pub fn build_plan(
         // capabilities) — same policy as `arch_key`.
         check_capability(&step.id, &resolved_model.id, &step.kind)?;
 
+        // ControlNet / style-ref support is model-dependent — validate against
+        // the step's effective model so the run fails at plan time, not after
+        // the worker has loaded weights.
+        if let StepKind::Generate(g) = &step.kind {
+            for cn in &g.controlnet {
+                if let Err(msg) =
+                    model_family::validate_controlnet(&resolved_model.id, &cn.control_type)
+                {
+                    return Err(PlanError::Other(format!("step `{}`: {msg}", step.id)));
+                }
+            }
+            if !g.style_ref.is_empty()
+                && let Err(msg) = model_family::validate_style_ref(&resolved_model.id)
+            {
+                return Err(PlanError::Other(format!("step `{}`: {msg}", step.id)));
+            }
+        }
+
         // Resolve `fast:` against the model's Lightning config. The parser
         // already rejects `fast` + `lora` on the same step; an inherited
         // workflow-level `lora` is overridden by the Lightning LoRA.
@@ -620,21 +640,21 @@ fn schedule_steps(wf: &Workflow, planned: &[PlannedStep]) -> Schedule {
         .collect();
 
     // 2. Build dependency graph: deps[i] = set of step indices i depends on.
-    // Only edit steps can have deps (via `ImageRef::StepOutput`).
+    // Any image slot can carry a `$step.outputs[N]` ref — edit sources and
+    // masks, generate init images, controlnet and style-ref inputs.
     let mut deps: Vec<HashSet<usize>> = vec![HashSet::new(); n];
     let mut reverse_deps: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (i, step) in wf.steps.iter().enumerate() {
-        let StepKind::Edit(e) = &step.kind else {
-            continue;
-        };
-        let ImageRef::StepOutput { step_id, .. } = &e.source else {
-            continue;
-        };
-        let Some(&dep_idx) = id_to_idx.get(step_id.as_str()) else {
-            continue;
-        };
-        if deps[i].insert(dep_idx) {
-            reverse_deps[dep_idx].push(i);
+        for r in step.image_refs() {
+            let ImageRef::StepOutput { step_id, .. } = r else {
+                continue;
+            };
+            let Some(&dep_idx) = id_to_idx.get(step_id.as_str()) else {
+                continue;
+            };
+            if deps[i].insert(dep_idx) {
+                reverse_deps[dep_idx].push(i);
+            }
         }
     }
 
@@ -736,7 +756,8 @@ fn resolve_model(id: &str, db: &Database) -> Result<ResolvedModel, PlanError> {
 
 /// Check that a resolved model supports the operation a step is asking for.
 ///
-/// `Generate` requires `txt2img`; `Edit` requires `edit`. Models not present in
+/// `Generate` requires `txt2img` (or `img2img`/`inpaint` when the step has an
+/// `init_image`/`mask`); `Edit` requires `edit`. Models not present in
 /// `models.toml` (registry-only) are skipped — we don't have capability metadata
 /// for them, and refusing would be more surprising than letting the worker fail.
 fn check_capability(step_id: &str, model_id: &str, kind: &StepKind) -> Result<(), PlanError> {
@@ -744,6 +765,14 @@ fn check_capability(step_id: &str, model_id: &str, kind: &StepKind) -> Result<()
         return Ok(());
     };
     let (kind_str, required, ok) = match kind {
+        StepKind::Generate(g) if g.mask.is_some() => (
+            "generate",
+            "inpaint",
+            info.capabilities.inpaint || info.capabilities.lanpaint_inpaint,
+        ),
+        StepKind::Generate(g) if g.init_image.is_some() => {
+            ("generate", "img2img", info.capabilities.img2img)
+        }
         StepKind::Generate(_) => ("generate", "txt2img", info.capabilities.txt2img),
         StepKind::Edit(_) => ("edit", "edit", info.capabilities.edit),
     };
@@ -934,6 +963,7 @@ pub async fn execute_plan(
 
         match &step.kind {
             StepKind::Generate(g) => {
+                let gen_inputs = resolve_generate_inputs(g, &step_outputs, &step.id)?;
                 print_generate_preview(g, sub_jobs.len());
                 for (sub_idx, (seed, count)) in sub_jobs.iter().enumerate() {
                     // Skip sub-jobs already in the completion index (default behaviour).
@@ -979,6 +1009,7 @@ pub async fn execute_plan(
                         resolved_lora.clone(),
                         planned.lightning.as_ref(),
                         g,
+                        &gen_inputs,
                         *seed,
                         *count,
                         &plan.output_dir,
@@ -1034,8 +1065,22 @@ pub async fn execute_plan(
                 }
             }
             StepKind::Edit(e) => {
-                let source_path = resolve_image_ref(&e.source, &step_outputs, &step.id)?;
-                print_edit_preview(e, &source_path, sub_jobs.len());
+                let source_paths: Vec<PathBuf> = e
+                    .sources
+                    .iter()
+                    .map(|r| resolve_image_ref(r, &step_outputs, &step.id))
+                    .collect::<Result<_>>()?;
+                let mask_path: Option<String> = match &e.mask {
+                    None => None,
+                    Some(EditMask::Auto) => Some("auto".to_string()),
+                    Some(EditMask::FromAlpha) => Some("from-alpha".to_string()),
+                    Some(EditMask::Image(r)) => Some(
+                        resolve_image_ref(r, &step_outputs, &step.id)?
+                            .to_string_lossy()
+                            .to_string(),
+                    ),
+                };
+                print_edit_preview(e, &source_paths, sub_jobs.len());
                 for (sub_idx, (seed, count)) in sub_jobs.iter().enumerate() {
                     if sub_jobs.len() > 1 {
                         println!(
@@ -1055,7 +1100,8 @@ pub async fn execute_plan(
                         resolved_lora.clone(),
                         planned.lightning.as_ref(),
                         e,
-                        &source_path,
+                        &source_paths,
+                        mask_path.clone(),
                         *seed,
                         *count,
                         &plan.output_dir,
@@ -1337,12 +1383,17 @@ fn print_plan_human(plan: &Plan, in_order: bool) {
             StepKind::Edit(e) => {
                 let steps = e.steps.unwrap_or(default_steps);
                 let guidance = e.guidance.unwrap_or(default_guidance);
-                let source = match &e.source {
-                    ImageRef::Local(p) => format!("local: {}", p.display()),
-                    ImageRef::StepOutput { step_id, index } => {
-                        format!("${step_id}.outputs[{index}]")
-                    }
-                };
+                let source = e
+                    .sources
+                    .iter()
+                    .map(|r| match r {
+                        ImageRef::Local(p) => format!("local: {}", p.display()),
+                        ImageRef::StepOutput { step_id, index } => {
+                            format!("${step_id}.outputs[{index}]")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 let seed_desc = if let Some(ref seeds) = e.seeds {
                     format!("{} seeds {:?}", seeds.len(), seeds)
                 } else if let Some(s) = e.seed {
@@ -1404,6 +1455,7 @@ fn print_plan_json(plan: &Plan, in_order: bool) -> Result<()> {
                     kind: "generate",
                     prompt: g.prompt.clone(),
                     source_ref: None,
+                    source_refs: None,
                     model: model_json,
                     lora: lora_json,
                     seed: g.seed,
@@ -1421,12 +1473,12 @@ fn print_plan_json(plan: &Plan, in_order: bool) -> Result<()> {
                     id: step.id.clone(),
                     kind: "edit",
                     prompt: e.prompt.clone(),
-                    source_ref: Some(match &e.source {
-                        ImageRef::Local(p) => p.to_string_lossy().into_owned(),
-                        ImageRef::StepOutput { step_id, index } => {
-                            format!("${step_id}.outputs[{index}]")
-                        }
-                    }),
+                    source_ref: Some(image_ref_json(&e.sources[0])),
+                    source_refs: if e.sources.len() > 1 {
+                        Some(e.sources.iter().map(image_ref_json).collect())
+                    } else {
+                        None
+                    },
                     model: model_json,
                     lora: lora_json,
                     seed: e.seed,
@@ -1560,6 +1612,10 @@ struct StepJson {
     prompt: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     source_ref: Option<String>,
+    /// All edit source refs, present only on multi-image edit steps
+    /// (`source_ref` stays the first source for backward compatibility).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_refs: Option<Vec<String>>,
     /// Present only when the step overrides the workflow-level model.
     /// Absent means "uses workflow default" (see `WorkflowJson::model`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1633,6 +1689,54 @@ fn expand_seeds(
 // Spec builders
 // ---------------------------------------------------------------------------
 
+/// Image inputs of a generate step, resolved from `ImageRef`s to local paths
+/// once per step (before the sub-job loop — the paths don't vary per seed).
+struct ResolvedGenInputs {
+    init_image: Option<String>,
+    mask: Option<String>,
+    controlnet: Vec<crate::core::job::ControlNetInput>,
+    style_ref: Vec<crate::core::job::StyleRefInput>,
+}
+
+fn resolve_generate_inputs(
+    step: &GenerateStep,
+    step_outputs: &HashMap<String, Vec<PathBuf>>,
+    step_id: &str,
+) -> Result<ResolvedGenInputs> {
+    let resolve = |r: &ImageRef| -> Result<String> {
+        Ok(resolve_image_ref(r, step_outputs, step_id)?
+            .to_string_lossy()
+            .to_string())
+    };
+    Ok(ResolvedGenInputs {
+        init_image: step.init_image.as_ref().map(resolve).transpose()?,
+        mask: step.mask.as_ref().map(resolve).transpose()?,
+        controlnet: step
+            .controlnet
+            .iter()
+            .map(|cn| {
+                Ok(crate::core::job::ControlNetInput {
+                    image: resolve(&cn.image)?,
+                    control_type: cn.control_type.clone(),
+                    strength: cn.strength.unwrap_or(0.75),
+                    control_end: cn.end.unwrap_or(0.8),
+                })
+            })
+            .collect::<Result<_>>()?,
+        style_ref: step
+            .style_ref
+            .iter()
+            .map(|sr| {
+                Ok(crate::core::job::StyleRefInput {
+                    image: resolve(&sr.image)?,
+                    strength: sr.strength.unwrap_or(0.6),
+                    style_type: sr.style_type.clone().unwrap_or_else(|| "style".to_string()),
+                })
+            })
+            .collect::<Result<_>>()?,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_generate_spec(
     wf_model: &str,
@@ -1642,6 +1746,7 @@ fn build_generate_spec(
     lora: Option<LoraRef>,
     lightning: Option<&ResolvedLightning>,
     step: &GenerateStep,
+    inputs: &ResolvedGenInputs,
     seed: Option<u64>,
     count: u32,
     output_dir: &Path,
@@ -1679,14 +1784,14 @@ fn build_generate_spec(
             guidance,
             seed,
             count,
-            init_image: None,
-            mask: None,
-            strength: None,
+            init_image: inputs.init_image.clone(),
+            mask: inputs.mask.clone(),
+            strength: step.strength,
             scheduler_overrides: lightning
                 .map(|l| l.scheduler_overrides.clone())
                 .unwrap_or_default(),
-            controlnet: Vec::new(),
-            style_ref: Vec::new(),
+            controlnet: inputs.controlnet.clone(),
+            style_ref: inputs.style_ref.clone(),
             inpaint_method: None,
         },
         runtime: RuntimeRef {
@@ -1707,7 +1812,8 @@ fn build_edit_spec(
     lora: Option<LoraRef>,
     lightning: Option<&ResolvedLightning>,
     step: &EditStep,
-    source_path: &Path,
+    source_paths: &[PathBuf],
+    mask_path: Option<String>,
     seed: Option<u64>,
     count: u32,
     output_dir: &Path,
@@ -1736,15 +1842,18 @@ fn build_edit_spec(
             output_dir: output_dir.to_string_lossy().to_string(),
         },
         params: EditParams {
-            image_paths: vec![source_path.to_string_lossy().to_string()],
+            image_paths: source_paths
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect(),
             steps,
             guidance,
             seed,
             count,
             width: step.width,
             height: step.height,
-            mask_path: None,
-            blend_mode: crate::core::job::BlendMode::Pixel,
+            mask_path,
+            blend_mode: step.blend.unwrap_or_default(),
             scheduler_overrides: lightning
                 .map(|l| l.scheduler_overrides.clone())
                 .unwrap_or_default(),
@@ -1958,6 +2067,13 @@ fn sanitize_for_path(s: &str) -> String {
         .collect()
 }
 
+fn image_ref_json(r: &ImageRef) -> String {
+    match r {
+        ImageRef::Local(p) => p.to_string_lossy().into_owned(),
+        ImageRef::StepOutput { step_id, index } => format!("${step_id}.outputs[{index}]"),
+    }
+}
+
 fn step_kind_label(kind: &StepKind) -> &'static str {
     match kind {
         StepKind::Generate(_) => "generate",
@@ -1985,8 +2101,16 @@ fn print_generate_preview(step: &GenerateStep, sub_job_count: usize) {
     let _ = sub_job_count; // accepted for symmetry with edit preview; no current use
 }
 
-fn print_edit_preview(step: &EditStep, source_path: &Path, sub_job_count: usize) {
-    println!("  Source: {}", source_path.display());
+fn print_edit_preview(step: &EditStep, source_paths: &[PathBuf], sub_job_count: usize) {
+    match source_paths {
+        [one] => println!("  Source: {}", one.display()),
+        many => {
+            println!("  Sources ({}):", many.len());
+            for p in many {
+                println!("    - {}", p.display());
+            }
+        }
+    }
     println!("  Prompt: {}", style(&step.prompt).italic());
     if let Some(ref seeds) = step.seeds {
         println!(
@@ -2025,13 +2149,20 @@ mod tests {
             steps: None,
             guidance: None,
             count: None,
+            init_image: None,
+            mask: None,
+            strength: None,
+            controlnet: Vec::new(),
+            style_ref: Vec::new(),
         })
     }
 
     fn edit_kind() -> StepKind {
         StepKind::Edit(EditStep {
-            source: ImageRef::Local(PathBuf::from("/dev/null")),
+            sources: vec![ImageRef::Local(PathBuf::from("/dev/null"))],
             prompt: "x".into(),
+            mask: None,
+            blend: None,
             model: None,
             lora: None,
             fast: None,
@@ -2111,6 +2242,59 @@ mod tests {
                 lightning: None,
             })
             .collect()
+    }
+
+    #[test]
+    fn capability_check_requires_img2img_for_init_image() {
+        let mut kind = gen_kind();
+        if let StepKind::Generate(g) = &mut kind {
+            g.init_image = Some(ImageRef::Local(PathBuf::from("/dev/null")));
+        }
+        // qwen-image-edit-2511 has no img2img capability
+        let err = check_capability("s", "qwen-image-edit-2511", &kind).unwrap_err();
+        assert!(matches!(
+            err,
+            PlanError::IncompatibleCapability {
+                required: "img2img",
+                ..
+            }
+        ));
+        check_capability("s", "flux-dev", &kind).unwrap();
+    }
+
+    #[test]
+    fn generate_init_image_step_output_creates_dependency() {
+        // Step `refine` (generate) depends on `base` via init_image, and is
+        // declared BEFORE it — scheduling must still run `base` first.
+        let yaml = r#"
+name: dag
+model: a
+steps:
+  - id: refine
+    generate: "detailed"
+    init_image: "$base.outputs[0]"
+  - id: base
+    generate: "rough"
+"#;
+        // Forward refs are rejected at parse time, so build the same DAG via
+        // the parsed-order form and assert the dependency edge instead.
+        let yaml_ok = r#"
+name: dag
+model: a
+steps:
+  - id: base
+    generate: "rough"
+  - id: refine
+    generate: "detailed"
+    init_image: "$base.outputs[0]"
+"#;
+        assert!(parse_str(yaml, Path::new(".")).is_err());
+        let wf = parse_str(yaml_ok, Path::new(".")).unwrap();
+        let planned = build_planned(&wf, &["a", "a"]);
+        let schedule = schedule_steps(&wf, &planned);
+        let pos_base = schedule.order.iter().position(|&i| i == 0).unwrap();
+        let pos_refine = schedule.order.iter().position(|&i| i == 1).unwrap();
+        assert!(pos_base < pos_refine);
     }
 
     #[test]

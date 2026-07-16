@@ -536,6 +536,35 @@ pub fn validate_mode(model_id: &str, mode: &str) -> Result<(), String> {
     ))
 }
 
+const CONTROL_SUFFIXES: &[(&str, &str)] = &[
+    ("_canny", "canny"),
+    ("_depth", "depth"),
+    ("_pose", "pose"),
+    ("_softedge", "softedge"),
+    ("_scribble", "scribble"),
+    ("_hed", "hed"),
+    ("_mlsd", "mlsd"),
+    ("_gray", "gray"),
+    ("_normal", "normal"),
+    ("_lineart", "lineart"),
+];
+
+/// Try to detect the control type from a filename suffix (e.g. "photo_depth.png" → "depth").
+pub fn detect_control_type_from_filename(path: &str) -> Option<String> {
+    let stem = std::path::Path::new(path)
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_lowercase();
+
+    for &(suffix, control_type) in CONTROL_SUFFIXES {
+        if stem.ends_with(suffix) {
+            return Some(control_type.to_string());
+        }
+    }
+    None
+}
+
 pub fn validate_controlnet(model_id: &str, control_type: &str) -> Result<(), String> {
     let resolved = match resolve_model(model_id) {
         Some(m) => m,

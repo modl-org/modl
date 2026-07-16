@@ -17,34 +17,7 @@ use crate::core::remote_executor::RemoteExecutor;
 use crate::core::runtime;
 
 /// Known control type suffixes for auto-detection from filenames.
-const CONTROL_SUFFIXES: &[(&str, &str)] = &[
-    ("_canny", "canny"),
-    ("_depth", "depth"),
-    ("_pose", "pose"),
-    ("_softedge", "softedge"),
-    ("_scribble", "scribble"),
-    ("_hed", "hed"),
-    ("_mlsd", "mlsd"),
-    ("_gray", "gray"),
-    ("_normal", "normal"),
-    ("_lineart", "lineart"),
-];
-
-/// Try to detect the control type from a filename suffix (e.g. "photo_depth.png" → "depth").
-fn detect_control_type_from_filename(path: &str) -> Option<String> {
-    let stem = PathBuf::from(path)
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_lowercase();
-
-    for &(suffix, control_type) in CONTROL_SUFFIXES {
-        if stem.ends_with(suffix) {
-            return Some(control_type.to_string());
-        }
-    }
-    None
-}
+use crate::core::model_family::detect_control_type_from_filename;
 
 /// Read image dimensions from a file on disk.
 fn image_dimensions(path: &str) -> Result<(u32, u32)> {
@@ -133,17 +106,31 @@ async fn run_on_pod(args: &GenerateArgs<'_>) -> Result<()> {
     let model = args.base.context(
         "--pod needs an explicit --base <model-id> (e.g. flux-schnell) — it's pulled into the pod's store.",
     )?;
-    for (flag, set) in [
-        ("--init-image", args.init_image.is_some()),
-        ("--mask", args.mask.is_some()),
-        ("--controlnet", !args.controlnet.is_empty()),
-        ("--style-ref", !args.style_ref.is_empty()),
-        ("--cloud", args.cloud),
-        ("--attach-gpu", args.attach_gpu),
-    ] {
+    for (flag, set) in [("--cloud", args.cloud), ("--attach-gpu", args.attach_gpu)] {
         if set {
             anyhow::bail!("{flag} isn't supported with --pod yet — run locally or drop the flag.");
         }
+    }
+    // Inpaint method selection isn't a workflow field yet — only the default
+    // auto behaviour ships to pods.
+    if args.mask.is_some() && !matches!(args.inpaint, InpaintMethod::Auto) {
+        anyhow::bail!("--inpaint isn't supported with --pod yet — run locally or drop the flag.");
+    }
+    // Same mode validation as local runs, against models.toml (no store needed).
+    // Note: no automatic inpaint-model swap on pods — pick an inpaint-capable
+    // --base explicitly; the error below lists them.
+    let mode = match (args.init_image.is_some(), args.mask.is_some()) {
+        (_, true) => Some("inpaint"),
+        (true, false) => Some("img2img"),
+        (false, false) => None,
+    };
+    if args.mask.is_some() && args.init_image.is_none() {
+        anyhow::bail!("--mask requires --init-image (inpainting regenerates a masked region).");
+    }
+    if let Some(mode) = mode
+        && let Err(msg) = model_family::validate_mode(model, mode)
+    {
+        anyhow::bail!(msg);
     }
     if args.fast.is_some() && args.lora.is_some() {
         anyhow::bail!(
@@ -179,6 +166,30 @@ async fn run_on_pod(args: &GenerateArgs<'_>) -> Result<()> {
         (None, _) => vec![],
     };
 
+    // Build + validate ControlNet / style-ref inputs against models.toml,
+    // exactly like a local run — the spec builder inlines the image files.
+    let cn_inputs = build_cn_inputs(
+        args.controlnet,
+        args.cn_strength,
+        args.cn_end,
+        args.cn_type,
+        model,
+    )?;
+    let style_inputs =
+        build_style_inputs(args.style_ref, args.style_strength, args.style_type, model)?;
+    for p in [args.init_image, args.mask].into_iter().flatten() {
+        if !std::path::Path::new(p).exists() {
+            anyhow::bail!("Image not found: {p}");
+        }
+    }
+    let image_inputs = crate::core::pod_run::GenImageInputs {
+        init_image: args.init_image.map(std::path::Path::new),
+        mask: args.mask.map(std::path::Path::new),
+        strength: args.strength,
+        controlnet: &cn_inputs,
+        style_ref: &style_inputs,
+    };
+
     let spec = crate::core::pod_run::single_generate_spec(
         model,
         args.prompt,
@@ -189,6 +200,7 @@ async fn run_on_pod(args: &GenerateArgs<'_>) -> Result<()> {
         args.steps,
         args.guidance.map(|g| g as f64),
         &seeds,
+        &image_inputs,
     )?;
 
     let rec = crate::core::pod_state::active_pod()
@@ -215,6 +227,102 @@ async fn run_on_pod(args: &GenerateArgs<'_>) -> Result<()> {
         style(format!("modl pod rm {}", rec.instance_id)).bold()
     );
     Ok(())
+}
+
+/// Validate and build ControlNet inputs from CLI flags. Shared between local
+/// and pod execution — `effective_model` drives support validation.
+fn build_cn_inputs(
+    controlnet: &[String],
+    cn_strength: &str,
+    cn_end: &str,
+    cn_type: Option<&str>,
+    effective_model: &str,
+) -> Result<Vec<ControlNetInput>> {
+    if controlnet.is_empty() {
+        return Ok(Vec::new());
+    }
+    if controlnet.len() > 2 {
+        anyhow::bail!(
+            "Maximum 2 ControlNet inputs supported. You provided {}.",
+            controlnet.len()
+        );
+    }
+
+    // Parse comma-separated strengths/ends
+    let strengths: Vec<f32> = cn_strength
+        .split(',')
+        .map(|s| s.trim().parse::<f32>().unwrap_or(0.75))
+        .collect();
+    let ends: Vec<f32> = cn_end
+        .split(',')
+        .map(|s| s.trim().parse::<f32>().unwrap_or(0.8))
+        .collect();
+
+    let mut inputs = Vec::new();
+    for (i, cn_path) in controlnet.iter().enumerate() {
+        let path = PathBuf::from(cn_path);
+        if !path.exists() {
+            anyhow::bail!("ControlNet image not found: {cn_path}");
+        }
+
+        // Resolve control type: explicit flag > filename suffix > error
+        let control_type = if let Some(explicit) = cn_type {
+            explicit.to_string()
+        } else {
+            detect_control_type_from_filename(cn_path).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Could not auto-detect control type for '{}'. \
+                     Use --cn-type to specify. Options: canny, depth, pose, softedge, scribble, hed, mlsd, gray, normal",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                )
+            })?
+        };
+
+        // Validate this model + type combination
+        if let Err(msg) = model_family::validate_controlnet(effective_model, &control_type) {
+            anyhow::bail!(msg);
+        }
+
+        inputs.push(ControlNetInput {
+            image: cn_path.clone(),
+            control_type,
+            strength: strengths.get(i).copied().unwrap_or(0.75),
+            control_end: ends.get(i).copied().unwrap_or(0.8),
+        });
+    }
+    Ok(inputs)
+}
+
+/// Validate and build style-ref inputs from CLI flags. Shared between local
+/// and pod execution.
+fn build_style_inputs(
+    style_ref: &[String],
+    style_strength: f32,
+    style_type: Option<&str>,
+    effective_model: &str,
+) -> Result<Vec<StyleRefInput>> {
+    if style_ref.is_empty() {
+        return Ok(Vec::new());
+    }
+    if let Err(msg) = model_family::validate_style_ref(effective_model) {
+        anyhow::bail!(msg);
+    }
+
+    let style_type_str = style_type.unwrap_or("style").to_string();
+
+    style_ref
+        .iter()
+        .map(|path| {
+            if !PathBuf::from(path).exists() {
+                anyhow::bail!("Style reference image not found: {path}");
+            }
+            Ok(StyleRefInput {
+                image: path.clone(),
+                strength: style_strength,
+                style_type: style_type_str.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()
 }
 
 /// JSON result for a pod run — same shape for generate/edit/run so agents
@@ -433,90 +541,10 @@ async fn run_local(args: GenerateArgs<'_>, db: Database) -> Result<()> {
     }
 
     // -------------------------------------------------------------------
-    // Validate and build ControlNet inputs
+    // Validate and build ControlNet + style-ref inputs
     // -------------------------------------------------------------------
-    let cn_inputs = if !controlnet.is_empty() {
-        if controlnet.len() > 2 {
-            anyhow::bail!(
-                "Maximum 2 ControlNet inputs supported. You provided {}.",
-                controlnet.len()
-            );
-        }
-
-        // Parse comma-separated strengths/ends
-        let strengths: Vec<f32> = cn_strength
-            .split(',')
-            .map(|s| s.trim().parse::<f32>().unwrap_or(0.75))
-            .collect();
-        let ends: Vec<f32> = cn_end
-            .split(',')
-            .map(|s| s.trim().parse::<f32>().unwrap_or(0.8))
-            .collect();
-
-        let mut inputs = Vec::new();
-        for (i, cn_path) in controlnet.iter().enumerate() {
-            let path = PathBuf::from(cn_path);
-            if !path.exists() {
-                anyhow::bail!("ControlNet image not found: {cn_path}");
-            }
-
-            // Resolve control type: explicit flag > filename suffix > error
-            let control_type = if let Some(explicit) = cn_type {
-                explicit.to_string()
-            } else {
-                detect_control_type_from_filename(cn_path).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Could not auto-detect control type for '{}'. \
-                         Use --cn-type to specify. Options: canny, depth, pose, softedge, scribble, hed, mlsd, gray, normal",
-                        path.file_name().unwrap_or_default().to_string_lossy()
-                    )
-                })?
-            };
-
-            // Validate this model + type combination
-            if let Err(msg) = model_family::validate_controlnet(&effective_model, &control_type) {
-                anyhow::bail!(msg);
-            }
-
-            inputs.push(ControlNetInput {
-                image: cn_path.clone(),
-                control_type,
-                strength: strengths.get(i).copied().unwrap_or(0.75),
-                control_end: ends.get(i).copied().unwrap_or(0.8),
-            });
-        }
-        inputs
-    } else {
-        Vec::new()
-    };
-
-    // -------------------------------------------------------------------
-    // Validate and build style-ref inputs
-    // -------------------------------------------------------------------
-    let style_inputs: Vec<StyleRefInput> = if !style_ref.is_empty() {
-        // Validate model supports style-ref
-        if let Err(msg) = model_family::validate_style_ref(&effective_model) {
-            anyhow::bail!(msg);
-        }
-
-        let style_type_str = style_type.unwrap_or("style").to_string();
-
-        style_ref
-            .iter()
-            .map(|path| {
-                if !PathBuf::from(path).exists() {
-                    anyhow::bail!("Style reference image not found: {path}");
-                }
-                Ok(StyleRefInput {
-                    image: path.clone(),
-                    strength: style_strength,
-                    style_type: style_type_str.clone(),
-                })
-            })
-            .collect::<Result<Vec<_>>>()?
-    } else {
-        Vec::new()
-    };
+    let cn_inputs = build_cn_inputs(controlnet, cn_strength, cn_end, cn_type, &effective_model)?;
+    let style_inputs = build_style_inputs(style_ref, style_strength, style_type, &effective_model)?;
 
     // -------------------------------------------------------------------
     // Build output directory: ~/.modl/outputs/<date>/
