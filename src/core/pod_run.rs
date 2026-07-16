@@ -206,15 +206,25 @@ pub fn prepare(pod: &Pod, models: &[String]) -> Result<()> {
 /// variant selection (fp8/GGUF by VRAM) happens pod-side.
 pub fn pull_models(pod: &Pod, models: &[String]) -> Result<()> {
     for m in models {
-        eprintln!(
-            "{} Ensuring {} on pod...",
-            style("→").cyan(),
-            style(m).bold()
-        );
-        run_ssh_streaming(&pod.ssh, &format!("{REMOTE_MODL} pull {}", shell_quote(m)))
-            .with_context(|| format!("`modl pull {m}` failed on the pod"))?;
+        pull_model(pod, m, None)?;
     }
     Ok(())
+}
+
+/// `modl pull` a single registry item on the pod, optionally pinning a
+/// variant (Lightning LoRAs resolve their variant from the `fast:` step
+/// count instead of pod VRAM).
+pub fn pull_model(pod: &Pod, id: &str, variant: Option<&str>) -> Result<()> {
+    eprintln!(
+        "{} Ensuring {} on pod...",
+        style("→").cyan(),
+        style(id).bold()
+    );
+    let mut cmd = format!("{REMOTE_MODL} pull {}", shell_quote(id));
+    if let Some(v) = variant {
+        cmd.push_str(&format!(" --variant {}", shell_quote(v)));
+    }
+    run_ssh_streaming(&pod.ssh, &cmd).with_context(|| format!("`modl pull {id}` failed on the pod"))
 }
 
 /// Model IDs referenced by a workflow YAML (workflow-level + per-step
@@ -242,19 +252,191 @@ pub fn workflow_models(yaml: &str) -> Result<Vec<String>> {
     Ok(models)
 }
 
+/// All `lora:` references in a workflow YAML (workflow-level + per-step),
+/// deduplicated, in declaration order.
+fn workflow_lora_refs(v: &serde_yaml::Value) -> Vec<String> {
+    let mut loras: Vec<String> = Vec::new();
+    let mut push = |l: Option<&serde_yaml::Value>| {
+        if let Some(s) = l.and_then(|v| v.as_str())
+            && !loras.iter().any(|x| x == s)
+        {
+            loras.push(s.to_string());
+        }
+    };
+    push(v.get("lora"));
+    if let Some(steps) = v.get("steps").and_then(|s| s.as_sequence()) {
+        for step in steps {
+            push(step.get("lora"));
+        }
+    }
+    loras
+}
+
+/// A locally-stored LoRA (trained or registered) that must be shipped into
+/// the pod's store before the workflow can reference it by name.
+#[derive(Debug)]
+pub struct LoraPush {
+    /// Stable id to register under on the pod (kept identical to the local
+    /// id so the same reference resolves on both machines).
+    pub id: String,
+    pub name: String,
+    pub sha256: String,
+    pub size: u64,
+    pub file_name: String,
+    pub local_path: PathBuf,
+}
+
+/// How each LoRA referenced by a workflow reaches the pod.
+#[derive(Debug, Default)]
+pub struct WorkflowLoras {
+    /// Registry items — pulled pod-side like models: (id, optional variant).
+    /// Includes the Lightning LoRAs required by `fast:` steps.
+    pub pulls: Vec<(String, Option<String>)>,
+    /// Local LoRAs — rsynced into the pod store and registered.
+    pub pushes: Vec<LoraPush>,
+}
+
+/// Classify every LoRA a workflow needs (explicit `lora:` refs + the
+/// Lightning LoRAs implied by `fast:` steps) into pod-side pulls vs local
+/// pushes. Registry items are pulled on the pod (its own bandwidth, correct
+/// variant selection); anything only known locally is pushed. Unresolvable
+/// references fail here — before any pod time is spent.
+pub fn classify_workflow_loras(
+    yaml: &str,
+    db: &crate::core::db::Database,
+) -> Result<WorkflowLoras> {
+    let v: serde_yaml::Value = serde_yaml::from_str(yaml).context("Invalid workflow YAML")?;
+    let registry_ids: std::collections::HashSet<String> =
+        crate::core::registry::RegistryIndex::load()
+            .map(|idx| idx.items.iter().map(|m| m.id.clone()).collect())
+            .unwrap_or_default();
+    let installed_loras = db.list_installed(Some("lora"))?;
+
+    let mut result = WorkflowLoras::default();
+
+    for lora in workflow_lora_refs(&v) {
+        if registry_ids.contains(&lora) {
+            result.pulls.push((lora, None));
+        } else if let Some(m) = installed_loras
+            .iter()
+            .find(|m| m.name == lora || m.id == lora)
+        {
+            result.pushes.push(LoraPush {
+                id: m.id.clone(),
+                name: m.name.clone(),
+                sha256: m.sha256.clone(),
+                size: m.size,
+                file_name: m.file_name.clone(),
+                local_path: PathBuf::from(&m.store_path),
+            });
+        } else {
+            bail!(
+                "LoRA `{lora}` not found — not installed locally and not a registry item.\n  \
+                 Train it (`modl train`), pull it (`modl pull {lora}`), or register a file \
+                 (`modl register <file> --name {lora}`)."
+            );
+        }
+    }
+
+    // `fast:` steps need the model's Lightning LoRA on the pod. It's always
+    // a registry item — resolve the variant from the requested step count.
+    let wf_model = v.get("model").and_then(|m| m.as_str());
+    for step in v
+        .get("steps")
+        .and_then(|s| s.as_sequence())
+        .into_iter()
+        .flatten()
+    {
+        let Some(fast) = step.get("fast").and_then(|f| f.as_u64()) else {
+            continue;
+        };
+        let model = step
+            .get("model")
+            .and_then(|m| m.as_str())
+            .or(wf_model)
+            .context("`fast` step has no model (neither per-step nor workflow-level)")?;
+        let Some(cfg) = crate::core::model_family::lightning_config(model) else {
+            let id = step.get("id").and_then(|i| i.as_str()).unwrap_or("?");
+            bail!("step `{id}`: `fast` is not supported for `{model}` (no Lightning config).");
+        };
+        let (variant, _) = cfg.resolve(fast as u32);
+        let pull = (cfg.lora_registry_id.clone(), Some(variant.to_string()));
+        if !result.pulls.contains(&pull) {
+            result.pulls.push(pull);
+        }
+    }
+
+    Ok(result)
+}
+
+/// Ship a local LoRA into the pod's store: rsync the file to its
+/// content-addressed path (skipped when already there — content-addressed
+/// means existence implies identity), then `modl register` pod-side, which
+/// re-hashes (verifying the transfer) and records it in the pod's SQLite +
+/// store index. After this, the workflow's `lora: <name>` resolves on the
+/// pod exactly like it does locally.
+pub fn push_lora(pod: &Pod, lora: &LoraPush) -> Result<()> {
+    // Mirror Store::path_for: <store_root>/store/<type>/<sha16>/<file>. Pods
+    // run modl as root with stock config, whose store root is ~/modl. If a
+    // pod ever diverges, `modl register` below copies the file into the
+    // right place — this path is just the zero-copy fast path.
+    let prefix = &lora.sha256[..lora.sha256.len().min(16)];
+    let remote_dir = format!("/root/modl/store/lora/{prefix}");
+    let remote_path = format!("{remote_dir}/{}", lora.file_name);
+
+    let exists = run_ssh_capture(
+        &pod.ssh,
+        &format!(
+            "test -f {} && echo yes || echo no",
+            shell_quote(&remote_path)
+        ),
+    )
+    .unwrap_or_default();
+    if !exists.contains("yes") {
+        eprintln!(
+            "{} Pushing LoRA {} to pod ({:.1} MB)...",
+            style("→").cyan(),
+            style(&lora.name).bold(),
+            lora.size as f64 / 1_048_576.0
+        );
+        run_ssh_quiet(&pod.ssh, &format!("mkdir -p {}", shell_quote(&remote_dir)))?;
+        rsync_to(&pod.ssh, &lora.local_path, &remote_path)
+            .with_context(|| format!("Failed to push LoRA {} to the pod", lora.name))?;
+    }
+
+    let mut cmd = format!(
+        "{REMOTE_MODL} register {} --name {} --id {} --type lora",
+        shell_quote(&remote_path),
+        shell_quote(&lora.name),
+        shell_quote(&lora.id),
+    );
+    // Only a full hash can be verified — reconciled entries may carry a
+    // 16-char prefix, which `register` would reject as a mismatch.
+    if lora.sha256.len() == 64 {
+        cmd.push_str(&format!(" --sha256 {}", shell_quote(&lora.sha256)));
+    }
+    run_ssh_streaming(&pod.ssh, &cmd)
+        .with_context(|| format!("`modl register` failed on the pod for LoRA {}", lora.name))?;
+    Ok(())
+}
+
 /// Reject specs the pod can't satisfy yet, with a useful message.
 pub fn check_pod_supported(yaml: &str) -> Result<()> {
     let v: serde_yaml::Value = serde_yaml::from_str(yaml).context("Invalid workflow YAML")?;
     let steps = v.get("steps").and_then(|s| s.as_sequence());
-    let has_lora = v.get("lora").is_some()
-        || steps
-            .map(|steps| steps.iter().any(|s| s.get("lora").is_some()))
-            .unwrap_or(false);
-    if has_lora {
-        bail!(
-            "LoRA references aren't supported on pods yet — the pod's store has no local LoRAs.\n  \
-             Run this workflow locally, or drop the `lora:` field."
-        );
+
+    // LoRA refs by name resolve pod-side after push/pull. A file path names
+    // a file on THIS machine that won't exist there — catch it at submit
+    // time with the fix.
+    for lora in workflow_lora_refs(&v) {
+        if lora.contains('/') || lora.ends_with(".safetensors") {
+            bail!(
+                "`lora: {lora}` is a file path — it won't exist on the pod.\n  \
+                 Register it locally first:\n    \
+                 modl register {lora} --name <name>\n  \
+                 then reference it as `lora: <name>`."
+            );
+        }
     }
 
     // Image refs must resolve on the pod: `$step.outputs[N]` and `$name`
@@ -300,7 +482,19 @@ pub async fn run_workflow_on_pod(
 ) -> Result<RemoteRunOutcome> {
     check_pod_supported(spec_yaml)?;
     let models = workflow_models(spec_yaml)?;
+    // Resolve LoRA references against the local DB *before* touching the pod
+    // so unresolvable refs fail without spending pod time.
+    let loras = {
+        let db = crate::core::db::Database::open()?;
+        classify_workflow_loras(spec_yaml, &db)?
+    };
     prepare(pod, &models)?;
+    for (id, variant) in &loras.pulls {
+        pull_model(pod, id, variant.as_deref())?;
+    }
+    for lora in &loras.pushes {
+        push_lora(pod, lora)?;
+    }
 
     let run_id = opts.run_id.unwrap_or_else(|| {
         format!(
@@ -560,9 +754,12 @@ fn walk_files(dir: &Path) -> Vec<PathBuf> {
 
 /// Build a one-step generate workflow so `modl generate --pod` funnels
 /// through the same remote surface as `modl run --pod`.
+#[allow(clippy::too_many_arguments)]
 pub fn single_generate_spec(
     model: &str,
     prompt: &str,
+    lora: Option<&str>,
+    fast: Option<u32>,
     width: Option<u32>,
     height: Option<u32>,
     steps: Option<u32>,
@@ -572,6 +769,8 @@ pub fn single_generate_spec(
     let mut step = serde_yaml::Mapping::new();
     step.insert("id".into(), "gen".into());
     step.insert("generate".into(), prompt.into());
+    insert_opt(&mut step, "lora", lora.map(|v| v.into()));
+    insert_opt(&mut step, "fast", fast.map(|v| v.into()));
     insert_opt(&mut step, "width", width.map(|v| v.into()));
     insert_opt(&mut step, "height", height.map(|v| v.into()));
     insert_opt(&mut step, "steps", steps.map(|v| v.into()));
@@ -606,6 +805,8 @@ pub fn single_edit_spec(
     model: &str,
     prompt: &str,
     image_path: &Path,
+    lora: Option<&str>,
+    fast: Option<u32>,
     width: Option<u32>,
     height: Option<u32>,
     steps: Option<u32>,
@@ -637,6 +838,8 @@ pub fn single_edit_spec(
     step.insert("id".into(), "edit".into());
     step.insert("edit".into(), "$input".into());
     step.insert("prompt".into(), prompt.into());
+    insert_opt(&mut step, "lora", lora.map(|v| v.into()));
+    insert_opt(&mut step, "fast", fast.map(|v| v.into()));
     insert_opt(&mut step, "width", width.map(|v| v.into()));
     insert_opt(&mut step, "height", height.map(|v| v.into()));
     insert_opt(&mut step, "steps", steps.map(|v| v.into()));
@@ -695,13 +898,92 @@ steps:
     }
 
     #[test]
-    fn rejects_lora_specs() {
-        let yaml = "name: t\nmodel: m\nlora: my-lora\nsteps:\n  - id: a\n    generate: x\n";
-        assert!(check_pod_supported(yaml).is_err());
-        let yaml2 = "name: t\nmodel: m\nsteps:\n  - id: a\n    generate: x\n    lora: l\n";
-        assert!(check_pod_supported(yaml2).is_err());
-        let ok = "name: t\nmodel: m\nsteps:\n  - id: a\n    generate: x\n";
-        assert!(check_pod_supported(ok).is_ok());
+    fn lora_names_supported_but_path_refs_rejected() {
+        // Name-form LoRA refs are fine — they're pushed/pulled before the run.
+        let by_name = "name: t\nmodel: m\nlora: my-lora\nsteps:\n  - id: a\n    generate: x\n";
+        assert!(check_pod_supported(by_name).is_ok());
+        let per_step = "name: t\nmodel: m\nsteps:\n  - id: a\n    generate: x\n    lora: l\n";
+        assert!(check_pod_supported(per_step).is_ok());
+
+        // Path-form refs name files on this machine — rejected with the fix.
+        let by_path =
+            "name: t\nmodel: m\nlora: /home/me/x.safetensors\nsteps:\n  - id: a\n    generate: x\n";
+        let err = check_pod_supported(by_path).unwrap_err().to_string();
+        assert!(err.contains("modl register"), "{err}");
+        let step_path =
+            "name: t\nmodel: m\nsteps:\n  - id: a\n    generate: x\n    lora: x.safetensors\n";
+        assert!(check_pod_supported(step_path).is_err());
+    }
+
+    #[test]
+    fn extracts_lora_refs_dedup() {
+        let yaml = r#"
+name: t
+model: m
+lora: alice
+steps:
+  - id: a
+    generate: x
+  - id: b
+    generate: y
+    lora: bob
+  - id: c
+    generate: z
+    lora: alice
+"#;
+        let v: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            workflow_lora_refs(&v),
+            vec!["alice".to_string(), "bob".into()]
+        );
+    }
+
+    #[test]
+    fn classifies_local_lora_as_push_and_unknown_as_error() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let db = crate::core::db::Database::open_at(tmp.path()).unwrap();
+        db.insert_installed(&crate::core::db::InstalledModelRecord {
+            id: "train:alice:abcd",
+            name: "alice",
+            asset_type: "lora",
+            variant: None,
+            sha256: &"a".repeat(64),
+            size: 42,
+            file_name: "alice.safetensors",
+            store_path: "/store/lora/aaaa/alice.safetensors",
+        })
+        .unwrap();
+
+        let yaml = "name: t\nmodel: m\nlora: alice\nsteps:\n  - id: a\n    generate: x\n";
+        let loras = classify_workflow_loras(yaml, &db).unwrap();
+        assert!(loras.pulls.is_empty());
+        assert_eq!(loras.pushes.len(), 1);
+        assert_eq!(loras.pushes[0].id, "train:alice:abcd");
+        assert_eq!(loras.pushes[0].file_name, "alice.safetensors");
+
+        let unknown = "name: t\nmodel: m\nlora: nope\nsteps:\n  - id: a\n    generate: x\n";
+        let err = classify_workflow_loras(unknown, &db)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not found"), "{err}");
+    }
+
+    #[test]
+    fn fast_step_adds_lightning_pull() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let db = crate::core::db::Database::open_at(tmp.path()).unwrap();
+
+        // qwen-image has a Lightning config in models.toml.
+        let yaml = "name: t\nmodel: qwen-image\nsteps:\n  - id: a\n    generate: x\n    fast: 4\n";
+        let loras = classify_workflow_loras(yaml, &db).unwrap();
+        assert_eq!(loras.pulls.len(), 1);
+        assert_eq!(loras.pulls[0].0, "qwen-image-2512-lightning");
+        assert_eq!(loras.pulls[0].1.as_deref(), Some("4step-bf16"));
+
+        // A model without a Lightning config fails at classification time.
+        let bad = "name: t\nmodel: sdxl\nsteps:\n  - id: a\n    generate: x\n    fast: 4\n";
+        let err = classify_workflow_loras(bad, &db).unwrap_err().to_string();
+        assert!(err.contains("not supported"), "{err}");
     }
 
     #[test]
@@ -709,6 +991,8 @@ steps:
         let spec = single_generate_spec(
             "flux-schnell",
             "a red apple",
+            None,
+            None,
             Some(1024),
             None,
             Some(4),
@@ -722,6 +1006,39 @@ steps:
         assert!(spec.contains("width: 1024"));
         assert!(spec.contains("seed: 7"));
         assert!(!spec.contains("height"));
+        assert!(!spec.contains("lora"));
+        assert!(!spec.contains("fast"));
+    }
+
+    #[test]
+    fn generate_spec_carries_lora_and_fast() {
+        let spec = single_generate_spec(
+            "qwen-image",
+            "p",
+            Some("alice"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert!(spec.contains("lora: alice"));
+
+        let spec = single_generate_spec(
+            "qwen-image",
+            "p",
+            None,
+            Some(4),
+            None,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert!(spec.contains("fast: 4"));
     }
 
     #[test]
@@ -732,6 +1049,8 @@ steps:
             "klein-9b",
             "make it golden",
             &tmp,
+            None,
+            None,
             None,
             None,
             None,
@@ -759,6 +1078,8 @@ steps:
             "klein-9b",
             "p",
             &tmp,
+            None,
+            None,
             Some(1820),
             Some(1024),
             Some(28),

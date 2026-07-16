@@ -49,6 +49,11 @@ pub struct GenerateStep {
     /// - model overridden → no LoRA (auto-disabled; the workflow-level LoRA
     ///   probably belongs to a different model family)
     pub lora: Option<String>,
+    /// Lightning fast mode: target step count (4 or 8). Resolves to the
+    /// model's Lightning distillation LoRA + scheduler overrides at plan
+    /// time. Mutually exclusive with `lora` on the same step; overrides an
+    /// inherited workflow-level `lora`.
+    pub fast: Option<u32>,
     pub seed: Option<u64>,
     /// Explicit seed list for variation exploration — one output per seed.
     /// Mutually exclusive with `seed` + `count`. Empty list is rejected at parse time.
@@ -68,6 +73,8 @@ pub struct EditStep {
     pub model: Option<String>,
     /// Per-step LoRA override. See `GenerateStep::lora`.
     pub lora: Option<String>,
+    /// Lightning fast mode. See `GenerateStep::fast`.
+    pub fast: Option<u32>,
     pub seed: Option<u64>,
     /// Explicit seed list for variation exploration — one output per seed.
     /// Mutually exclusive with `seed` + `count`. Empty list is rejected at parse time.
@@ -141,6 +148,8 @@ struct RawStep {
     model: Option<String>,
     #[serde(default)]
     lora: Option<String>,
+    #[serde(default)]
+    fast: Option<u32>,
     #[serde(default)]
     seed: Option<u64>,
     #[serde(default)]
@@ -244,6 +253,12 @@ pub fn parse_str(yaml: &str, base_dir: &Path) -> Result<Workflow> {
                 raw_step.id
             );
         }
+        if raw_step.fast.is_some() && raw_step.lora.is_some() {
+            bail!(
+                "step `{}`: cannot set both `fast` and `lora` — `fast` auto-applies the model's Lightning LoRA",
+                raw_step.id
+            );
+        }
 
         // When a step overrides the model, don't inherit workflow-level
         // defaults for steps/guidance — those are model-dependent and the
@@ -267,6 +282,7 @@ pub fn parse_str(yaml: &str, base_dir: &Path) -> Result<Workflow> {
                 prompt: prompt.clone(),
                 model: raw_step.model.clone(),
                 lora: raw_step.lora.clone(),
+                fast: raw_step.fast,
                 seed: raw_step.seed.or(raw.defaults.seed),
                 seeds: raw_step.seeds.clone(),
                 width: raw_step.width.or(raw.defaults.width),
@@ -295,6 +311,7 @@ pub fn parse_str(yaml: &str, base_dir: &Path) -> Result<Workflow> {
                 prompt: edit_prompt.clone(),
                 model: raw_step.model.clone(),
                 lora: raw_step.lora.clone(),
+                fast: raw_step.fast,
                 seed: raw_step.seed.or(raw.defaults.seed),
                 seeds: raw_step.seeds.clone(),
                 width: raw_step.width.or(raw.defaults.width),
@@ -966,6 +983,47 @@ steps:
             StepKind::Generate(g) => assert_eq!(g.lora.as_deref(), Some("override-lora")),
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn per_step_fast_parsed() {
+        let yaml = r#"
+name: test
+model: qwen-image
+steps:
+  - id: a
+    generate: "cat"
+    fast: 4
+  - id: b
+    generate: "dog"
+"#;
+        let wf = parse(yaml).unwrap();
+        match &wf.steps[0].kind {
+            StepKind::Generate(g) => assert_eq!(g.fast, Some(4)),
+            _ => panic!(),
+        }
+        match &wf.steps[1].kind {
+            StepKind::Generate(g) => assert_eq!(g.fast, None),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn fast_and_lora_on_same_step_rejected() {
+        let yaml = r#"
+name: test
+model: qwen-image
+steps:
+  - id: a
+    generate: "cat"
+    fast: 4
+    lora: my-lora
+"#;
+        let err = parse(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("cannot set both `fast` and `lora`"),
+            "got: {err}"
+        );
     }
 
     #[test]

@@ -409,3 +409,188 @@ pub async fn hf_pull(
         final_path,
     ))
 }
+
+/// Result of `register_file`.
+#[derive(Debug)]
+pub struct RegisterFileResult {
+    pub id: String,
+    pub sha256: String,
+    pub store_path: PathBuf,
+    /// True when the id was already registered with this content — the call
+    /// was a no-op.
+    pub already_registered: bool,
+}
+
+/// Register a local model file into the content-addressed store: hash,
+/// verify, copy into `store/<type>/<sha16>/<file>` (no-op when the file
+/// already lives there), record in SQLite and the shared store index.
+///
+/// This is how a file that arrived outside `modl pull` becomes referenceable
+/// by name (`--lora <name>`, workflow `lora:`). It is also the pod-side half
+/// of LoRA push: the file is rsynced straight into the store path, then this
+/// registers it. Idempotent — re-registering the same content is a no-op.
+pub fn register_file(
+    path: &std::path::Path,
+    name: &str,
+    id: Option<&str>,
+    asset_type: &AssetType,
+    expected_sha256: Option<&str>,
+    db: &Database,
+    store_root: &std::path::Path,
+) -> Result<RegisterFileResult> {
+    if !path.is_file() {
+        anyhow::bail!("File not found: {}", path.display());
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("File has no valid file name")?
+        .to_string();
+
+    let sha256 =
+        Store::hash_file(path).with_context(|| format!("Failed to hash {}", path.display()))?;
+    if let Some(expected) = expected_sha256
+        && !sha256.eq_ignore_ascii_case(expected)
+    {
+        anyhow::bail!(
+            "SHA256 mismatch for {}: expected {expected}, got {sha256} — transfer corrupted?",
+            path.display()
+        );
+    }
+
+    let store = Store::new(store_root.to_path_buf());
+    let store_path = store.path_for(asset_type, &sha256, &file_name);
+    // Copy into the store unless the source already IS the store path
+    // (LoRA push rsyncs directly there before registering).
+    let already_in_place = path
+        .canonicalize()
+        .ok()
+        .is_some_and(|p| p == store_path || store_path.exists());
+    if !already_in_place {
+        store.ensure_dir(&store_path)?;
+        std::fs::copy(path, &store_path).with_context(|| {
+            format!(
+                "Failed to copy {} → {}",
+                path.display(),
+                store_path.display()
+            )
+        })?;
+    }
+
+    let id = id
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("local/{asset_type}/{name}"));
+    let already_registered = db
+        .list_installed(None)?
+        .iter()
+        .any(|m| m.id == id && m.sha256 == sha256);
+    if !already_registered {
+        let size = std::fs::metadata(&store_path).map(|m| m.len()).unwrap_or(0);
+        db.insert_installed(&InstalledModelRecord {
+            id: &id,
+            name,
+            asset_type: &asset_type.to_string(),
+            variant: None,
+            sha256: &sha256,
+            size,
+            file_name: &file_name,
+            store_path: &store_path.to_string_lossy(),
+        })?;
+    }
+
+    if matches!(asset_type, AssetType::Lora) {
+        let _ = super::artifacts::create_lora_symlinks(&store_path, name, &file_name);
+    }
+
+    Ok(RegisterFileResult {
+        id,
+        sha256,
+        store_path,
+        already_registered,
+    })
+}
+
+#[cfg(test)]
+mod register_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn setup() -> (tempfile::TempDir, Database, std::path::PathBuf) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Database::open_at(&dir.path().join("db.sqlite")).unwrap();
+        let file = dir.path().join("alice.safetensors");
+        std::fs::write(&file, b"fake lora bytes").unwrap();
+        (dir, db, file)
+    }
+
+    #[test]
+    fn registers_copies_and_is_idempotent() {
+        let (dir, db, file) = setup();
+
+        let r =
+            register_file(&file, "alice", None, &AssetType::Vae, None, &db, dir.path()).unwrap();
+        assert!(!r.already_registered);
+        assert_eq!(r.id, "local/vae/alice");
+        assert!(r.store_path.exists());
+        assert!(r.store_path.starts_with(dir.path()));
+        let installed = db.list_installed(Some("vae")).unwrap();
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0].name, "alice");
+        assert_eq!(installed[0].sha256, r.sha256);
+
+        // Second call: same content, same id — no-op.
+        let r2 =
+            register_file(&file, "alice", None, &AssetType::Vae, None, &db, dir.path()).unwrap();
+        assert!(r2.already_registered);
+        assert_eq!(db.list_installed(Some("vae")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn explicit_id_and_sha_verification() {
+        let (dir, db, file) = setup();
+
+        let err = register_file(
+            &file,
+            "alice",
+            Some("train:alice:1234"),
+            &AssetType::Vae,
+            Some(&"0".repeat(64)),
+            &db,
+            dir.path(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("SHA256 mismatch"), "{err}");
+        assert!(db.list_installed(None).unwrap().is_empty());
+
+        let sha = Store::hash_file(&file).unwrap();
+        let r = register_file(
+            &file,
+            "alice",
+            Some("train:alice:1234"),
+            &AssetType::Vae,
+            Some(&sha),
+            &db,
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(r.id, "train:alice:1234");
+    }
+
+    #[test]
+    fn missing_file_errors() {
+        let (dir, db, _) = setup();
+        assert!(
+            register_file(
+                Path::new("/nonexistent/x.safetensors"),
+                "x",
+                None,
+                &AssetType::Vae,
+                None,
+                &db,
+                dir.path(),
+            )
+            .is_err()
+        );
+    }
+}
