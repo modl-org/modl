@@ -564,6 +564,11 @@ pub async fn run_workflow_on_pod(
 /// (directly over SSH — no intermediary storage). Also the re-attach path:
 /// `modl pod pull <run-id>` fetches a run whose watcher died with the
 /// laptop lid.
+///
+/// The pod-side export carries each image's sidecar YAML. With an explicit
+/// `local_dest` the files land there verbatim; without one they are imported
+/// into `~/.modl/outputs/<date>/` and registered from their sidecars, so pod
+/// results show up in `modl outputs` and the web UI like local generations.
 pub fn export_run(
     pod: &Pod,
     run_id: &str,
@@ -580,16 +585,40 @@ pub fn export_run(
     )
     .context("Artifact export failed on the pod")?;
 
-    let local_dir = local_dest
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from(format!("./pod-outputs/{run_id}")));
-    std::fs::create_dir_all(&local_dir)
-        .with_context(|| format!("Failed to create {}", local_dir.display()))?;
-    rsync_from(&pod.ssh, &format!("{remote_export}/"), &local_dir)
+    // Explicit destination: sync verbatim (images + sidecars), no DB writes.
+    if let Some(dest) = local_dest {
+        std::fs::create_dir_all(dest)
+            .with_context(|| format!("Failed to create {}", dest.display()))?;
+        rsync_from(&pod.ssh, &format!("{remote_export}/"), dest)
+            .context("Failed to sync artifacts back from the pod")?;
+        let mut artifacts = walk_files(dest);
+        artifacts.sort();
+        if artifacts.is_empty() {
+            bail!(
+                "Run {run_id} exported nothing — inspect the pod: \
+                 modl pod exec -- {REMOTE_MODL} status {run_id}"
+            );
+        }
+        eprintln!(
+            "{} {} file(s) → {}",
+            style("✓").green().bold(),
+            artifacts.len(),
+            dest.display()
+        );
+        for a in &artifacts {
+            eprintln!("  {}", a.display());
+        }
+        return Ok((dest.to_path_buf(), artifacts));
+    }
+
+    // Default: stage locally, then import into the outputs tree + register
+    // from sidecars — SQLite stays a rebuildable cache over the files.
+    let staging = tempfile::tempdir().context("Failed to create staging directory")?;
+    rsync_from(&pod.ssh, &format!("{remote_export}/"), staging.path())
         .context("Failed to sync artifacts back from the pod")?;
 
-    let mut artifacts = walk_files(&local_dir);
-    artifacts.sort();
+    let db = crate::core::db::Database::open()?;
+    let artifacts = crate::core::outputs::import_run_dir(staging.path(), &db)?;
     if artifacts.is_empty() {
         bail!(
             "Run {run_id} exported nothing — inspect the pod: \
@@ -598,14 +627,14 @@ pub fn export_run(
     }
 
     eprintln!(
-        "{} {} artifact(s) → {}",
+        "{} {} artifact(s) imported into ~/.modl/outputs (visible in `modl outputs` and the UI)",
         style("✓").green().bold(),
         artifacts.len(),
-        local_dir.display()
     );
     for a in &artifacts {
         eprintln!("  {}", a.display());
     }
+    let local_dir = crate::core::paths::modl_root().join("outputs");
     Ok((local_dir, artifacts))
 }
 

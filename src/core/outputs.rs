@@ -26,7 +26,7 @@ pub struct SidecarMetadata {
     pub seed: Option<u64>,
     pub steps: u32,
     pub guidance: f32,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub size: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lora: Option<String>,
@@ -58,6 +58,239 @@ pub fn write_sidecar_yaml(image_path: &str, metadata: &SidecarMetadata) {
             eprintln!("Warning: failed to serialize sidecar YAML: {}", e);
         }
     }
+}
+
+/// Read the YAML sidecar next to an image, if present and parseable.
+pub fn read_sidecar(image_path: &Path) -> Option<SidecarMetadata> {
+    let yaml = std::fs::read_to_string(image_path.with_extension("yaml")).ok()?;
+    serde_yaml::from_str(&yaml).ok()
+}
+
+/// Convert a sidecar into the artifact-metadata JSON shape that
+/// `parse_output_meta` (and therefore `modl outputs` + the UI) reads.
+fn sidecar_to_artifact_meta(s: &SidecarMetadata) -> String {
+    let (width, height) = s
+        .size
+        .split_once('x')
+        .map(|(w, h)| (w.parse::<u32>().ok(), h.parse::<u32>().ok()))
+        .unwrap_or((None, None));
+    serde_json::json!({
+        "generated_with": s.source,
+        "prompt": s.prompt,
+        "base_model_id": s.base_model,
+        "lora_name": s.lora,
+        "lora_strength": s.lora_strength,
+        "seed": s.seed,
+        "steps": s.steps,
+        "guidance": s.guidance,
+        "width": width,
+        "height": height,
+    })
+    .to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Run export + import — files and their sidecars are the sync payload;
+// SQLite is a per-machine rebuildable cache (same doctrine as store/index.yaml).
+// ---------------------------------------------------------------------------
+
+/// One artifact to ship when exporting a run: the image plus its sidecar
+/// YAML when one exists on disk.
+pub struct RunExportFile {
+    pub image: PathBuf,
+    pub sidecar: Option<PathBuf>,
+}
+
+pub enum RunExportFiles {
+    /// No jobs recorded under this run id.
+    NoSuchRun,
+    /// Run exists; may be empty if no artifacts landed yet.
+    Files(Vec<RunExportFile>),
+}
+
+/// Collect a run's exportable files: every image artifact on disk, paired
+/// with its sidecar. Shared by `modl outputs export` and the ZIP endpoint
+/// so both always carry the metadata needed to reconcile on another machine.
+pub fn collect_run_export_files(db: &Database, run_id: &str) -> Result<RunExportFiles> {
+    let jobs = db.list_jobs_by_run_id(run_id)?;
+    if jobs.is_empty() {
+        return Ok(RunExportFiles::NoSuchRun);
+    }
+    let mut files = Vec::new();
+    for job in &jobs {
+        for a in db.list_artifacts(Some(&job.job_id))? {
+            let image = PathBuf::from(&a.path);
+            if !image.is_file() {
+                continue;
+            }
+            let sidecar = image.with_extension("yaml");
+            files.push(RunExportFile {
+                sidecar: sidecar.is_file().then_some(sidecar),
+                image,
+            });
+        }
+    }
+    Ok(RunExportFiles::Files(files))
+}
+
+/// Register any image under `~/.modl/outputs` that has a sidecar YAML but no
+/// artifact row. This is how outputs synced in from another machine (pod
+/// pulls, manual copies) show up in `modl outputs` and the UI with full
+/// metadata. Idempotent: the artifact id is derived from the image content,
+/// and paths that already have any artifact row are skipped.
+pub fn reconcile_outputs(db: &Database) -> Result<usize> {
+    reconcile_outputs_in(db, &paths::modl_root().join("outputs"))
+}
+
+fn reconcile_outputs_in(db: &Database, outputs_root: &Path) -> Result<usize> {
+    let known: std::collections::HashSet<String> = db
+        .list_artifacts(None)?
+        .into_iter()
+        .map(|a| a.path)
+        .collect();
+
+    let mut registered = 0usize;
+    let Ok(dates) = std::fs::read_dir(outputs_root) else {
+        return Ok(0);
+    };
+    for date_entry in dates.filter_map(|e| e.ok()) {
+        let date_path = date_entry.path();
+        if !date_path.is_dir() {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(&date_path) else {
+            continue;
+        };
+        for entry in files.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if !is_image_file(&path) {
+                continue;
+            }
+            let abs = path.to_string_lossy().to_string();
+            if known.contains(&abs) {
+                continue;
+            }
+            let Some(sidecar) = read_sidecar(&path) else {
+                continue;
+            };
+            let Ok(sha256) = super::store::Store::hash_file(&path) else {
+                continue;
+            };
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            db.insert_artifact(
+                &format!("import:{}", &sha256[..16]),
+                None,
+                "image",
+                &abs,
+                &sha256,
+                size,
+                Some(&sidecar_to_artifact_meta(&sidecar)),
+            )?;
+            registered += 1;
+        }
+    }
+    Ok(registered)
+}
+
+/// Import a directory of exported run files (images + sidecars) into the
+/// outputs tree and register them. Each image lands under
+/// `outputs/<date>/` where the date comes from its sidecar's `created_at`
+/// (falling back to today), so synced outputs sort naturally alongside
+/// local ones. Idempotent: an already-imported image (same content at the
+/// destination) is skipped. Returns the destination paths of all images.
+pub fn import_run_dir(src: &Path, db: &Database) -> Result<Vec<PathBuf>> {
+    import_run_dir_into(src, db, &paths::modl_root().join("outputs"))
+}
+
+fn import_run_dir_into(src: &Path, db: &Database, outputs_root: &Path) -> Result<Vec<PathBuf>> {
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let mut imported = Vec::new();
+
+    let entries =
+        std::fs::read_dir(src).with_context(|| format!("Failed to read {}", src.display()))?;
+    let mut images: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| is_image_file(p))
+        .collect();
+    images.sort();
+
+    for image in images {
+        let sidecar = read_sidecar(&image);
+        // `created_at` is RFC 3339; its first 10 chars are the date.
+        let date = sidecar
+            .as_ref()
+            .map(|s| s.created_at.chars().take(10).collect::<String>())
+            .filter(|d| d.len() == 10 && d.chars().filter(|c| *c == '-').count() == 2)
+            .unwrap_or_else(|| today.clone());
+        let dest_dir = outputs_root.join(&date);
+        std::fs::create_dir_all(&dest_dir)
+            .with_context(|| format!("Failed to create {}", dest_dir.display()))?;
+
+        let file_name = image
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "image.png".to_string());
+        let (dest, already_present) = unique_dest(&dest_dir.join(&file_name), &image)?;
+        if !already_present {
+            std::fs::copy(&image, &dest)
+                .with_context(|| format!("Failed to copy {}", image.display()))?;
+            let src_sidecar = image.with_extension("yaml");
+            if src_sidecar.is_file() {
+                std::fs::copy(&src_sidecar, dest.with_extension("yaml"))
+                    .with_context(|| format!("Failed to copy sidecar {}", src_sidecar.display()))?;
+            }
+        }
+        imported.push(dest);
+    }
+
+    reconcile_outputs_in(db, outputs_root)?;
+    Ok(imported)
+}
+
+fn is_image_file(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "webp"))
+}
+
+/// Pick a destination for `source` under its preferred name: the original
+/// name when free, `<stem>-2.<ext>`, `<stem>-3.<ext>`, … when taken by a
+/// different file. Returns `(path, true)` when some candidate already holds
+/// identical content (import is a no-op for it).
+fn unique_dest(preferred: &Path, source: &Path) -> Result<(PathBuf, bool)> {
+    use super::store::Store;
+    if !preferred.exists() {
+        return Ok((preferred.to_path_buf(), false));
+    }
+    let src_sha = Store::hash_file(source)?;
+    if Store::hash_file(preferred)? == src_sha {
+        return Ok((preferred.to_path_buf(), true));
+    }
+    let stem = preferred
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "image".to_string());
+    let ext = preferred
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_else(|| "png".to_string());
+    let dir = preferred.parent().unwrap_or(Path::new("."));
+    for n in 2..1000 {
+        let candidate = dir.join(format!("{stem}-{n}.{ext}"));
+        if !candidate.exists() {
+            return Ok((candidate, false));
+        }
+        if Store::hash_file(&candidate)? == src_sha {
+            return Ok((candidate, true));
+        }
+    }
+    bail!(
+        "Could not find a free destination name for {}",
+        preferred.display()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -588,5 +821,129 @@ pub fn find_artifact_by_prefix(prefix: &str, db: &Database) -> Result<ArtifactRe
                 ids.join(", ")
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sidecar(prompt: &str, date: &str) -> SidecarMetadata {
+        SidecarMetadata {
+            prompt: prompt.to_string(),
+            base_model: "z-image-turbo".to_string(),
+            seed: Some(7),
+            steps: 8,
+            guidance: 1.0,
+            size: "1024x768".to_string(),
+            lora: Some("alice".to_string()),
+            lora_strength: Some(1.0),
+            created_at: format!("{date}T10:00:00.000000000+00:00"),
+            source: "workflow".to_string(),
+        }
+    }
+
+    fn write_image_with_sidecar(dir: &Path, name: &str, content: &[u8], meta: &SidecarMetadata) {
+        let img = dir.join(name);
+        std::fs::write(&img, content).unwrap();
+        write_sidecar_yaml(&img.to_string_lossy(), meta);
+    }
+
+    #[test]
+    fn sidecar_roundtrip_and_meta_json() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_image_with_sidecar(dir.path(), "a.png", b"img", &sidecar("hello", "2026-07-16"));
+
+        let read = read_sidecar(&dir.path().join("a.png")).unwrap();
+        assert_eq!(read.prompt, "hello");
+        assert_eq!(read.size, "1024x768");
+
+        let meta: serde_json::Value =
+            serde_json::from_str(&sidecar_to_artifact_meta(&read)).unwrap();
+        assert_eq!(meta["base_model_id"], "z-image-turbo");
+        assert_eq!(meta["width"], 1024);
+        assert_eq!(meta["height"], 768);
+        assert_eq!(meta["lora_name"], "alice");
+        assert_eq!(meta["seed"], 7);
+    }
+
+    #[test]
+    fn reconcile_registers_sidecar_images_once() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_file = tempfile::NamedTempFile::new().unwrap();
+        let db = Database::open_at(db_file.path()).unwrap();
+
+        let date_dir = dir.path().join("2026-07-16");
+        std::fs::create_dir_all(&date_dir).unwrap();
+        write_image_with_sidecar(&date_dir, "a.png", b"imgA", &sidecar("pa", "2026-07-16"));
+        write_image_with_sidecar(&date_dir, "b.png", b"imgB", &sidecar("pb", "2026-07-16"));
+        // No sidecar → not registered.
+        std::fs::write(date_dir.join("c.png"), b"imgC").unwrap();
+
+        assert_eq!(reconcile_outputs_in(&db, dir.path()).unwrap(), 2);
+        // Idempotent.
+        assert_eq!(reconcile_outputs_in(&db, dir.path()).unwrap(), 0);
+
+        let arts = db.list_artifacts(None).unwrap();
+        assert_eq!(arts.len(), 2);
+        assert!(arts.iter().all(|a| a.artifact_id.starts_with("import:")));
+        assert!(arts.iter().all(|a| a.kind == "image"));
+        let meta: serde_json::Value =
+            serde_json::from_str(arts[0].metadata.as_deref().unwrap()).unwrap();
+        assert_eq!(meta["base_model_id"], "z-image-turbo");
+    }
+
+    #[test]
+    fn import_lands_by_sidecar_date_and_is_idempotent() {
+        let staging = tempfile::TempDir::new().unwrap();
+        let outputs = tempfile::TempDir::new().unwrap();
+        let db_file = tempfile::NamedTempFile::new().unwrap();
+        let db = Database::open_at(db_file.path()).unwrap();
+
+        write_image_with_sidecar(
+            staging.path(),
+            "x.png",
+            b"imgX",
+            &sidecar("px", "2026-07-15"),
+        );
+
+        let imported = import_run_dir_into(staging.path(), &db, outputs.path()).unwrap();
+        assert_eq!(imported.len(), 1);
+        let dest = outputs.path().join("2026-07-15").join("x.png");
+        assert_eq!(imported[0], dest);
+        assert!(dest.exists());
+        assert!(dest.with_extension("yaml").exists());
+        assert_eq!(db.list_artifacts(None).unwrap().len(), 1);
+
+        // Re-import: same content → no duplicate file, no duplicate row.
+        let again = import_run_dir_into(staging.path(), &db, outputs.path()).unwrap();
+        assert_eq!(again, vec![dest.clone()]);
+        assert_eq!(db.list_artifacts(None).unwrap().len(), 1);
+
+        // Different content under the same name → suffixed, both kept.
+        std::fs::write(staging.path().join("x.png"), b"imgX-v2").unwrap();
+        let third = import_run_dir_into(staging.path(), &db, outputs.path()).unwrap();
+        assert_eq!(third[0], outputs.path().join("2026-07-15").join("x-2.png"));
+        assert!(third[0].with_extension("yaml").exists());
+        assert_eq!(db.list_artifacts(None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn import_falls_back_to_today_without_sidecar() {
+        let staging = tempfile::TempDir::new().unwrap();
+        let outputs = tempfile::TempDir::new().unwrap();
+        let db_file = tempfile::NamedTempFile::new().unwrap();
+        let db = Database::open_at(db_file.path()).unwrap();
+
+        std::fs::write(staging.path().join("bare.png"), b"img").unwrap();
+        let imported = import_run_dir_into(staging.path(), &db, outputs.path()).unwrap();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        assert_eq!(imported[0], outputs.path().join(today).join("bare.png"));
+        // No sidecar → file lands but nothing to register.
+        assert_eq!(db.list_artifacts(None).unwrap().len(), 0);
     }
 }
