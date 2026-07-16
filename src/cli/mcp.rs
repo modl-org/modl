@@ -1109,13 +1109,19 @@ fn tool_run_workflow(args: &Value) -> Result<Value, (i32, String)> {
         std::process::Stdio::null()
     };
 
-    // Capture stderr via pipe for a short window so we can detect immediate
-    // failures (bad YAML, missing model, etc.) before returning run_id.
+    // The child's stderr goes STRAIGHT to the log file — never through a
+    // pipe. A pipe's read end dies with this MCP server process, and the
+    // child's next eprintln! would panic on EPIPE, silently killing a
+    // fire-and-forget run the instant the agent's session ends (the exact
+    // "close the laptop lid" case these tools exist for).
+    let stderr_log: std::process::Stdio = std::fs::File::create(&log_path)
+        .map(Into::into)
+        .unwrap_or_else(|_| std::process::Stdio::null());
     let mut child = std::process::Command::new(&bin)
         .args(&cmd_args)
         .stdin(std::process::Stdio::null())
         .stdout(stdout)
-        .stderr(std::process::Stdio::piped())
+        .stderr(stderr_log)
         .spawn()
         .map_err(|e| (-32603, format!("Failed to spawn modl run: {e}")))?;
 
@@ -1135,38 +1141,19 @@ fn tool_run_workflow(args: &Value) -> Result<Value, (i32, String)> {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    if let Some(status) = early_exit {
-        // Process already exited — read stderr to report what went wrong.
-        let stderr_text = child
-            .stderr
-            .take()
-            .and_then(|mut r| {
-                let mut buf = String::new();
-                std::io::Read::read_to_string(&mut r, &mut buf).ok()?;
-                Some(buf)
-            })
-            .unwrap_or_default();
-        if !status.success() {
-            let _ = std::fs::remove_file(pod_result_path(&run_id));
-            return Err((
-                -32603,
-                format!("modl run failed immediately: {}", stderr_text.trim()),
-            ));
-        }
-    }
-
-    // Forward remaining stderr to the log file (best-effort).
-    if let Some(mut stderr_pipe) = child.stderr.take() {
-        let log_path_clone = log_path.clone();
-        std::thread::spawn(move || {
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path_clone)
-            {
-                let _ = std::io::copy(&mut stderr_pipe, &mut f);
-            }
-        });
+    if let Some(status) = early_exit
+        && !status.success()
+    {
+        // Process already exited — the log file holds what went wrong.
+        let stderr_text = std::fs::read_to_string(&log_path).unwrap_or_default();
+        let _ = std::fs::remove_file(pod_result_path(&run_id));
+        return Err((
+            -32603,
+            format!(
+                "modl run failed immediately: {}",
+                strip_ansi(&stderr_text).trim()
+            ),
+        ));
     }
 
     // Reap the child process when it exits so it doesn't linger as a zombie.
@@ -1365,11 +1352,16 @@ fn tool_pod_up(args: &Value) -> Result<Value, (i32, String)> {
     let stdout: std::process::Stdio = std::fs::File::create(&result_path)
         .map(Into::into)
         .unwrap_or_else(|_| std::process::Stdio::null());
+    // stderr straight to the log file — a pipe would die with this MCP
+    // server and panic the detached child on its next eprintln! (EPIPE).
+    let stderr_log: std::process::Stdio = std::fs::File::create(&log_path)
+        .map(Into::into)
+        .unwrap_or_else(|_| std::process::Stdio::null());
     let mut child = std::process::Command::new(&bin)
         .args(&cmd_args)
         .stdin(std::process::Stdio::null())
         .stdout(stdout)
-        .stderr(std::process::Stdio::piped())
+        .stderr(stderr_log)
         .spawn()
         .map_err(|e| (-32603, format!("Failed to spawn modl pod up: {e}")))?;
 
@@ -1377,16 +1369,8 @@ fn tool_pod_up(args: &Value) -> Result<Value, (i32, String)> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
     loop {
         if let Ok(Some(status)) = child.try_wait() {
-            let stderr_text = child
-                .stderr
-                .take()
-                .and_then(|mut r| {
-                    let mut buf = String::new();
-                    std::io::Read::read_to_string(&mut r, &mut buf).ok()?;
-                    Some(buf)
-                })
-                .unwrap_or_default();
             if !status.success() {
+                let stderr_text = std::fs::read_to_string(&log_path).unwrap_or_default();
                 let _ = std::fs::remove_file(&result_path);
                 return Err((
                     -32603,
@@ -1404,19 +1388,6 @@ fn tool_pod_up(args: &Value) -> Result<Value, (i32, String)> {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    // Forward remaining stderr (provisioning narration) to the log file.
-    if let Some(mut stderr_pipe) = child.stderr.take() {
-        let log_path_clone = log_path.clone();
-        std::thread::spawn(move || {
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path_clone)
-            {
-                let _ = std::io::copy(&mut stderr_pipe, &mut f);
-            }
-        });
-    }
     std::thread::spawn(move || {
         let _ = child.wait();
     });
