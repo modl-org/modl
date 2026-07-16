@@ -356,14 +356,13 @@ pub fn bootstrap(pod: &Pod) -> Result<()> {
         "{} Ensuring managed runtime ({POD_RUNTIME_PROFILE}) on pod...",
         style("→").cyan()
     );
+    // `train setup` = runtime install + bootstrap (deps, ai-toolkit clone)
+    // in one shot, idempotent via the runtime's own bootstrap marker.
     run_ssh_streaming(
         ssh,
-        &format!(
-            "{} runtime install --profile {POD_RUNTIME_PROFILE}",
-            crate::core::pod_run::REMOTE_MODL
-        ),
+        &format!("{} train setup", crate::core::pod_run::REMOTE_MODL),
     )
-    .context("`modl runtime install` failed on the pod")?;
+    .context("`modl train setup` failed on the pod")?;
 
     let _ = pod_state::set_fingerprint(pod.instance_id, &bootstrap_fingerprint());
     Ok(())
