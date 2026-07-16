@@ -41,19 +41,11 @@ pub struct EditArgs<'a> {
     pub json: bool,
 }
 
-/// Edit on the active pod: inline the input image as a base64 data URI in a
-/// one-step workflow (client paths don't exist on the pod) and hand it to
-/// the remote modl (`core::pod_run`).
+/// Edit on the active pod: inline every input image (and mask) as base64 data
+/// URIs in a one-step workflow (client paths don't exist on the pod) and hand
+/// it to the remote modl (`core::pod_run`).
 async fn run_on_pod(args: &EditArgs<'_>) -> Result<()> {
-    if args.images.len() != 1 {
-        anyhow::bail!("--pod supports exactly one --image for now.");
-    }
-    for (flag, set) in [
-        ("--mask", args.mask.is_some()),
-        ("--blend", args.blend != BlendMode::Pixel),
-        ("--cloud", args.cloud),
-        ("--attach-gpu", args.attach_gpu),
-    ] {
+    for (flag, set) in [("--cloud", args.cloud), ("--attach-gpu", args.attach_gpu)] {
         if set {
             anyhow::bail!("{flag} isn't supported with --pod yet — run locally or drop the flag.");
         }
@@ -70,7 +62,20 @@ async fn run_on_pod(args: &EditArgs<'_>) -> Result<()> {
         );
     }
     let model = args.base.unwrap_or("qwen-image-edit-2511");
-    let local_image = resolve_image_input(&args.images[0]).await?;
+    let mut local_images = Vec::with_capacity(args.images.len());
+    for img in args.images {
+        local_images.push(PathBuf::from(resolve_image_input(img).await?));
+    }
+    // Sentinel masks pass through to the pod; paths/URLs resolve locally and
+    // get inlined by the spec builder.
+    let local_mask: Option<String> = match args.mask {
+        None => None,
+        Some(m @ ("auto" | "from-alpha")) => Some(m.to_string()),
+        Some(m) => Some(resolve_image_input(m).await?),
+    };
+    if args.blend == BlendMode::Latent && local_mask.is_none() {
+        anyhow::bail!("--blend latent requires --mask");
+    }
 
     let (width, height) = match args.size {
         Some(s) => {
@@ -96,7 +101,9 @@ async fn run_on_pod(args: &EditArgs<'_>) -> Result<()> {
     let spec = crate::core::pod_run::single_edit_spec(
         model,
         args.prompt,
-        std::path::Path::new(&local_image),
+        &local_images,
+        local_mask.as_deref(),
+        Some(args.blend),
         args.lora,
         args.fast,
         width,

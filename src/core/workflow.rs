@@ -63,12 +63,56 @@ pub struct GenerateStep {
     pub steps: Option<u32>,
     pub guidance: Option<f32>,
     pub count: Option<u32>,
+    /// img2img source image. Presence switches the step to img2img mode
+    /// (or inpaint when `mask` is also set).
+    pub init_image: Option<ImageRef>,
+    /// Inpaint mask (white = regenerate region). Requires `init_image`.
+    pub mask: Option<ImageRef>,
+    /// Denoising strength for img2img (0.0–1.0). Requires `init_image`.
+    pub strength: Option<f32>,
+    /// ControlNet inputs (max 2, same cap as `modl generate --controlnet`).
+    pub controlnet: Vec<ControlNetRef>,
+    /// Style reference inputs (IP-Adapter).
+    pub style_ref: Vec<StyleRefRef>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ControlNetRef {
+    pub image: ImageRef,
+    /// Control type (canny, depth, pose, …). Resolved at parse time from the
+    /// explicit `type:` field or, for plain file paths, the filename suffix.
+    pub control_type: String,
+    pub strength: Option<f32>,
+    pub end: Option<f32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StyleRefRef {
+    pub image: ImageRef,
+    pub strength: Option<f32>,
+    pub style_type: Option<String>,
+}
+
+/// Mask on an edit step: an image ref, or one of the worker's sentinel modes.
+#[derive(Debug, Clone)]
+pub enum EditMask {
+    /// Worker derives the mask (reserved sentinel, `"auto"`).
+    Auto,
+    /// Derive from the first source image's alpha channel (`"from-alpha"`).
+    FromAlpha,
+    Image(ImageRef),
 }
 
 #[derive(Debug, Clone)]
 pub struct EditStep {
-    pub source: ImageRef,
+    /// Source images (1 or more). Multi-image edits feed every image to the
+    /// model as a reference (Qwen Image Edit 2511, Flux 2 Klein).
+    pub sources: Vec<ImageRef>,
     pub prompt: String,
+    /// Mask: image ref or `auto` / `from-alpha` sentinel.
+    pub mask: Option<EditMask>,
+    /// Blend mode for masked edits (`pixel` default, `latent` = native inpaint).
+    pub blend: Option<crate::core::job::BlendMode>,
     /// Per-step model override. See `GenerateStep::model`.
     pub model: Option<String>,
     /// Per-step LoRA override. See `GenerateStep::lora`.
@@ -98,6 +142,29 @@ pub struct EditStep {
 pub enum ImageRef {
     Local(PathBuf),
     StepOutput { step_id: String, index: usize },
+}
+
+impl Step {
+    /// Every image ref this step consumes, across all input slots. Used for
+    /// dependency scheduling — any slot may reference an earlier step's output.
+    pub fn image_refs(&self) -> Vec<&ImageRef> {
+        let mut refs = Vec::new();
+        match &self.kind {
+            StepKind::Generate(g) => {
+                refs.extend(g.init_image.as_ref());
+                refs.extend(g.mask.as_ref());
+                refs.extend(g.controlnet.iter().map(|c| &c.image));
+                refs.extend(g.style_ref.iter().map(|s| &s.image));
+            }
+            StepKind::Edit(e) => {
+                refs.extend(e.sources.iter());
+                if let Some(EditMask::Image(r)) = &e.mask {
+                    refs.push(r);
+                }
+            }
+        }
+        refs
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -135,15 +202,66 @@ struct StepDefaults {
     count: Option<u32>,
 }
 
+/// A YAML value that is either a single string or a list of strings.
+/// Lets `edit:` accept one source (`edit: "$a"`) or many (`edit: ["$a", "$b"]`).
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl OneOrMany {
+    fn as_slice(&self) -> &[String] {
+        match self {
+            OneOrMany::One(s) => std::slice::from_ref(s),
+            OneOrMany::Many(v) => v.as_slice(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RawControlNet {
+    image: String,
+    #[serde(default, rename = "type")]
+    control_type: Option<String>,
+    #[serde(default)]
+    strength: Option<f32>,
+    #[serde(default)]
+    end: Option<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawStyleRef {
+    image: String,
+    #[serde(default)]
+    strength: Option<f32>,
+    #[serde(default, rename = "type")]
+    style_type: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct RawStep {
     id: String,
     #[serde(default)]
     generate: Option<String>,
     #[serde(default)]
-    edit: Option<String>,
+    edit: Option<OneOrMany>,
     #[serde(default)]
     prompt: Option<String>,
+    #[serde(default)]
+    init_image: Option<String>,
+    /// Mask: image ref on generate steps; ref or `auto`/`from-alpha` on edit steps.
+    #[serde(default)]
+    mask: Option<String>,
+    #[serde(default)]
+    strength: Option<f32>,
+    #[serde(default)]
+    blend: Option<crate::core::job::BlendMode>,
+    #[serde(default)]
+    controlnet: Option<Vec<RawControlNet>>,
+    #[serde(default)]
+    style_ref: Option<Vec<RawStyleRef>>,
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
@@ -260,6 +378,30 @@ pub fn parse_str(yaml: &str, base_dir: &Path) -> Result<Workflow> {
             );
         }
 
+        // --- image-input fields are kind-specific
+        if raw_step.generate.is_some() {
+            if raw_step.blend.is_some() {
+                bail!(
+                    "step `{}`: `blend` is only valid on edit steps",
+                    raw_step.id
+                );
+            }
+        } else {
+            for (field, set) in [
+                ("init_image", raw_step.init_image.is_some()),
+                ("strength", raw_step.strength.is_some()),
+                ("controlnet", raw_step.controlnet.is_some()),
+                ("style_ref", raw_step.style_ref.is_some()),
+            ] {
+                if set {
+                    bail!(
+                        "step `{}`: `{field}` is only valid on generate steps",
+                        raw_step.id
+                    );
+                }
+            }
+        }
+
         // When a step overrides the model, don't inherit workflow-level
         // defaults for steps/guidance — those are model-dependent and the
         // runner will fall back to the correct model-specific defaults from
@@ -278,6 +420,102 @@ pub fn parse_str(yaml: &str, base_dir: &Path) -> Result<Workflow> {
         };
 
         let kind = if let Some(prompt) = &raw_step.generate {
+            // img2img / inpaint inputs
+            let init_image = raw_step
+                .init_image
+                .as_deref()
+                .map(|s| parse_image_ref(s, base_dir, &seen_ids, &image_vars, &raw_step.id, "init"))
+                .transpose()?;
+            if init_image.is_none() {
+                if raw_step.mask.is_some() {
+                    bail!(
+                        "step `{}`: `mask` requires `init_image` on generate steps (inpainting regenerates a masked region of the init image)",
+                        raw_step.id
+                    );
+                }
+                if raw_step.strength.is_some() {
+                    bail!(
+                        "step `{}`: `strength` requires `init_image` (it is the img2img denoising strength)",
+                        raw_step.id
+                    );
+                }
+            }
+            let mask = raw_step
+                .mask
+                .as_deref()
+                .map(|s| parse_image_ref(s, base_dir, &seen_ids, &image_vars, &raw_step.id, "mask"))
+                .transpose()?;
+
+            // ControlNet inputs
+            let raw_cn = raw_step.controlnet.as_deref().unwrap_or_default();
+            if raw_cn.len() > 2 {
+                bail!(
+                    "step `{}`: maximum 2 `controlnet` inputs supported (got {})",
+                    raw_step.id,
+                    raw_cn.len()
+                );
+            }
+            let mut controlnet = Vec::with_capacity(raw_cn.len());
+            for (i, cn) in raw_cn.iter().enumerate() {
+                let slot = format!("cn-{}", i + 1);
+                let image = parse_image_ref(
+                    &cn.image,
+                    base_dir,
+                    &seen_ids,
+                    &image_vars,
+                    &raw_step.id,
+                    &slot,
+                )?;
+                // Explicit `type:` wins; plain file paths fall back to filename
+                // detection. `$var`/`$step.outputs[N]`/data-URI refs have no
+                // meaningful filename, so `type:` is required there.
+                let control_type = match &cn.control_type {
+                    Some(t) => t.clone(),
+                    None if !cn.image.starts_with('$') && !cn.image.starts_with("data:") => {
+                        crate::core::models::detect_control_type_from_filename(&cn.image)
+                            .ok_or_else(|| anyhow!(
+                                "step `{}`: controlnet[{i}]: cannot auto-detect control type from `{}` — add `type:` (canny, depth, pose, softedge, scribble, hed, mlsd, gray, normal)",
+                                raw_step.id, cn.image
+                            ))?
+                    }
+                    None => bail!(
+                        "step `{}`: controlnet[{i}]: `type:` is required for `$name`, step-output, and inline image refs (canny, depth, pose, …)",
+                        raw_step.id
+                    ),
+                };
+                controlnet.push(ControlNetRef {
+                    image,
+                    control_type,
+                    strength: cn.strength,
+                    end: cn.end,
+                });
+            }
+
+            // Style reference inputs
+            let mut style_ref = Vec::new();
+            for (i, sr) in raw_step
+                .style_ref
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .enumerate()
+            {
+                let slot = format!("style-{}", i + 1);
+                let image = parse_image_ref(
+                    &sr.image,
+                    base_dir,
+                    &seen_ids,
+                    &image_vars,
+                    &raw_step.id,
+                    &slot,
+                )?;
+                style_ref.push(StyleRefRef {
+                    image,
+                    strength: sr.strength,
+                    style_type: sr.style_type.clone(),
+                });
+            }
+
             StepKind::Generate(GenerateStep {
                 prompt: prompt.clone(),
                 model: raw_step.model.clone(),
@@ -290,9 +528,14 @@ pub fn parse_str(yaml: &str, base_dir: &Path) -> Result<Workflow> {
                 steps: raw_step.steps.or(default_steps),
                 guidance: raw_step.guidance.or(default_guidance),
                 count: raw_step.count.or(raw.defaults.count),
+                init_image,
+                mask,
+                strength: raw_step.strength,
+                controlnet,
+                style_ref,
             })
         } else {
-            let source_str = raw_step.edit.as_ref().ok_or_else(|| {
+            let source_strs = raw_step.edit.as_ref().ok_or_else(|| {
                 anyhow!(
                     "step `{}`: expected `generate:` or `edit:` field",
                     raw_step.id
@@ -304,11 +547,47 @@ pub fn parse_str(yaml: &str, base_dir: &Path) -> Result<Workflow> {
                     raw_step.id
                 )
             })?;
-            let source =
-                parse_image_ref(source_str, base_dir, &seen_ids, &image_vars, &raw_step.id)?;
+            let source_strs = source_strs.as_slice();
+            if source_strs.is_empty() {
+                bail!(
+                    "step `{}`: `edit: []` is empty — provide at least one image ref",
+                    raw_step.id
+                );
+            }
+            let mut sources = Vec::with_capacity(source_strs.len());
+            for (i, s) in source_strs.iter().enumerate() {
+                let slot = if i == 0 {
+                    "source".to_string()
+                } else {
+                    format!("source-{}", i + 1)
+                };
+                sources.push(parse_image_ref(
+                    s,
+                    base_dir,
+                    &seen_ids,
+                    &image_vars,
+                    &raw_step.id,
+                    &slot,
+                )?);
+            }
+            let mask = match raw_step.mask.as_deref() {
+                None => None,
+                Some("auto") => Some(EditMask::Auto),
+                Some("from-alpha") => Some(EditMask::FromAlpha),
+                Some(s) => Some(EditMask::Image(parse_image_ref(
+                    s,
+                    base_dir,
+                    &seen_ids,
+                    &image_vars,
+                    &raw_step.id,
+                    "mask",
+                )?)),
+            };
             StepKind::Edit(EditStep {
-                source,
+                sources,
                 prompt: edit_prompt.clone(),
+                mask,
+                blend: raw_step.blend,
                 model: raw_step.model.clone(),
                 lora: raw_step.lora.clone(),
                 fast: raw_step.fast,
@@ -425,18 +704,24 @@ fn resolve_image_vars(
     Ok(vars)
 }
 
-/// Parse an `edit:` source image reference.
+/// Parse an image reference (edit source, init image, mask, controlnet or
+/// style-ref input).
 ///
-/// Three forms:
+/// Four forms:
 /// - `$name` (no `.outputs[`) → named image variable from the top-level `images:` map
 /// - `$step-id.outputs[N]` → resolved at runtime to the Nth output of an earlier step
+/// - `data:image/...;base64,...` → decoded and written to `base_dir/{step}-{slot}.{ext}`
 /// - Anything else → filesystem path relative to `base_dir`, must exist
+///
+/// `slot` names the input position (`source`, `init`, `mask`, `cn-1`, …) so
+/// inline data URIs in different slots of one step get distinct filenames.
 fn parse_image_ref(
     s: &str,
     base_dir: &Path,
     earlier_step_ids: &HashSet<String>,
     image_vars: &HashMap<String, PathBuf>,
     current_step_id: &str,
+    slot: &str,
 ) -> Result<ImageRef> {
     if let Some(rest) = s.strip_prefix('$') {
         // `$name` with no dot → image variable ref.
@@ -497,7 +782,7 @@ fn parse_image_ref(
             .with_context(|| {
                 format!("step `{current_step_id}`: failed to decode base64 inline image")
             })?;
-        let out_path = base_dir.join(format!("{current_step_id}-source.{ext}"));
+        let out_path = base_dir.join(format!("{current_step_id}-{slot}.{ext}"));
         std::fs::write(&out_path, &bytes).with_context(|| {
             format!(
                 "step `{current_step_id}`: failed to write inline image to `{}`",
@@ -744,7 +1029,7 @@ steps:
 "#;
         let wf = parse(yaml).unwrap();
         match &wf.steps[1].kind {
-            StepKind::Edit(e) => match &e.source {
+            StepKind::Edit(e) => match &e.sources[0] {
                 ImageRef::StepOutput { step_id, index } => {
                     assert_eq!(step_id, "scene");
                     assert_eq!(*index, 0);
@@ -831,7 +1116,7 @@ steps:
 "#;
         let wf = parse_str(yaml, tmp.path()).unwrap();
         match &wf.steps[0].kind {
-            StepKind::Edit(e) => match &e.source {
+            StepKind::Edit(e) => match &e.sources[0] {
                 ImageRef::Local(p) => assert!(p.ends_with("input.png")),
                 _ => panic!("expected local ref"),
             },
@@ -1105,7 +1390,7 @@ steps:
         );
         let wf = parse_str(&yaml, tmp.path()).unwrap();
         match &wf.steps[0].kind {
-            StepKind::Edit(e) => match &e.source {
+            StepKind::Edit(e) => match &e.sources[0] {
                 ImageRef::Local(p) => {
                     assert!(p.exists(), "inline image should be written to disk");
                     assert!(p.to_string_lossy().ends_with("retouch-source.png"));
@@ -1133,7 +1418,7 @@ steps:
         );
         let wf = parse_str(&yaml, tmp.path()).unwrap();
         match &wf.steps[0].kind {
-            StepKind::Edit(e) => match &e.source {
+            StepKind::Edit(e) => match &e.sources[0] {
                 ImageRef::Local(p) => {
                     assert!(p.exists());
                     assert!(p.to_string_lossy().ends_with("alice-ref.png"));
@@ -1152,20 +1437,332 @@ steps:
         );
         let wf = parse_str(&yaml, tmp.path()).unwrap();
         let path0 = match &wf.steps[0].kind {
-            StepKind::Edit(e) => match &e.source {
+            StepKind::Edit(e) => match &e.sources[0] {
                 ImageRef::Local(p) => p.clone(),
                 _ => panic!(),
             },
             _ => panic!(),
         };
         let path1 = match &wf.steps[1].kind {
-            StepKind::Edit(e) => match &e.source {
+            StepKind::Edit(e) => match &e.sources[0] {
                 ImageRef::Local(p) => p.clone(),
                 _ => panic!(),
             },
             _ => panic!(),
         };
         assert_eq!(path0, path1, "both steps should point to the same file");
+    }
+
+    #[test]
+    fn multi_image_edit_parses() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.png"), b"fake").unwrap();
+        let yaml = format!(
+            "name: test\nmodel: klein-9b\nimages:\n  style: \"data:image/png;base64,{RED_PNG_B64}\"\nsteps:\n  - id: base\n    generate: \"a cat\"\n  - id: combine\n    edit: [\"$base.outputs[0]\", \"$style\", \"a.png\"]\n    prompt: \"blend\"\n"
+        );
+        let wf = parse_str(&yaml, tmp.path()).unwrap();
+        match &wf.steps[1].kind {
+            StepKind::Edit(e) => {
+                assert_eq!(e.sources.len(), 3);
+                assert!(
+                    matches!(&e.sources[0], ImageRef::StepOutput { step_id, index: 0 } if step_id == "base")
+                );
+                assert!(
+                    matches!(&e.sources[1], ImageRef::Local(p) if p.ends_with("style-ref.png"))
+                );
+                assert!(matches!(&e.sources[2], ImageRef::Local(p) if p.ends_with("a.png")));
+            }
+            _ => panic!("expected edit"),
+        }
+    }
+
+    #[test]
+    fn empty_edit_list_rejected() {
+        let yaml = r#"
+name: test
+model: klein-9b
+steps:
+  - id: a
+    edit: []
+    prompt: "hi"
+"#;
+        let err = parse(yaml).unwrap_err().to_string();
+        assert!(err.contains("at least one image"), "got: {err}");
+    }
+
+    #[test]
+    fn edit_mask_sentinels_and_blend_parsed() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("in.png"), b"fake").unwrap();
+        std::fs::write(tmp.path().join("m.png"), b"fake").unwrap();
+        let yaml = r#"
+name: test
+model: klein-9b
+steps:
+  - id: a
+    edit: "in.png"
+    prompt: "hi"
+    mask: "from-alpha"
+    blend: latent
+  - id: b
+    edit: "in.png"
+    prompt: "hi"
+    mask: "m.png"
+"#;
+        let wf = parse_str(yaml, tmp.path()).unwrap();
+        match &wf.steps[0].kind {
+            StepKind::Edit(e) => {
+                assert!(matches!(e.mask, Some(EditMask::FromAlpha)));
+                assert_eq!(e.blend, Some(crate::core::job::BlendMode::Latent));
+            }
+            _ => panic!(),
+        }
+        match &wf.steps[1].kind {
+            StepKind::Edit(e) => {
+                assert!(
+                    matches!(&e.mask, Some(EditMask::Image(ImageRef::Local(p))) if p.ends_with("m.png"))
+                );
+                assert_eq!(e.blend, None);
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn generate_init_image_mask_strength_parsed() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("photo.png"), b"fake").unwrap();
+        std::fs::write(tmp.path().join("m.png"), b"fake").unwrap();
+        let yaml = r#"
+name: test
+model: flux-dev
+steps:
+  - id: a
+    generate: "a cat"
+    init_image: "photo.png"
+    mask: "m.png"
+    strength: 0.6
+"#;
+        let wf = parse_str(yaml, tmp.path()).unwrap();
+        match &wf.steps[0].kind {
+            StepKind::Generate(g) => {
+                assert!(
+                    matches!(&g.init_image, Some(ImageRef::Local(p)) if p.ends_with("photo.png"))
+                );
+                assert!(matches!(&g.mask, Some(ImageRef::Local(p)) if p.ends_with("m.png")));
+                assert_eq!(g.strength, Some(0.6));
+            }
+            _ => panic!("expected generate"),
+        }
+    }
+
+    #[test]
+    fn generate_init_image_from_step_output() {
+        let yaml = r#"
+name: test
+model: flux-dev
+steps:
+  - id: base
+    generate: "a cat"
+  - id: refine
+    generate: "a detailed cat"
+    init_image: "$base.outputs[0]"
+    strength: 0.5
+"#;
+        let wf = parse(yaml).unwrap();
+        match &wf.steps[1].kind {
+            StepKind::Generate(g) => {
+                assert!(
+                    matches!(&g.init_image, Some(ImageRef::StepOutput { step_id, index: 0 }) if step_id == "base")
+                );
+            }
+            _ => panic!("expected generate"),
+        }
+        // init_image contributes to image_refs (dependency scheduling)
+        assert_eq!(wf.steps[1].image_refs().len(), 1);
+    }
+
+    #[test]
+    fn generate_mask_without_init_image_rejected() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("m.png"), b"fake").unwrap();
+        let yaml = r#"
+name: test
+model: flux-dev
+steps:
+  - id: a
+    generate: "a cat"
+    mask: "m.png"
+"#;
+        let err = parse_str(yaml, tmp.path()).unwrap_err().to_string();
+        assert!(err.contains("requires `init_image`"), "got: {err}");
+    }
+
+    #[test]
+    fn generate_strength_without_init_image_rejected() {
+        let yaml = r#"
+name: test
+model: flux-dev
+steps:
+  - id: a
+    generate: "a cat"
+    strength: 0.5
+"#;
+        let err = parse(yaml).unwrap_err().to_string();
+        assert!(err.contains("requires `init_image`"), "got: {err}");
+    }
+
+    #[test]
+    fn controlnet_explicit_type_and_filename_detection() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("ref_pose.png"), b"fake").unwrap();
+        std::fs::write(tmp.path().join("edges.png"), b"fake").unwrap();
+        let yaml = r#"
+name: test
+model: flux-dev
+steps:
+  - id: a
+    generate: "a cat"
+    controlnet:
+      - image: "ref_pose.png"
+      - image: "edges.png"
+        type: canny
+        strength: 0.9
+        end: 0.7
+"#;
+        let wf = parse_str(yaml, tmp.path()).unwrap();
+        match &wf.steps[0].kind {
+            StepKind::Generate(g) => {
+                assert_eq!(g.controlnet.len(), 2);
+                assert_eq!(g.controlnet[0].control_type, "pose");
+                assert_eq!(g.controlnet[1].control_type, "canny");
+                assert_eq!(g.controlnet[1].strength, Some(0.9));
+                assert_eq!(g.controlnet[1].end, Some(0.7));
+            }
+            _ => panic!("expected generate"),
+        }
+    }
+
+    #[test]
+    fn controlnet_var_ref_requires_explicit_type() {
+        let tmp = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            "name: test\nmodel: flux-dev\nimages:\n  pose: \"data:image/png;base64,{RED_PNG_B64}\"\nsteps:\n  - id: a\n    generate: \"a cat\"\n    controlnet:\n      - image: \"$pose\"\n"
+        );
+        let err = parse_str(&yaml, tmp.path()).unwrap_err().to_string();
+        assert!(err.contains("`type:` is required"), "got: {err}");
+    }
+
+    #[test]
+    fn controlnet_undetectable_filename_rejected() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("photo.png"), b"fake").unwrap();
+        let yaml = r#"
+name: test
+model: flux-dev
+steps:
+  - id: a
+    generate: "a cat"
+    controlnet:
+      - image: "photo.png"
+"#;
+        let err = parse_str(yaml, tmp.path()).unwrap_err().to_string();
+        assert!(err.contains("cannot auto-detect"), "got: {err}");
+    }
+
+    #[test]
+    fn more_than_two_controlnets_rejected() {
+        let tmp = TempDir::new().unwrap();
+        for n in ["a_pose.png", "b_canny.png", "c_depth.png"] {
+            std::fs::write(tmp.path().join(n), b"fake").unwrap();
+        }
+        let yaml = r#"
+name: test
+model: flux-dev
+steps:
+  - id: a
+    generate: "a cat"
+    controlnet:
+      - image: "a_pose.png"
+      - image: "b_canny.png"
+      - image: "c_depth.png"
+"#;
+        let err = parse_str(yaml, tmp.path()).unwrap_err().to_string();
+        assert!(err.contains("maximum 2"), "got: {err}");
+    }
+
+    #[test]
+    fn style_ref_parsed_with_var() {
+        let tmp = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            "name: test\nmodel: sdxl\nimages:\n  mood: \"data:image/png;base64,{RED_PNG_B64}\"\nsteps:\n  - id: a\n    generate: \"a cat\"\n    style_ref:\n      - image: \"$mood\"\n        strength: 0.8\n"
+        );
+        let wf = parse_str(&yaml, tmp.path()).unwrap();
+        match &wf.steps[0].kind {
+            StepKind::Generate(g) => {
+                assert_eq!(g.style_ref.len(), 1);
+                assert!(
+                    matches!(&g.style_ref[0].image, ImageRef::Local(p) if p.ends_with("mood-ref.png"))
+                );
+                assert_eq!(g.style_ref[0].strength, Some(0.8));
+            }
+            _ => panic!("expected generate"),
+        }
+    }
+
+    #[test]
+    fn generate_only_fields_rejected_on_edit() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("in.png"), b"fake").unwrap();
+        std::fs::write(tmp.path().join("i.png"), b"fake").unwrap();
+        let yaml = r#"
+name: test
+model: klein-9b
+steps:
+  - id: a
+    edit: "in.png"
+    prompt: "hi"
+    init_image: "i.png"
+"#;
+        let err = parse_str(yaml, tmp.path()).unwrap_err().to_string();
+        assert!(err.contains("only valid on generate steps"), "got: {err}");
+    }
+
+    #[test]
+    fn blend_rejected_on_generate() {
+        let yaml = r#"
+name: test
+model: flux-dev
+steps:
+  - id: a
+    generate: "a cat"
+    blend: latent
+"#;
+        let err = parse(yaml).unwrap_err().to_string();
+        assert!(err.contains("only valid on edit steps"), "got: {err}");
+    }
+
+    #[test]
+    fn inline_data_uri_slots_get_distinct_filenames() {
+        let tmp = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            "name: test\nmodel: klein-9b\nsteps:\n  - id: mix\n    edit: [\"data:image/png;base64,{RED_PNG_B64}\", \"data:image/png;base64,{RED_PNG_B64}\"]\n    prompt: \"hi\"\n    mask: \"data:image/png;base64,{RED_PNG_B64}\"\n"
+        );
+        let wf = parse_str(&yaml, tmp.path()).unwrap();
+        match &wf.steps[0].kind {
+            StepKind::Edit(e) => {
+                assert!(
+                    matches!(&e.sources[0], ImageRef::Local(p) if p.ends_with("mix-source.png"))
+                );
+                assert!(
+                    matches!(&e.sources[1], ImageRef::Local(p) if p.ends_with("mix-source-2.png"))
+                );
+                assert!(
+                    matches!(&e.mask, Some(EditMask::Image(ImageRef::Local(p))) if p.ends_with("mix-mask.png"))
+                );
+            }
+            _ => panic!("expected edit"),
+        }
     }
 
     #[test]

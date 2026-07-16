@@ -390,7 +390,7 @@ fn tool_definitions() -> Value {
                 "properties": {
                     "spec_yaml": {
                         "type": "string",
-                        "description": "Full YAML content of the workflow spec (the contents of a .yaml file). For pod runs, reference images must be base64 data URIs in the images: map (local file paths don't exist on the pod)."
+                        "description": "Full YAML content of the workflow spec (the contents of a .yaml file). Steps take image inputs as $name (images: map entry), $step-id.outputs[N], or a server path: edit steps accept one source or a list (edit: [\"$a\", \"$b\"] for multi-image editing) plus mask/blend; generate steps accept init_image, mask, strength, controlnet ([{image, type, strength, end}]), and style_ref ([{image, strength}]). For pod runs, reference images must be base64 data URIs in the images: map (local file paths don't exist on the pod)."
                     },
                     "pod": {
                         "type": "boolean",
