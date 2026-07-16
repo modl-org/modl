@@ -364,11 +364,12 @@ def _detect_weight_dtype(filepath: str) -> str:
 
 def assemble_pipeline(
     base_model_id: str,
-    base_model_path: str,
+    base_model_path: str | None,
     cls_name: str,
     emitter: EventEmitter,
     force_fp8: bool = False,
     no_offload: bool = False,
+    assembly: dict | None = None,
 ):
     """Assemble a pipeline from locally installed components.
 
@@ -383,11 +384,23 @@ def assemble_pipeline(
     import safetensors.torch
     from accelerate import init_empty_weights
 
-    assembly = resolve_gen_assembly(base_model_id)
+    if assembly is None:
+        assembly = resolve_gen_assembly(base_model_id)
     if not assembly:
         raise RuntimeError(
             f"No assembly spec for {base_model_id}. "
             f"Cannot load transformer-only file without component configs."
+        )
+
+    # Transformer weights come from base_model_path (local store) or, in the
+    # storeless pod path, the HF-downloaded file recorded on the assembly.
+    transformer_path = base_model_path or assembly.get("transformer", {}).get(
+        "resolved_path"
+    )
+    if not transformer_path:
+        raise RuntimeError(
+            f"No transformer weights for {base_model_id} (no local path and no "
+            f"HF source). Install it with `modl pull {base_model_id}`."
         )
 
     PipelineClass = _get_pipeline(cls_name)
@@ -402,8 +415,8 @@ def assemble_pipeline(
         ModelClass = _import_class(model_class_name)
 
         if param_name == "transformer":
-            # Transformer weights come from base_model_path.
             # from_single_file handles ComfyUI→diffusers key conversion.
+            base_model_path = transformer_path
             is_gguf = base_model_path.endswith(".gguf")
             weight_dtype = "gguf" if is_gguf else _detect_weight_dtype(base_model_path)
             is_fp8 = weight_dtype.startswith("fp8")
@@ -830,6 +843,25 @@ def load_pipeline(
 
     dtype = get_inference_dtype()
     PipelineClass = _get_pipeline(cls_name)
+
+    # Storeless assembly: a model whose HF release is a single transformer file
+    # (no diffusers model_index.json) but which has a component-assembly spec
+    # with HF sources — e.g. Flux 2 Klein on a pod. Assemble it from parts
+    # downloaded straight from HuggingFace rather than from_pretrained a repo
+    # that has no diffusers layout.
+    if base_model_path is None:
+        storeless = resolve_gen_assembly(base_model_id, download_missing=True)
+        if storeless and storeless.get("transformer", {}).get("resolved_path"):
+            emitter.info(f"Assembling {base_model_id} from HF components (storeless)")
+            return assemble_pipeline(
+                base_model_id,
+                None,
+                cls_name,
+                emitter,
+                force_fp8=force_fp8,
+                assembly=storeless,
+            )
+
     model_source = base_model_path or resolve_model_path(base_model_id)
     fmt = detect_model_format(model_source)
 

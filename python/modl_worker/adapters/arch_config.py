@@ -845,6 +845,28 @@ MODEL_REGISTRY: dict[str, tuple[str, str]] = {
 }
 
 
+# HF sources for storeless component assembly (pod path). Models like Flux 2
+# Klein ship single-file fp8 builds with no diffusers model_index.json, so the
+# pipeline is assembled from individually-downloaded component files. These
+# mirror the modl-registry manifest URLs — duplicated here because the pod
+# worker ships without the registry.
+#
+# Transformers differ per variant → keyed by arch.
+TRANSFORMER_HF_SOURCES: dict[str, tuple[str, str]] = {
+    "flux2_klein":         ("black-forest-labs/FLUX.2-klein-4b-fp8",      "flux-2-klein-4b-fp8.safetensors"),
+    "flux2_klein_9b":      ("black-forest-labs/FLUX.2-klein-9b-fp8",      "flux-2-klein-9b-fp8.safetensors"),
+    "flux2_klein_base":    ("black-forest-labs/FLUX.2-klein-base-4b-fp8", "flux-2-klein-base-4b-fp8.safetensors"),
+    "flux2_klein_base_9b": ("black-forest-labs/FLUX.2-klein-base-9b-fp8", "flux-2-klein-base-9b-fp8.safetensors"),
+}
+
+# Text encoders / VAEs are shared across variants → keyed by registry model_id.
+COMPONENT_HF_SOURCES: dict[str, tuple[str, str]] = {
+    "flux2-qwen3-4b-text-encoder": ("Comfy-Org/vae-text-encorder-for-flux-klein-4b", "split_files/text_encoders/qwen_3_4b.safetensors"),
+    "flux2-qwen3-8b-text-encoder": ("Comfy-Org/vae-text-encorder-for-flux-klein-9b", "split_files/text_encoders/qwen_3_8b.safetensors"),
+    "flux2-vae":                   ("Comfy-Org/flux2-dev",                            "split_files/vae/flux2-vae.safetensors"),
+}
+
+
 # -----------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------
@@ -1009,11 +1031,18 @@ def resolve_gen_components(base_model_id: str) -> dict[str, str]:
     return resolved
 
 
-def resolve_gen_assembly(base_model_id: str) -> dict[str, dict] | None:
+def resolve_gen_assembly(
+    base_model_id: str, download_missing: bool = False
+) -> dict[str, dict] | None:
     """Return the full assembly spec for a model, or None if not available.
 
     Returns the gen_components dict with model_class, config_dir, and resolved
     model paths for each component. Used by assemble_pipeline() in gen_adapter.
+
+    When ``download_missing`` is set, any component that isn't in the local
+    store but declares ``hf_repo``/``hf_file`` is fetched straight from
+    HuggingFace (the storeless pod path — Klein has no diffusers layout, so it
+    must be assembled from individually-downloaded component files).
     """
     arch = detect_arch(base_model_id)
     config = ARCH_CONFIGS.get(arch, {})
@@ -1029,6 +1058,7 @@ def resolve_gen_assembly(base_model_id: str) -> dict[str, dict] | None:
     assembly = {}
     for component_type, spec in gen_components.items():
         entry = dict(spec)  # copy
+        resolved = None
         model_ids = spec.get("model_id")
         if model_ids is not None:
             if isinstance(model_ids, str):
@@ -1036,10 +1066,38 @@ def resolve_gen_assembly(base_model_id: str) -> dict[str, dict] | None:
             for mid in model_ids:
                 path = _get_installed_path(mid)
                 if path:
-                    entry["resolved_path"] = path
+                    resolved = path
                     break
+        # Storeless fallback: pull the single-file component from HF. The
+        # transformer is keyed by arch; text encoders / VAEs by model_id.
+        if resolved is None and download_missing:
+            hf = _component_hf_source(arch, component_type, model_ids)
+            if hf:
+                resolved = _hf_download_component(*hf)
+        if resolved:
+            entry["resolved_path"] = resolved
         assembly[component_type] = entry
     return assembly
+
+
+def _component_hf_source(
+    arch: str, component_type: str, model_ids: list[str] | None
+) -> tuple[str, str] | None:
+    """HF (repo, file) for a storeless component, or None if not wired."""
+    if component_type == "transformer":
+        return TRANSFORMER_HF_SOURCES.get(arch)
+    if model_ids:
+        first = model_ids[0] if isinstance(model_ids, list) else model_ids
+        return COMPONENT_HF_SOURCES.get(first)
+    return None
+
+
+def _hf_download_component(repo_id: str, filename: str) -> str:
+    """Download a single component file from HuggingFace (honors HF_TOKEN and
+    the HF cache). Lazy import so config-only imports stay dependency-light."""
+    from huggingface_hub import hf_hub_download
+
+    return hf_hub_download(repo_id=repo_id, filename=filename)
 
 
 def resolve_qwen_qtype(lora_type: str) -> str:

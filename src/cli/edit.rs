@@ -37,7 +37,56 @@ pub struct EditArgs<'a> {
     pub no_worker: bool,
     pub attach_gpu: bool,
     pub gpu_type: &'a str,
+    pub pod: bool,
     pub json: bool,
+}
+
+/// Edit on the active pod: inline the input image as a base64 data URI in a
+/// one-step workflow (client paths don't exist on the pod) and hand it to
+/// the remote modl (`core::pod_run`).
+async fn run_on_pod(args: &EditArgs<'_>) -> Result<()> {
+    if args.images.len() != 1 {
+        anyhow::bail!("--pod supports exactly one --image for now.");
+    }
+    for (flag, set) in [
+        ("--mask", args.mask.is_some()),
+        ("--lora", args.lora.is_some()),
+        ("--cloud", args.cloud),
+        ("--attach-gpu", args.attach_gpu),
+    ] {
+        if set {
+            anyhow::bail!("{flag} isn't supported with --pod yet — run locally or drop the flag.");
+        }
+    }
+    let model = args.base.unwrap_or("qwen-image-edit-2511");
+    let local_image = resolve_image_input(&args.images[0]).await?;
+
+    let spec = crate::core::pod_run::single_edit_spec(
+        model,
+        args.prompt,
+        std::path::Path::new(&local_image),
+    )?;
+
+    let rec = crate::core::pod_state::active_pod()
+        .await?
+        .context("No pod up — run `modl pod up <gpu>` first, or use --attach-gpu / --cloud.")?;
+    println!(
+        "{} Editing on pod {} ({}, ${:.3}/hr)…",
+        style("→").cyan(),
+        rec.instance_id,
+        rec.gpu_name,
+        rec.dph_total
+    );
+    let pod = crate::core::pod::Pod::from(rec.clone());
+    crate::core::pod_run::run_workflow_on_pod(&pod, &spec, None).await?;
+    println!(
+        "{} Pod {} still running (${:.3}/hr) — {} when done.",
+        style("⚠").yellow(),
+        rec.instance_id,
+        rec.dph_total,
+        style(format!("modl pod rm {}", rec.instance_id)).bold()
+    );
+    Ok(())
 }
 
 /// Resolve an image input: local path or URL → local path.
@@ -101,6 +150,10 @@ fn resolve_edit_size(size: &str) -> Result<(u32, u32)> {
 }
 
 pub async fn run(args: EditArgs<'_>) -> Result<()> {
+    if args.pod {
+        return run_on_pod(&args).await;
+    }
+
     let db = Database::open()?;
 
     let EditArgs {
@@ -122,6 +175,7 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
         no_worker,
         attach_gpu,
         gpu_type,
+        pod: _,
         json,
     } = args;
 
