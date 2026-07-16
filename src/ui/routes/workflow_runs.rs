@@ -50,25 +50,16 @@ enum ZipError {
 
 fn build_zip(run_id: &str) -> Result<(Vec<u8>, String), ZipError> {
     let db = Database::open().map_err(|e| ZipError::Other(e.to_string()))?;
-    let jobs = db
-        .list_jobs_by_run_id(run_id)
-        .map_err(|e| ZipError::Other(e.to_string()))?;
-
-    if jobs.is_empty() {
-        return Err(ZipError::NotFound(run_id.to_string()));
-    }
-
-    let mut artifact_paths: Vec<String> = Vec::new();
-    for job in &jobs {
-        let arts = db.list_artifacts(Some(&job.job_id)).unwrap_or_default();
-        for a in arts {
-            if std::path::Path::new(&a.path).is_file() {
-                artifact_paths.push(a.path);
-            }
+    let files = match crate::core::outputs::collect_run_export_files(&db, run_id)
+        .map_err(|e| ZipError::Other(e.to_string()))?
+    {
+        crate::core::outputs::RunExportFiles::NoSuchRun => {
+            return Err(ZipError::NotFound(run_id.to_string()));
         }
-    }
+        crate::core::outputs::RunExportFiles::Files(f) => f,
+    };
 
-    if artifact_paths.is_empty() {
+    if files.is_empty() {
         return Err(ZipError::NoArtifacts(run_id.to_string()));
     }
 
@@ -79,18 +70,29 @@ fn build_zip(run_id: &str) -> Result<(Vec<u8>, String), ZipError> {
     let options = zip::write::FileOptions::<()>::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
-    for (idx, path) in artifact_paths.iter().enumerate() {
-        let p = std::path::Path::new(path);
-        let base_name = p
+    for (idx, f) in files.iter().enumerate() {
+        let base_name = f
+            .image
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "file".to_string());
         // Prefix with index to avoid collisions when multiple steps produce
-        // identically-named files.
+        // identically-named files. The sidecar keeps the same stem so the
+        // pair survives unpacking + reconcile on the receiving machine.
         let entry_name = format!("{idx:03}_{base_name}");
 
-        if let Ok(data) = std::fs::read(p) {
+        if let Ok(data) = std::fs::read(&f.image) {
             let _ = zip.start_file(&entry_name, options);
+            let _ = zip.write_all(&data);
+        }
+        if let Some(sidecar) = &f.sidecar
+            && let Ok(data) = std::fs::read(sidecar)
+        {
+            let yaml_name = std::path::Path::new(&entry_name)
+                .with_extension("yaml")
+                .to_string_lossy()
+                .to_string();
+            let _ = zip.start_file(&yaml_name, options);
             let _ = zip.write_all(&data);
         }
     }

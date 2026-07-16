@@ -76,6 +76,12 @@ pub enum OutputCommands {
         #[arg(long)]
         server: Option<String>,
     },
+    /// Register outputs that have sidecar YAMLs but no database records
+    ///
+    /// Scans ~/.modl/outputs for images synced in from another machine
+    /// (pod pulls, manual copies) and registers them so they show up with
+    /// full metadata in `modl outputs` and the web UI. Idempotent.
+    Reconcile,
 }
 
 pub async fn run(command: OutputCommands) -> Result<()> {
@@ -96,7 +102,24 @@ pub async fn run(command: OutputCommands) -> Result<()> {
             dest,
             server,
         } => run_export(&run_id, dest.as_deref(), server.as_deref()).await,
+        OutputCommands::Reconcile => run_reconcile(),
     }
+}
+
+fn run_reconcile() -> Result<()> {
+    let db = Database::open()?;
+    let n = crate::core::outputs::reconcile_outputs(&db)?;
+    if n == 0 {
+        println!("Nothing to register — all sidecar-ed outputs are already tracked.");
+    } else {
+        println!(
+            "{} Registered {} output{} from sidecar metadata.",
+            style("✓").green().bold(),
+            n,
+            if n == 1 { "" } else { "s" }
+        );
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -611,30 +634,31 @@ async fn run_export(
             style(dest_dir.display().to_string()).bold()
         );
     } else {
-        // Local: copy artifact files directly from DB records.
+        // Local: copy each artifact plus its sidecar YAML — the sidecars are
+        // what lets the receiving machine reconcile these into its own DB.
         let db = Database::open()?;
-        let jobs = db.list_jobs_by_run_id(run_id)?;
-
-        if jobs.is_empty() {
-            bail!("No workflow run found with ID '{run_id}'");
-        }
+        let files = match crate::core::outputs::collect_run_export_files(&db, run_id)? {
+            crate::core::outputs::RunExportFiles::NoSuchRun => {
+                bail!("No workflow run found with ID '{run_id}'")
+            }
+            crate::core::outputs::RunExportFiles::Files(f) => f,
+        };
 
         std::fs::create_dir_all(&dest_dir).context("Failed to create destination directory")?;
 
         let mut copied = 0usize;
-        for job in &jobs {
-            let arts = db.list_artifacts(Some(&job.job_id))?;
-            for a in arts {
-                let src = std::path::Path::new(&a.path);
-                if !src.is_file() {
-                    continue;
-                }
-                let name = src
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| a.artifact_id.clone());
-                std::fs::copy(src, dest_dir.join(&name))
-                    .with_context(|| format!("Failed to copy {}", a.path))?;
+        for f in &files {
+            let name = f
+                .image
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "image".to_string());
+            std::fs::copy(&f.image, dest_dir.join(&name))
+                .with_context(|| format!("Failed to copy {}", f.image.display()))?;
+            copied += 1;
+            if let Some(sidecar) = &f.sidecar {
+                std::fs::copy(sidecar, dest_dir.join(&name).with_extension("yaml"))
+                    .with_context(|| format!("Failed to copy {}", sidecar.display()))?;
                 copied += 1;
             }
         }
@@ -689,6 +713,26 @@ fn artifact_summary(artifact: &ArtifactRecord, db: &Database) -> JobSummary {
         && let Ok(Some(job)) = db.get_job(job_id)
     {
         return job_summary(&job);
+    }
+    // No job row (e.g. artifacts reconciled from sidecars after a pod pull):
+    // the artifact's own metadata JSON carries the same fields.
+    if let Some(meta) = artifact
+        .metadata
+        .as_deref()
+        .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+    {
+        return JobSummary {
+            prompt_or_name: meta
+                .get("prompt")
+                .and_then(|p| p.as_str())
+                .unwrap_or("—")
+                .to_string(),
+            model: meta
+                .get("base_model_id")
+                .and_then(|m| m.as_str())
+                .unwrap_or("—")
+                .to_string(),
+        };
     }
     JobSummary {
         prompt_or_name: "—".into(),
