@@ -64,6 +64,13 @@ impl PodArgs {
 async fn run_pod(spec: TrainJobSpec, args: PodArgs) -> Result<()> {
     use crate::core::{pod, pod_state};
 
+    if spec.params.resume_from.is_some() {
+        anyhow::bail!(
+            "--resume isn't supported with --pod yet — the checkpoint path is local to this \
+             machine and won't exist on the pod. Run locally, or drop --resume."
+        );
+    }
+
     if !args.fresh
         && let Some(rec) = pod_state::active_pod().await?
     {

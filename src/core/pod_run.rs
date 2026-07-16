@@ -42,7 +42,6 @@ const STATUS_POLL_SECS: u64 = 15;
 /// are expected; the run itself is unaffected).
 const MAX_POLL_FAILURES: u32 = 20;
 
-#[allow(dead_code)] // CLI callers print inline today; MCP/UI consumers will read these
 pub struct RemoteRunOutcome {
     pub run_id: String,
     /// Aggregate status: completed | partial_failure | cancelled
@@ -50,6 +49,20 @@ pub struct RemoteRunOutcome {
     /// Local directory the run's artifacts were exported into.
     pub local_dir: PathBuf,
     pub artifacts: Vec<PathBuf>,
+}
+
+/// Caller-controlled knobs for a remote workflow run. Everything here maps
+/// 1:1 onto the pod-side `modl run` invocation so local and pod flags behave
+/// identically.
+#[derive(Default)]
+pub struct RemoteRunOptions {
+    /// Use this run id instead of generating a `pod-…` one (`run --run-id`).
+    pub run_id: Option<String>,
+    /// Pod-side `modl run --force` — regenerate even when matching sidecars
+    /// exist in the pod's outputs.
+    pub force: bool,
+    /// Pod-side `modl run --in-order` — YAML declaration order, no scheduler.
+    pub in_order: bool,
 }
 
 /// Ensure the pod runs the same modl version as this CLI.
@@ -86,7 +99,7 @@ pub fn ensure_modl(pod: &Pod) -> Result<()> {
     let url = format!(
         "https://github.com/modl-org/modl/releases/download/v{version}/modl-v{version}-x86_64-unknown-linux-musl.tar.gz"
     );
-    println!("{} Installing modl v{version} on pod...", style("→").cyan());
+    eprintln!("{} Installing modl v{version} on pod...", style("→").cyan());
     let install = format!(
         "set -e; mkdir -p {REMOTE_MODL_DIR}; curl -fsSL {} | tar xz -C {REMOTE_MODL_DIR}",
         shell_quote(&url)
@@ -94,7 +107,7 @@ pub fn ensure_modl(pod: &Pod) -> Result<()> {
     if run_ssh_streaming(&pod.ssh, &install).is_err() {
         // Dev build with no published asset — upload a locally-built binary.
         let local = local_pod_binary()?;
-        println!(
+        eprintln!(
             "{} No release asset for v{version} — uploading local build ({})...",
             style("!").yellow(),
             local.display()
@@ -161,7 +174,7 @@ fn sha256_file(path: &Path) -> Result<String> {
 /// the pod's auth store so `modl pull` can fetch gated models.
 fn configure_auth(pod: &Pod) -> Result<()> {
     let Some(token) = crate::core::pod::huggingface_token() else {
-        println!(
+        eprintln!(
             "{} No HuggingFace token found — gated models (Flux, Klein) will fail to pull on the pod.",
             style("⚠").yellow()
         );
@@ -193,7 +206,7 @@ pub fn prepare(pod: &Pod, models: &[String]) -> Result<()> {
 /// variant selection (fp8/GGUF by VRAM) happens pod-side.
 pub fn pull_models(pod: &Pod, models: &[String]) -> Result<()> {
     for m in models {
-        println!(
+        eprintln!(
             "{} Ensuring {} on pod...",
             style("→").cyan(),
             style(m).bold()
@@ -232,9 +245,9 @@ pub fn workflow_models(yaml: &str) -> Result<Vec<String>> {
 /// Reject specs the pod can't satisfy yet, with a useful message.
 pub fn check_pod_supported(yaml: &str) -> Result<()> {
     let v: serde_yaml::Value = serde_yaml::from_str(yaml).context("Invalid workflow YAML")?;
+    let steps = v.get("steps").and_then(|s| s.as_sequence());
     let has_lora = v.get("lora").is_some()
-        || v.get("steps")
-            .and_then(|s| s.as_sequence())
+        || steps
             .map(|steps| steps.iter().any(|s| s.get("lora").is_some()))
             .unwrap_or(false);
     if has_lora {
@@ -242,6 +255,37 @@ pub fn check_pod_supported(yaml: &str) -> Result<()> {
             "LoRA references aren't supported on pods yet — the pod's store has no local LoRAs.\n  \
              Run this workflow locally, or drop the `lora:` field."
         );
+    }
+
+    // Image refs must resolve on the pod: `$step.outputs[N]` and `$name`
+    // variables do, data URIs are decoded pod-side, but a bare path names a
+    // file on THIS machine that won't exist there — the run would only fail
+    // minutes later, pod-side, with a confusing message.
+    if let Some(images) = v.get("images").and_then(|m| m.as_mapping()) {
+        for (name, value) in images {
+            let (Some(name), Some(value)) = (name.as_str(), value.as_str()) else {
+                continue;
+            };
+            if !value.starts_with("data:image/") {
+                bail!(
+                    "images.{name} is a file path — it won't exist on the pod.\n  \
+                     Inline it as a base64 data URI:\n    \
+                     {name}: \"data:image/png;base64,...\"  (base64 -w0 <file>, or `base64 -i <file>` on macOS)"
+                );
+            }
+        }
+    }
+    for step in steps.into_iter().flatten() {
+        let Some(src) = step.get("edit").and_then(|e| e.as_str()) else {
+            continue;
+        };
+        if !src.starts_with('$') && !src.starts_with("data:image/") {
+            let id = step.get("id").and_then(|i| i.as_str()).unwrap_or("?");
+            bail!(
+                "step `{id}`: edit source `{src}` is a local file path — it won't exist on the pod.\n  \
+                 Add it to the `images:` map as a base64 data URI and reference it as `$name`."
+            );
+        }
     }
     Ok(())
 }
@@ -252,16 +296,19 @@ pub async fn run_workflow_on_pod(
     pod: &Pod,
     spec_yaml: &str,
     local_dest: Option<&Path>,
+    opts: RemoteRunOptions,
 ) -> Result<RemoteRunOutcome> {
     check_pod_supported(spec_yaml)?;
     let models = workflow_models(spec_yaml)?;
     prepare(pod, &models)?;
 
-    let run_id = format!(
-        "pod-{}-{:04x}",
-        chrono::Local::now().format("%Y%m%d-%H%M%S"),
-        std::process::id() & 0xffff
-    );
+    let run_id = opts.run_id.unwrap_or_else(|| {
+        format!(
+            "pod-{}-{:04x}",
+            chrono::Local::now().format("%Y%m%d-%H%M%S"),
+            std::process::id() & 0xffff
+        )
+    });
 
     // Ship the spec.
     let remote_spec = format!("{REMOTE_ROOT}/runs/{run_id}.yaml");
@@ -275,15 +322,22 @@ pub async fn run_workflow_on_pod(
     // Fire and forget — the run survives a dropped link or a closed laptop.
     let log = format!("{REMOTE_ROOT}/runs/{run_id}.log");
     let pidfile = format!("{REMOTE_ROOT}/runs/{run_id}.pid");
+    let mut run_flags = String::new();
+    if opts.force {
+        run_flags.push_str(" --force");
+    }
+    if opts.in_order {
+        run_flags.push_str(" --in-order");
+    }
     let launch = format!(
-        "nohup {REMOTE_MODL} run {} --run-id {} > {} 2>&1 & echo $! > {}; echo ok",
+        "nohup {REMOTE_MODL} run {} --run-id {}{run_flags} > {} 2>&1 & echo $! > {}; echo ok",
         shell_quote(&remote_spec),
         shell_quote(&run_id),
         shell_quote(&log),
         shell_quote(&pidfile),
     );
     run_ssh_quiet(&pod.ssh, &launch)?;
-    println!(
+    eprintln!(
         "{} Workflow running on pod {} — {}",
         style("→").cyan(),
         pod.instance_id,
@@ -296,7 +350,7 @@ pub async fn run_workflow_on_pod(
         bail!("Pod run {run_id} ended with status: {status}");
     }
     if status == "partial_failure" {
-        println!(
+        eprintln!(
             "{} Some steps failed — exporting the artifacts that did complete.",
             style("⚠").yellow()
         );
@@ -349,14 +403,14 @@ pub fn export_run(
         );
     }
 
-    println!(
+    eprintln!(
         "{} {} artifact(s) → {}",
         style("✓").green().bold(),
         artifacts.len(),
         local_dir.display()
     );
     for a in &artifacts {
-        println!("  {}", a.display());
+        eprintln!("  {}", a.display());
     }
     Ok((local_dir, artifacts))
 }
@@ -372,7 +426,7 @@ fn wait_for_run(pod: &Pod, run_id: &str, log: &str, pidfile: &str) -> Result<Str
         // Drain whatever the tail has produced since the last poll.
         if let Some((_, rx)) = &tail {
             while let Ok(line) = rx.try_recv() {
-                println!("  {}", style(line.trim_end()).dim());
+                eprintln!("  {}", style(line.trim_end()).dim());
             }
             // Tail children die with flaky links — respawn lazily.
             if let Some((child, _)) = &mut tail
@@ -389,7 +443,7 @@ fn wait_for_run(pod: &Pod, run_id: &str, log: &str, pidfile: &str) -> Result<Str
                     if let Some((mut child, rx)) = tail.take() {
                         // Print any final log lines before killing the tail.
                         while let Ok(line) = rx.try_recv() {
-                            println!("  {}", style(line.trim_end()).dim());
+                            eprintln!("  {}", style(line.trim_end()).dim());
                         }
                         let _ = child.kill();
                         let _ = child.wait();
@@ -430,7 +484,7 @@ fn wait_for_run(pod: &Pod, run_id: &str, log: &str, pidfile: &str) -> Result<Str
                     );
                 }
                 if poll_failures == 1 {
-                    println!(
+                    eprintln!(
                         "{} Status poll failed — retrying (run continues on the pod)...",
                         style("!").yellow()
                     );
@@ -547,7 +601,17 @@ pub fn single_generate_spec(
 
 /// Build a one-step edit workflow with the input image inlined as a base64
 /// data URI (the MCP-safe image-ref form — client paths don't exist on pods).
-pub fn single_edit_spec(model: &str, prompt: &str, image_path: &Path) -> Result<String> {
+#[allow(clippy::too_many_arguments)]
+pub fn single_edit_spec(
+    model: &str,
+    prompt: &str,
+    image_path: &Path,
+    width: Option<u32>,
+    height: Option<u32>,
+    steps: Option<u32>,
+    guidance: Option<f64>,
+    seeds: &[u64],
+) -> Result<String> {
     let bytes = std::fs::read(image_path)
         .with_context(|| format!("Failed to read {}", image_path.display()))?;
     let mime = match image_path
@@ -573,6 +637,22 @@ pub fn single_edit_spec(model: &str, prompt: &str, image_path: &Path) -> Result<
     step.insert("id".into(), "edit".into());
     step.insert("edit".into(), "$input".into());
     step.insert("prompt".into(), prompt.into());
+    insert_opt(&mut step, "width", width.map(|v| v.into()));
+    insert_opt(&mut step, "height", height.map(|v| v.into()));
+    insert_opt(&mut step, "steps", steps.map(|v| v.into()));
+    insert_opt(&mut step, "guidance", guidance.map(|v| v.into()));
+    match seeds {
+        [] => {}
+        [one] => {
+            step.insert("seed".into(), (*one).into());
+        }
+        many => {
+            step.insert(
+                "seeds".into(),
+                serde_yaml::Value::Sequence(many.iter().map(|s| (*s).into()).collect()),
+            );
+        }
+    }
 
     let mut root = serde_yaml::Mapping::new();
     root.insert("name".into(), "pod-edit".into());
@@ -648,10 +728,69 @@ steps:
     fn edit_spec_inlines_image_as_data_uri() {
         let tmp = std::env::temp_dir().join(format!("modl-podrun-test-{}.png", std::process::id()));
         std::fs::write(&tmp, b"fakepng").unwrap();
-        let spec = single_edit_spec("klein-9b", "make it golden", &tmp).unwrap();
+        let spec = single_edit_spec(
+            "klein-9b",
+            "make it golden",
+            &tmp,
+            None,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
         std::fs::remove_file(&tmp).unwrap();
         assert!(spec.contains("data:image/png;base64,"));
         assert!(spec.contains("$input"));
         assert!(spec.contains("make it golden"));
+        // No optional params passed — none serialized (`steps:` here is the
+        // workflow's step list, not an inference-steps field).
+        assert!(!spec.contains("guidance"));
+        assert!(!spec.contains("seed"));
+        assert!(!spec.contains("width"));
+    }
+
+    #[test]
+    fn edit_spec_carries_params_and_seeds() {
+        let tmp =
+            std::env::temp_dir().join(format!("modl-podrun-test2-{}.png", std::process::id()));
+        std::fs::write(&tmp, b"fakepng").unwrap();
+        let spec = single_edit_spec(
+            "klein-9b",
+            "p",
+            &tmp,
+            Some(1820),
+            Some(1024),
+            Some(28),
+            Some(4.5),
+            &[7, 8],
+        )
+        .unwrap();
+        std::fs::remove_file(&tmp).unwrap();
+        assert!(spec.contains("width: 1820"));
+        assert!(spec.contains("height: 1024"));
+        assert!(spec.contains("steps: 28"));
+        assert!(spec.contains("guidance: 4.5"));
+        assert!(spec.contains("seeds:"));
+        assert!(spec.contains("- 7"));
+        assert!(spec.contains("- 8"));
+    }
+
+    #[test]
+    fn rejects_bare_local_image_paths() {
+        // Bare path in an edit step — would resolve pod-side and fail there.
+        let step_path =
+            "name: t\nmodel: m\nsteps:\n  - id: a\n    edit: photo.png\n    prompt: p\n";
+        let err = check_pod_supported(step_path).unwrap_err().to_string();
+        assert!(err.contains("local file path"), "{err}");
+
+        // File path in the images: map — same problem.
+        let images_path = "name: t\nmodel: m\nimages:\n  ref: /home/me/ref.png\nsteps:\n  - id: a\n    generate: x\n";
+        let err = check_pod_supported(images_path).unwrap_err().to_string();
+        assert!(err.contains("file path"), "{err}");
+
+        // Data URIs, $variables and $step refs are all fine.
+        let ok = "name: t\nmodel: m\nimages:\n  ref: \"data:image/png;base64,aWs=\"\nsteps:\n  - id: a\n    generate: x\n  - id: b\n    edit: \"$ref\"\n    prompt: p\n  - id: c\n    edit: \"$a.outputs[0]\"\n    prompt: p\n";
+        assert!(check_pod_supported(ok).is_ok());
     }
 }

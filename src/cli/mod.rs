@@ -1212,7 +1212,9 @@ See `modl/docs/guides/workflows.md` for the full reference.")]
         #[arg(long)]
         dry_run: bool,
         /// Emit machine-readable JSON instead of human-formatted output.
-        /// Only meaningful with --dry-run today; ignored otherwise.
+        /// Meaningful with --dry-run (execution plan) and with --pod (one
+        /// result object per spec: run_id, status, artifact paths); ignored
+        /// for plain local execution today.
         #[arg(long)]
         json: bool,
         /// Run on the active BYO-key pod (`modl pod up`) — the workflow,

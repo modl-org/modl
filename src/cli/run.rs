@@ -202,7 +202,15 @@ pub async fn run(
     if pod {
         // Pod execution ships the YAML to the pod's own modl install — plan
         // building, model resolution, and step chaining all happen there.
-        return run_on_pod(spec_paths, dry_run).await;
+        return run_on_pod(
+            spec_paths,
+            dry_run,
+            json,
+            in_order,
+            skip_existing,
+            run_id_override,
+        )
+        .await;
     }
 
     let db = Database::open()?;
@@ -235,21 +243,71 @@ pub async fn run(
 /// Run each workflow file on the active pod, sequentially, via the remote
 /// modl install (`core::pod_run`). With --dry-run, validate pod
 /// compatibility and list referenced models without renting anything.
-async fn run_on_pod(spec_paths: &[String], dry_run: bool) -> Result<()> {
+///
+/// `--run-id`, `--force` and `--in-order` are forwarded to the pod-side
+/// `modl run` so local and pod flags behave identically. With `--json`, one
+/// result object per spec is emitted on stdout (progress goes to stderr).
+async fn run_on_pod(
+    spec_paths: &[String],
+    dry_run: bool,
+    json: bool,
+    in_order: bool,
+    skip_existing: bool,
+    run_id_override: Option<&str>,
+) -> Result<()> {
     use anyhow::Context as _;
     use console::style;
 
+    if run_id_override.is_some() && spec_paths.len() > 1 {
+        bail!("--run-id with multiple workflow files is ambiguous — pass a single file.");
+    }
+
     if dry_run {
         for path in spec_paths {
-            let yaml =
-                std::fs::read_to_string(path).with_context(|| format!("Failed to read {path}"))?;
-            crate::core::pod_run::check_pod_supported(&yaml)?;
-            let models = crate::core::pod_run::workflow_models(&yaml)?;
-            println!(
-                "{} {path}: pod-compatible — models: {}",
-                style("✓").green(),
-                models.join(", ")
-            );
+            let checked = std::fs::read_to_string(path)
+                .with_context(|| format!("Failed to read {path}"))
+                .and_then(|yaml| {
+                    crate::core::pod_run::check_pod_supported(&yaml)?;
+                    crate::core::pod_run::workflow_models(&yaml)
+                });
+            match checked {
+                Ok(models) => {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "valid": true,
+                                "target": "pod",
+                                "spec": path,
+                                "models": models,
+                            })
+                        );
+                    } else {
+                        println!(
+                            "{} {path}: pod-compatible — models: {}",
+                            style("✓").green(),
+                            models.join(", ")
+                        );
+                    }
+                }
+                Err(e) => {
+                    if json {
+                        // Same contract as the local dry-run: exit 0, signal
+                        // validity in the payload so agents can parse it.
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "valid": false,
+                                "target": "pod",
+                                "spec": path,
+                                "error": { "message": format!("{e:#}") },
+                            })
+                        );
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
         }
         return Ok(());
     }
@@ -262,13 +320,13 @@ async fn run_on_pod(spec_paths: &[String], dry_run: bool) -> Result<()> {
     for (i, path) in spec_paths.iter().enumerate() {
         if spec_paths.len() > 1 {
             if i > 0 {
-                println!();
+                eprintln!();
             }
-            println!("── {}/{}: {} ──", i + 1, spec_paths.len(), path);
+            eprintln!("── {}/{}: {} ──", i + 1, spec_paths.len(), path);
         }
         let yaml =
             std::fs::read_to_string(path).with_context(|| format!("Failed to read {path}"))?;
-        println!(
+        eprintln!(
             "{} Running {} on pod {} ({}, ${:.3}/hr)…",
             style("→").cyan(),
             path,
@@ -276,10 +334,21 @@ async fn run_on_pod(spec_paths: &[String], dry_run: bool) -> Result<()> {
             rec.gpu_name,
             rec.dph_total
         );
-        crate::core::pod_run::run_workflow_on_pod(&pod, &yaml, None).await?;
+        let opts = crate::core::pod_run::RemoteRunOptions {
+            run_id: run_id_override.map(String::from),
+            force: !skip_existing,
+            in_order,
+        };
+        let outcome = crate::core::pod_run::run_workflow_on_pod(&pod, &yaml, None, opts).await?;
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string(&super::generate::pod_result_json(&outcome))?
+            );
+        }
     }
 
-    println!(
+    eprintln!(
         "{} Pod {} still running (${:.3}/hr) — {} when done.",
         style("⚠").yellow(),
         rec.instance_id,

@@ -1046,17 +1046,33 @@ pub(crate) fn run_ssh_stdin(ssh: &SshTarget, cmd: &str, input: &str) -> Result<(
     Ok(())
 }
 
-/// Run a remote script with live output (bootstrap etc.).
+/// Run a remote script with live output (bootstrap etc.). The remote output
+/// is progress narration, so it goes to OUR stderr — stdout stays reserved
+/// for results (`--json` consumers pipe stdout).
 pub(crate) fn run_ssh_streaming(ssh: &SshTarget, script: &str) -> Result<()> {
     let status = Command::new("ssh")
         .args(ssh.base_args())
         .arg(format!("bash -c {}", shell_quote(script)))
+        .stdout(stderr_stdio())
         .status()
         .context("ssh command failed to spawn")?;
     if !status.success() {
         bail!("Remote bootstrap failed (exit {status}).");
     }
     Ok(())
+}
+
+/// A `Stdio` handle pointing at this process's stderr (falls back to
+/// inherited stdout if the fd can't be cloned).
+fn stderr_stdio() -> Stdio {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsFd;
+        if let Ok(fd) = std::io::stderr().as_fd().try_clone_to_owned() {
+            return Stdio::from(fd);
+        }
+    }
+    Stdio::inherit()
 }
 
 pub(crate) fn rsync_to(ssh: &SshTarget, local: &Path, remote: &str) -> Result<()> {
