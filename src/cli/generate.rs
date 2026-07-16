@@ -139,6 +139,7 @@ async fn run_on_pod(args: &GenerateArgs<'_>) -> Result<()> {
         ("--mask", args.mask.is_some()),
         ("--controlnet", !args.controlnet.is_empty()),
         ("--style-ref", !args.style_ref.is_empty()),
+        ("--fast", args.fast.is_some()),
         ("--cloud", args.cloud),
         ("--attach-gpu", args.attach_gpu),
     ] {
@@ -181,7 +182,7 @@ async fn run_on_pod(args: &GenerateArgs<'_>) -> Result<()> {
     let rec = crate::core::pod_state::active_pod()
         .await?
         .context("No pod up — run `modl pod up <gpu>` first, or use --attach-gpu / --cloud.")?;
-    println!(
+    eprintln!(
         "{} Generating on pod {} ({}, ${:.3}/hr)…",
         style("→").cyan(),
         rec.instance_id,
@@ -189,8 +190,12 @@ async fn run_on_pod(args: &GenerateArgs<'_>) -> Result<()> {
         rec.dph_total
     );
     let pod = crate::core::pod::Pod::from(rec.clone());
-    crate::core::pod_run::run_workflow_on_pod(&pod, &spec, None).await?;
-    println!(
+    let outcome =
+        crate::core::pod_run::run_workflow_on_pod(&pod, &spec, None, Default::default()).await?;
+    if args.json {
+        println!("{}", serde_json::to_string(&pod_result_json(&outcome))?);
+    }
+    eprintln!(
         "{} Pod {} still running (${:.3}/hr) — {} when done.",
         style("⚠").yellow(),
         rec.instance_id,
@@ -198,6 +203,19 @@ async fn run_on_pod(args: &GenerateArgs<'_>) -> Result<()> {
         style(format!("modl pod rm {}", rec.instance_id)).bold()
     );
     Ok(())
+}
+
+/// JSON result for a pod run — same shape for generate/edit/run so agents
+/// can parse one schema.
+pub(crate) fn pod_result_json(
+    outcome: &crate::core::pod_run::RemoteRunOutcome,
+) -> serde_json::Value {
+    serde_json::json!({
+        "status": outcome.status,
+        "run_id": outcome.run_id,
+        "output_dir": outcome.local_dir,
+        "images": outcome.artifacts,
+    })
 }
 
 async fn run_local(args: GenerateArgs<'_>, db: Database) -> Result<()> {

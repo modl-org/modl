@@ -51,6 +51,8 @@ async fn run_on_pod(args: &EditArgs<'_>) -> Result<()> {
     for (flag, set) in [
         ("--mask", args.mask.is_some()),
         ("--lora", args.lora.is_some()),
+        ("--fast", args.fast.is_some()),
+        ("--blend", args.blend != BlendMode::Pixel),
         ("--cloud", args.cloud),
         ("--attach-gpu", args.attach_gpu),
     ] {
@@ -61,16 +63,42 @@ async fn run_on_pod(args: &EditArgs<'_>) -> Result<()> {
     let model = args.base.unwrap_or("qwen-image-edit-2511");
     let local_image = resolve_image_input(&args.images[0]).await?;
 
+    let (width, height) = match args.size {
+        Some(s) => {
+            let (w, h) = resolve_edit_size(s)?;
+            (Some(w), Some(h))
+        }
+        None => (None, None),
+    };
+    // count>1 maps to explicit seeds (one output per seed on the pod).
+    let seeds: Vec<u64> = match (args.seed, args.count) {
+        (Some(s), c) if c > 1 => (0..c as u64).map(|i| s + i).collect(),
+        (Some(s), _) => vec![s],
+        (None, c) if c > 1 => {
+            let base = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos() as u64)
+                .unwrap_or(0);
+            (0..c as u64).map(|i| base + i).collect()
+        }
+        (None, _) => vec![],
+    };
+
     let spec = crate::core::pod_run::single_edit_spec(
         model,
         args.prompt,
         std::path::Path::new(&local_image),
+        width,
+        height,
+        args.steps,
+        args.guidance.map(|g| g as f64),
+        &seeds,
     )?;
 
     let rec = crate::core::pod_state::active_pod()
         .await?
         .context("No pod up — run `modl pod up <gpu>` first, or use --attach-gpu / --cloud.")?;
-    println!(
+    eprintln!(
         "{} Editing on pod {} ({}, ${:.3}/hr)…",
         style("→").cyan(),
         rec.instance_id,
@@ -78,8 +106,15 @@ async fn run_on_pod(args: &EditArgs<'_>) -> Result<()> {
         rec.dph_total
     );
     let pod = crate::core::pod::Pod::from(rec.clone());
-    crate::core::pod_run::run_workflow_on_pod(&pod, &spec, None).await?;
-    println!(
+    let outcome =
+        crate::core::pod_run::run_workflow_on_pod(&pod, &spec, None, Default::default()).await?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string(&super::generate::pod_result_json(&outcome))?
+        );
+    }
+    eprintln!(
         "{} Pod {} still running (${:.3}/hr) — {} when done.",
         style("⚠").yellow(),
         rec.instance_id,
