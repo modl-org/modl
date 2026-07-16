@@ -52,6 +52,10 @@ struct TomlModel {
     controlnet: Option<TomlControlNet>,
     #[serde(default)]
     style_ref: Option<TomlStyleRef>,
+    /// Officially supported number of edit source/reference images.
+    /// None = single-image editing model or no published limit.
+    #[serde(default)]
+    max_edit_images: Option<u8>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,6 +124,9 @@ pub struct ModelInfo {
     pub description: String,
     pub prompt_guide: Option<String>,
     pub edit_prompt_guide: Option<String>,
+    /// Officially supported number of edit source/reference images. Exceeding
+    /// it warns (extra images may be ignored or degrade output) — not an error.
+    pub max_edit_images: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -303,6 +310,7 @@ fn build_parsed(root: TomlRoot) -> ParsedModels {
                 description: m.description,
                 prompt_guide: m.prompt_guide.map(|s| s.trim().to_string()),
                 edit_prompt_guide: m.edit_prompt_guide.map(|s| s.trim().to_string()),
+                max_edit_images: m.max_edit_images,
             });
         }
 
@@ -565,6 +573,25 @@ pub fn detect_control_type_from_filename(path: &str) -> Option<String> {
     None
 }
 
+/// Warn (don't error) when an edit exceeds the model's official reference
+/// image limit — over-limit sometimes works, but extra images may be ignored
+/// or degrade output. Returns the warning text, or None when within limits or
+/// the model has no published limit.
+pub fn check_edit_image_count(model_id: &str, count: usize) -> Option<String> {
+    let info = resolve_model(model_id)?;
+    let max = info.max_edit_images? as usize;
+    if count <= max {
+        return None;
+    }
+    Some(format!(
+        "{} officially supports up to {} reference image{} (you passed {}) — extra images may be ignored or degrade output",
+        info.name,
+        max,
+        if max == 1 { "" } else { "s" },
+        count,
+    ))
+}
+
 pub fn validate_controlnet(model_id: &str, control_type: &str) -> Result<(), String> {
     let resolved = match resolve_model(model_id) {
         Some(m) => m,
@@ -631,4 +658,27 @@ pub fn validate_style_ref(model_id: &str) -> Result<(), String> {
         resolved.id,
         alternatives.join(", ")
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edit_image_count_within_limit_is_silent() {
+        assert!(check_edit_image_count("flux2-klein-9b", 4).is_none());
+        assert!(check_edit_image_count("qwen-image-edit-2511", 3).is_none());
+        // Models without a published limit never warn.
+        assert!(check_edit_image_count("flux-dev", 10).is_none());
+        assert!(check_edit_image_count("not-a-model", 10).is_none());
+    }
+
+    #[test]
+    fn edit_image_count_over_limit_warns() {
+        let w = check_edit_image_count("flux2-klein-9b", 5).expect("should warn");
+        assert!(w.contains("up to 4"), "got: {w}");
+        assert!(w.contains("5"), "got: {w}");
+        let w = check_edit_image_count("qwen-image-edit-2511", 4).expect("should warn");
+        assert!(w.contains("up to 3"), "got: {w}");
+    }
 }

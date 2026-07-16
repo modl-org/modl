@@ -66,6 +66,9 @@ async fn run_on_pod(args: &EditArgs<'_>) -> Result<()> {
     for img in args.images {
         local_images.push(PathBuf::from(resolve_image_input(img).await?));
     }
+    if let Some(warning) = model_family::check_edit_image_count(model, local_images.len()) {
+        eprintln!("  {} {}", style("⚠").yellow(), warning);
+    }
     // Sentinel masks pass through to the pod; paths/URLs resolve locally and
     // get inlined by the spec builder.
     let local_mask: Option<String> = match args.mask {
@@ -320,6 +323,9 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
     for img in images {
         let path = resolve_image_input(img).await?;
         resolved_paths.push(path);
+    }
+    if let Some(warning) = model_family::check_edit_image_count(&base_model, resolved_paths.len()) {
+        eprintln!("  {} {}", style("⚠").yellow(), warning);
     }
 
     // -------------------------------------------------------------------

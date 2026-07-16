@@ -47,8 +47,11 @@ CONTROLNET_CONFIGS = {
     },
     "sdxl": {
         "repo": "xinsir/controlnet-union-sdxl-1.0",
-        "model_class": "ControlNetModel",
-        "pipeline_class": "StableDiffusionXLControlNetPipeline",
+        # The installed checkpoint is xinsir's union model — plain
+        # ControlNetModel would silently drop its control_add_embedding
+        # weights (strict=False) and lose the control_mode conditioning.
+        "model_class": "ControlNetUnionModel",
+        "pipeline_class": "StableDiffusionXLControlNetUnionPipeline",
         "modes": SDXL_CONTROLNET_MODES,
     },
     "qwen_image": {
@@ -119,6 +122,12 @@ def _resolve_controlnet_config(arch: str, model_path: str) -> str | None:
 
     if arch in ("flux", "flux_schnell"):
         return str(configs_dir / "flux-controlnet-union")
+
+    if arch == "sdxl":
+        # The store holds the bare weights file; without a bundled config,
+        # from_single_file falls back to fetching a default config repo from
+        # the Hub (diffusers/controlnet-canny-sdxl-1.0) and fails (#123).
+        return str(configs_dir / "sdxl-controlnet-union")
 
     if arch not in ("zimage_turbo", "zimage"):
         return None
@@ -232,15 +241,20 @@ def _load_controlnet(
         if mod is not None:
             remove_hook_from_module(mod, recurse=True)
 
-    # Check if everything fits on GPU. With force_fp8, the transformer is
-    # ~5.7GB. Lite controlnet adds ~2GB → fits. Full controlnet (6GB) needs
-    # the text encoder offloaded during denoising → use wrapper approach.
     cn_model_size_gb = sum(
         p.numel() * p.element_size() for p in cn_model.parameters()
     ) / (1024**3)
-    use_wrapper = cn_model_size_gb > 4.0  # Full v2.1 is ~6GB
+    # Z-Image ALWAYS uses the single-model wrapper, regardless of CN size:
+    # ZImageControlNetModel shares the transformer's embedder/refiner modules
+    # (from_transformer), and model_cpu_offload device-tracks per top-level
+    # module by sampling a single parameter. Any path that moves the shared
+    # modules independently (pinning the CN, or the CN's own offload hook
+    # firing first) leaves the transformer split across cpu/cuda and the
+    # denoise crashes with a device mismatch (#122). The wrapper makes them
+    # one module so they always move together.
+    use_wrapper = arch in ("zimage_turbo", "zimage")
 
-    if use_wrapper and arch in ("zimage_turbo", "zimage"):
+    if use_wrapper:
         # Single-model wrapper: combines transformer + controlnet into one
         # nn.Module so model_cpu_offload can offload the text encoder during
         # denoising. The wrapper's forward runs controlnet → transformer.

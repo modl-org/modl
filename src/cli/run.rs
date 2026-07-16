@@ -15,7 +15,7 @@
 use anyhow::{Result, anyhow, bail};
 use console::style;
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use thiserror::Error;
@@ -894,7 +894,7 @@ pub async fn execute_plan(
 
     // Build the completion index once before any GPU work so we can skip
     // sub-jobs whose (prompt, seed, model) triple was already generated.
-    let completion_index: HashSet<CompletionKey> = if skip_existing {
+    let completion_index: HashMap<CompletionKey, PathBuf> = if skip_existing {
         let outputs_root = paths::modl_root().join("outputs");
         let index = build_completion_index(&outputs_root);
         if !index.is_empty() {
@@ -907,7 +907,7 @@ pub async fn execute_plan(
         }
         index
     } else {
-        HashSet::new()
+        HashMap::new()
     };
 
     println!("{} Preparing runtime...", style("→").cyan());
@@ -969,14 +969,21 @@ pub async fn execute_plan(
                     // Skip sub-jobs already in the completion index (default behaviour).
                     // Random-seed sub-jobs (seed == None) are never skipped.
                     if skip_existing && let Some(s) = seed {
-                        let all_done = (0..*count).all(|i| {
-                            completion_index.contains(&(
-                                g.prompt.clone(),
-                                s + i as u64,
-                                resolved_model.id.clone(),
-                            ))
-                        });
-                        if all_done {
+                        // A skipped sub-job must still contribute its images to
+                        // `step_outputs` — later steps may reference them via
+                        // `$step.outputs[N]`.
+                        let existing: Vec<PathBuf> = (0..*count)
+                            .filter_map(|i| {
+                                completion_index
+                                    .get(&(
+                                        g.prompt.clone(),
+                                        s + i as u64,
+                                        resolved_model.id.clone(),
+                                    ))
+                                    .cloned()
+                            })
+                            .collect();
+                        if existing.len() == *count as usize {
                             println!(
                                 "  {} [{}/{}] seed={} — {}",
                                 style("↷").yellow(),
@@ -985,6 +992,7 @@ pub async fn execute_plan(
                                 s,
                                 style("already generated, skipping").dim(),
                             );
+                            step_artifacts.extend(existing);
                             step_skipped += 1;
                             total_skipped_sub_jobs += 1;
                             continue;
@@ -1080,6 +1088,11 @@ pub async fn execute_plan(
                             .to_string(),
                     ),
                 };
+                if let Some(warning) =
+                    model_family::check_edit_image_count(&resolved_model.id, source_paths.len())
+                {
+                    println!("  {} {}", style("⚠").yellow(), warning);
+                }
                 print_edit_preview(e, &source_paths, sub_jobs.len());
                 for (sub_idx, (seed, count)) in sub_jobs.iter().enumerate() {
                     if sub_jobs.len() > 1 {
@@ -1216,8 +1229,11 @@ pub async fn execute_plan(
 ///
 /// Reads every sidecar `.yaml` file it finds. Non-fatal on any I/O or parse
 /// error — a missing or corrupt sidecar simply means the image isn't indexed.
-fn build_completion_index(outputs_root: &Path) -> HashSet<CompletionKey> {
-    let mut index = HashSet::new();
+/// Map each completed (prompt, seed, model) triple to its image path, so
+/// skipped sub-jobs can still contribute artifacts to `step_outputs` — later
+/// steps may reference them via `$step.outputs[N]`.
+fn build_completion_index(outputs_root: &Path) -> HashMap<CompletionKey, PathBuf> {
+    let mut index = HashMap::new();
     let Ok(dates) = std::fs::read_dir(outputs_root) else {
         return index;
     };
@@ -1240,9 +1256,16 @@ fn build_completion_index(outputs_root: &Path) -> HashSet<CompletionKey> {
             let Ok(meta) = serde_yaml::from_str::<SidecarMetadata>(&content) else {
                 continue;
             };
-            if let Some(seed) = meta.seed {
-                index.insert((meta.prompt, seed, meta.base_model));
-            }
+            let Some(seed) = meta.seed else { continue };
+            // The sidecar sits next to its image (same stem, image extension).
+            let Some(image) = ["png", "jpg", "jpeg", "webp"]
+                .iter()
+                .map(|ext| path.with_extension(ext))
+                .find(|p| p.exists())
+            else {
+                continue;
+            };
+            index.insert((meta.prompt, seed, meta.base_model), image);
         }
     }
     index
@@ -1414,6 +1437,12 @@ fn print_plan_human(plan: &Plan, in_order: bool) {
                     style(&reorder_annotation).dim(),
                 );
                 println!("      source: {}", source);
+                if let Some(warning) = model_family::check_edit_image_count(
+                    &planned.resolved_model.id,
+                    e.sources.len(),
+                ) {
+                    println!("      {} {}", style("⚠").yellow(), warning);
+                }
                 println!("      {}", style(truncate(&e.prompt, 80)).italic());
             }
         }
