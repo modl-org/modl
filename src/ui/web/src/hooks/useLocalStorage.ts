@@ -50,25 +50,30 @@ export function useLocalStorage<T>(key: string, initialValue: T | (() => T)) {
     }
   })
 
+  // Debounced write — serializing the whole form synchronously on every
+  // keystroke costs a visible chunk of the frame budget.
   useEffect(() => {
-    try {
-      let toStore: unknown = storedValue
-      // Strip non-serializable fields before writing
-      if (typeof storedValue === 'object' && storedValue !== null && !Array.isArray(storedValue)) {
-        const copy = { ...storedValue } as Record<string, unknown>
-        for (const k of NON_SERIALIZABLE_KEYS) {
-          delete copy[k]
+    const timer = window.setTimeout(() => {
+      try {
+        let toStore: unknown = storedValue
+        // Strip non-serializable fields before writing
+        if (typeof storedValue === 'object' && storedValue !== null && !Array.isArray(storedValue)) {
+          const copy = { ...storedValue } as Record<string, unknown>
+          for (const k of NON_SERIALIZABLE_KEYS) {
+            delete copy[k]
+          }
+          // Keep server-type edit_images, strip file-type ones
+          if ('edit_images' in copy) {
+            copy.edit_images = sanitizeEditImages(copy.edit_images)
+          }
+          toStore = copy
         }
-        // Keep server-type edit_images, strip file-type ones
-        if ('edit_images' in copy) {
-          copy.edit_images = sanitizeEditImages(copy.edit_images)
-        }
-        toStore = copy
+        window.localStorage.setItem(key, JSON.stringify(toStore))
+      } catch {
+        // Ignore write failures (quota/private mode).
       }
-      window.localStorage.setItem(key, JSON.stringify(toStore))
-    } catch {
-      // Ignore write failures (quota/private mode).
-    }
+    }, 400)
+    return () => window.clearTimeout(timer)
   }, [key, storedValue])
 
   return [storedValue, setStoredValue] as const

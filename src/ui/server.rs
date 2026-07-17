@@ -191,6 +191,9 @@ pub async fn start(port: u16, open_browser: bool) -> Result<()> {
             "/api/studio/sessions/{id}/stream",
             get(studio::api_studio_stream),
         )
+        // Gzip JSON responses — /api/outputs alone is ~5MB uncompressed with a
+        // large library. The default predicate skips SSE streams and images.
+        .layer(tower_http::compression::CompressionLayer::new())
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));

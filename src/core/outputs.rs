@@ -553,7 +553,11 @@ fn is_within_outputs_root(path: &Path, outputs_root: &Path) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Scan ~/.modl/outputs/ for generated images, grouped by date.
-pub fn list_outputs() -> Vec<GeneratedOutput> {
+/// List outputs, stopping after `limit` images across date groups (newest
+/// first). The UI session strip only needs ~30 images — walking and
+/// serializing the full library (thousands of images, multi-MB JSON) for
+/// every poll is wasted work.
+pub fn list_outputs_limited(limit: Option<usize>) -> Vec<GeneratedOutput> {
     let outputs_root = paths::modl_root().join("outputs");
     let mut result: Vec<GeneratedOutput> = Vec::new();
     let artifacts_by_path = load_output_artifact_index();
@@ -623,6 +627,15 @@ pub fn list_outputs() -> Vec<GeneratedOutput> {
             .collect();
 
         images.sort_by_key(|i| std::cmp::Reverse(i.modified));
+
+        if let Some(max) = limit {
+            let so_far: usize = result.iter().map(|g| g.images.len()).sum();
+            let remaining = max.saturating_sub(so_far);
+            if remaining == 0 {
+                break;
+            }
+            images.truncate(remaining);
+        }
 
         if !images.is_empty() {
             result.push(GeneratedOutput {

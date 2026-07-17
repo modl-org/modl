@@ -70,8 +70,11 @@ export function useGenerateQueue() {
       if (lower.includes('completed') || lower.includes('done')) {
         const count = expectedCountRef.current
 
-        void queryClient.refetchQueries({ queryKey: ['outputs'] }).then(() => {
-          const outputs = queryClient.getQueryData<GeneratedOutput[]>(['outputs']) ?? []
+        // Refetch the lightweight recent-outputs strip; the full gallery
+        // query is just marked stale and refetches when the tab is viewed.
+        void queryClient.invalidateQueries({ queryKey: ['outputs'], exact: true })
+        void queryClient.refetchQueries({ queryKey: ['outputs', 'recent'] }).then(() => {
+          const outputs = queryClient.getQueryData<GeneratedOutput[]>(['outputs', 'recent']) ?? []
           const allImages: Array<{ url: string; seed?: number; modified: number; path?: string }> = []
           for (const group of outputs) {
             for (const img of group.images) {

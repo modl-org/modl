@@ -116,8 +116,18 @@ pub async fn api_get_run(Path(name): Path<String>) -> impl IntoResponse {
     }
 }
 
-pub async fn api_training_status() -> impl IntoResponse {
-    match tokio::task::spawn_blocking(|| training_status::get_all_status(false)).await {
+#[derive(serde::Deserialize)]
+pub struct TrainingStatusQuery {
+    /// Only running trainings — the sidebar activity dot needs nothing else,
+    /// and the full scan re-parses every run's log from disk.
+    #[serde(default)]
+    active: bool,
+}
+
+pub async fn api_training_status(
+    axum::extract::Query(q): axum::extract::Query<TrainingStatusQuery>,
+) -> impl IntoResponse {
+    match tokio::task::spawn_blocking(move || training_status::get_all_status(q.active)).await {
         Ok(Ok(runs)) => Json(runs).into_response(),
         Ok(Err(e)) => (
             StatusCode::INTERNAL_SERVER_ERROR,

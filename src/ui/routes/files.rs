@@ -75,8 +75,10 @@ pub struct ThumbParams {
 /// Generate (or serve cached) a WebP thumbnail at the given width.
 async fn serve_thumbnail(source: &std::path::Path, width: u32) -> axum::response::Response {
     let cache_dir = modl_root().join("cache").join("thumbs");
-    // Build cache key from source path hash + width
-    let hash_input = format!("{}:{}", source.to_string_lossy(), width);
+    // Build cache key from source path hash + width. The "q80" tag versions
+    // the encoding — bumping it invalidates thumbs cached with older encoders
+    // (pre-existing caches were lossless WebP, 5-8x larger than intended).
+    let hash_input = format!("{}:{}:q80", source.to_string_lossy(), width);
     let hash = {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
@@ -121,12 +123,14 @@ async fn serve_thumbnail(source: &std::path::Path, width: u32) -> axum::response
             let _ = std::fs::create_dir_all(parent);
         }
 
-        // Encode as WebP (lossy, ~quality 80 equivalent — smaller + sharper than JPEG)
-        let mut buf = Vec::new();
-        let mut cursor = std::io::Cursor::new(&mut buf);
-        thumb
-            .write_to(&mut cursor, image::ImageFormat::WebP)
-            .map_err(|e| format!("Failed to encode thumbnail: {e}"))?;
+        // Encode as lossy WebP q80 via libwebp. The `image` crate can only
+        // write lossless WebP, which is 5-8x larger for photographic thumbs.
+        // RGBA keeps alpha intact for remove-bg outputs.
+        let rgba = thumb.to_rgba8();
+        let (tw, th) = rgba.dimensions();
+        let buf = webp::Encoder::from_rgba(&rgba, tw, th)
+            .encode(80.0)
+            .to_vec();
 
         // Write cache file (best effort)
         let _ = std::fs::write(&cache_path_owned, &buf);

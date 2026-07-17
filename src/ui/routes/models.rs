@@ -68,13 +68,18 @@ struct GpuStatus {
     training_active: bool,
 }
 
+/// NVML handle, initialized once — `Nvml::init()` costs ~45ms per call and
+/// this endpoint is polled every few seconds.
+static NVML: std::sync::OnceLock<Option<nvml_wrapper::Nvml>> = std::sync::OnceLock::new();
+
 pub async fn api_gpu_status() -> impl IntoResponse {
     let status = tokio::task::spawn_blocking(|| {
         let training_active = training_status::get_all_status(true)
             .map(|runs| runs.iter().any(|r| r.is_running))
             .unwrap_or(false);
 
-        let (name, vram_total_mb, vram_free_mb) = if let Ok(nvml) = nvml_wrapper::Nvml::init() {
+        let nvml = NVML.get_or_init(|| nvml_wrapper::Nvml::init().ok());
+        let (name, vram_total_mb, vram_free_mb) = if let Some(nvml) = nvml {
             if let Ok(device) = nvml.device_by_index(0) {
                 let name = device.name().ok();
                 let mem = device.memory_info().ok();

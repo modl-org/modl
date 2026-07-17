@@ -59,11 +59,14 @@ thiserror = "2"
 
 # Web UI (training preview)
 axum = { version = "0.8", features = ["multipart"] }
-tower-http = { version = "0.6", features = ["fs", "cors"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "compression-gzip"] }
 open = "5"
 
 # Image processing (thumbnails)
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+# Lossy WebP encoding for UI thumbnails — the `image` crate only writes
+# lossless WebP (5-8x larger). Wraps libwebp via cc, no system deps.
+webp = "0.3"
 
 # Embedded assets
 include_dir = "0.7"

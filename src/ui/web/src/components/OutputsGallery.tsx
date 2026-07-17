@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import { api, type GeneratedImage, type GeneratedOutput, type ModelFamily } from '../api'
 import { modelColor } from '@/lib/utils'
@@ -9,6 +10,33 @@ import { useForm, useAppNav } from '../contexts/FormContext'
 import { buildSendToEdit } from './generate/generate-state'
 import { ImageDetail } from './ImageDetail'
 import { GalleryFilterBar, ImageGridItem } from './gallery'
+
+/** Column count matching the Tailwind grid classes below (viewport breakpoints). */
+function computeColumns(gridSize: 's' | 'm' | 'l', viewportWidth: number): number {
+  if (gridSize === 's') {
+    return viewportWidth >= 1280 ? 9 : viewportWidth >= 1024 ? 7 : viewportWidth >= 768 ? 5 : 3
+  }
+  if (gridSize === 'l') {
+    return viewportWidth >= 1280 ? 4 : viewportWidth >= 1024 ? 3 : viewportWidth >= 768 ? 2 : 1
+  }
+  return viewportWidth >= 1536 ? 6 : viewportWidth >= 1280 ? 5 : viewportWidth >= 1024 ? 4 : viewportWidth >= 768 ? 3 : 2
+}
+
+function useGridColumns(gridSize: 's' | 'm' | 'l'): number {
+  const [cols, setCols] = useState(() => computeColumns(gridSize, window.innerWidth))
+  useEffect(() => {
+    const onResize = () => setCols(computeColumns(gridSize, window.innerWidth))
+    onResize()
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [gridSize])
+  return cols
+}
+
+/** One virtualized row: a group header or a chunk of `columns` images. */
+type GalleryRow =
+  | { key: string; type: 'header'; label: string; count: number; collapsed: boolean }
+  | { key: string; type: 'images'; images: GeneratedImage[] }
 
 export function OutputsGallery() {
   const { setForm } = useForm()
@@ -143,7 +171,10 @@ export function OutputsGallery() {
     return groups.map((group) => group.date)
   }, [groups])
 
-  const searchLower = searchQuery.toLowerCase().trim()
+  // Defer the heavy filter/regroup while keeping the input itself snappy —
+  // with thousands of images the recompute is a per-keystroke long task.
+  const deferredSearch = useDeferredValue(searchQuery)
+  const searchLower = deferredSearch.toLowerCase().trim()
 
   const filteredGroups = useMemo(() => {
     // 1. Flatten all images, apply filters + search
@@ -329,6 +360,57 @@ export function OutputsGallery() {
 
   const combinedError = error ?? deleteMutation.error ?? favoriteMutation.error ?? batchDeleteMutation.error
 
+  // ── Virtualized rows ────────────────────────────────────────────────────
+  // 6k+ images can't all live in the DOM at once (~160k nodes, 100ms+ per
+  // reconciliation). Chunk each group into rows of `columns` images and only
+  // render what's on screen.
+  const columns = useGridColumns(gridSize)
+  const rows = useMemo(() => {
+    const out: GalleryRow[] = []
+    for (const group of filteredGroups) {
+      const collapsed = collapsedGroups.has(group.date)
+      if (groupBy !== 'none') {
+        out.push({
+          key: `h:${group.date}`,
+          type: 'header',
+          label: group.date,
+          count: group.images.length,
+          collapsed,
+        })
+      }
+      if (groupBy === 'none' || !collapsed) {
+        for (let i = 0; i < group.images.length; i += columns) {
+          out.push({
+            key: `r:${group.date}:${group.images[i].path}`,
+            type: 'images',
+            images: group.images.slice(i, i + columns),
+          })
+        }
+      }
+    }
+    return out
+  }, [filteredGroups, collapsedGroups, groupBy, columns])
+
+  // The scrollable ancestor is App's <main>; found on mount via closest().
+  const listRef = useRef<HTMLDivElement | null>(null)
+  const scrollElRef = useRef<HTMLElement | null>(null)
+  useEffect(() => {
+    scrollElRef.current = listRef.current?.closest('main') ?? null
+  }, [])
+
+  const estimatedRowHeight = useMemo(() => {
+    const width = listRef.current?.clientWidth ?? window.innerWidth - 280
+    return Math.ceil(width / columns) + 8
+  }, [columns])
+
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollElRef.current,
+    estimateSize: (i) => (rows[i].type === 'header' ? 28 : estimatedRowHeight),
+    overscan: 5,
+    getItemKey: (i) => rows[i].key,
+  })
+
   return (
     <div className="space-y-4">
       <GalleryFilterBar
@@ -385,71 +467,88 @@ export function OutputsGallery() {
         <p className="py-8 text-center text-sm text-muted-foreground">No generated images for the selected filters.</p>
       ) : null}
 
-      {filteredGroups.map((group) => {
-        const isCollapsed = collapsedGroups.has(group.date)
-        return (
-        <section key={group.date} className="space-y-2" style={!isCollapsed ? { contentVisibility: 'auto', containIntrinsicSize: 'auto 400px' } : undefined}>
-          {groupBy !== 'none' && (
-            <button
-              type="button"
-              className="flex w-full items-center gap-1.5 text-left"
-              onClick={() => toggleCollapsed(group.date)}
+      <div
+        ref={listRef}
+        style={{ height: virtualizer.getTotalSize(), position: 'relative' }}
+      >
+        {virtualizer.getVirtualItems().map((vi) => {
+          const row = rows[vi.index]
+          return (
+            <div
+              key={vi.key}
+              data-index={vi.index}
+              ref={virtualizer.measureElement}
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                width: '100%',
+                transform: `translateY(${vi.start}px)`,
+              }}
             >
-              {isCollapsed
-                ? <ChevronRight className="size-3.5 text-muted-foreground/60" />
-                : <ChevronDown className="size-3.5 text-muted-foreground/60" />
-              }
-              {groupBy === 'model' && (
-                <span
-                  className="inline-block size-2 rounded-full"
-                  style={{ backgroundColor: modelColor(group.date) }}
-                />
-              )}
-              <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">{group.date}</span>
-              <span className="text-[10px] text-muted-foreground/50">{group.images.length}</span>
-            </button>
-          )}
-          {!isCollapsed && <div className={`grid ${gridClass}`}>
-            {group.images.map((image) => {
-              const isSelected = selectedPaths.has(image.path)
-              const isDeleting = deleteTarget?.path === image.path
-              const isCursor = selectMode && cursorIndex >= 0 && allFilteredImages[cursorIndex]?.path === image.path
+              {row.type === 'header' ? (
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-1.5 py-2 text-left"
+                  onClick={() => toggleCollapsed(row.label)}
+                >
+                  {row.collapsed
+                    ? <ChevronRight className="size-3.5 text-muted-foreground/60" />
+                    : <ChevronDown className="size-3.5 text-muted-foreground/60" />
+                  }
+                  {groupBy === 'model' && (
+                    <span
+                      className="inline-block size-2 rounded-full"
+                      style={{ backgroundColor: modelColor(row.label) }}
+                    />
+                  )}
+                  <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">{row.label}</span>
+                  <span className="text-[10px] text-muted-foreground/50">{row.count}</span>
+                </button>
+              ) : (
+                <div className={`grid ${gridClass} pb-2`}>
+                  {row.images.map((image) => {
+                    const isSelected = selectedPaths.has(image.path)
+                    const isDeleting = deleteTarget?.path === image.path
+                    const isCursor = selectMode && cursorIndex >= 0 && allFilteredImages[cursorIndex]?.path === image.path
 
-              return (
-                <ImageGridItem
-                  key={image.path}
-                  image={image}
-                  isSelected={isSelected}
-                  isCursor={isCursor}
-                  isDeleting={isDeleting}
-                  selectMode={selectMode}
-                  thumbWidth={thumbWidth}
-                  deletePending={deleteMutation.isPending}
-                  onImageClick={(e) => {
-                    if (selectMode) {
-                      togglePathSelection(image.path, e.shiftKey)
-                    } else {
-                      setSelected(image)
-                    }
-                  }}
-                  onToggleSelection={(e) => {
-                    e.stopPropagation()
-                    togglePathSelection(image.path, e.shiftKey)
-                  }}
-                  onFavorite={() => favoriteMutation.mutate(image.path)}
-                  onOpenAsRecipe={() => useAsRecipe(image)}
-                  onSendToEdit={() => sendToEdit(`/files/${image.path}`, image.path)}
-                  onOpenDetail={() => setSelected(image)}
-                  onRequestDelete={() => setDeleteTarget(image)}
-                  onConfirmDelete={() => void onDelete(image)}
-                  onCancelDelete={() => setDeleteTarget(null)}
-                />
-              )
-            })}
-          </div>}
-        </section>
-        )
-      })}
+                    return (
+                      <ImageGridItem
+                        key={image.path}
+                        image={image}
+                        isSelected={isSelected}
+                        isCursor={isCursor}
+                        isDeleting={isDeleting}
+                        selectMode={selectMode}
+                        thumbWidth={thumbWidth}
+                        deletePending={deleteMutation.isPending}
+                        onImageClick={(e) => {
+                          if (selectMode) {
+                            togglePathSelection(image.path, e.shiftKey)
+                          } else {
+                            setSelected(image)
+                          }
+                        }}
+                        onToggleSelection={(e) => {
+                          e.stopPropagation()
+                          togglePathSelection(image.path, e.shiftKey)
+                        }}
+                        onFavorite={() => favoriteMutation.mutate(image.path)}
+                        onOpenAsRecipe={() => useAsRecipe(image)}
+                        onSendToEdit={() => sendToEdit(`/files/${image.path}`, image.path)}
+                        onOpenDetail={() => setSelected(image)}
+                        onRequestDelete={() => setDeleteTarget(image)}
+                        onConfirmDelete={() => void onDelete(image)}
+                        onCancelDelete={() => setDeleteTarget(null)}
+                      />
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
 
       <ImageDetail
         image={selected}
