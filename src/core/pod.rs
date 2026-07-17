@@ -38,9 +38,14 @@ const POD_RUNTIME_PROFILE: &str = "trainer-cu124";
 /// mirror `runtime_root()/envs/<profile>` and `runtime_root()/ai-toolkit`.
 const POD_RUNTIME_PY: &str = "/root/.modl/runtime/envs/trainer-cu124/bin/python";
 const POD_AITOOLKIT: &str = "/root/.modl/runtime/ai-toolkit";
-/// Default disk for one-shot train pods. `pod up` raises this (persistent
-/// pods accumulate an HF cache across jobs — that's the point).
+/// Disk floor for one-shot train pods. `pod up` raises this (persistent
+/// pods accumulate an HF cache across jobs — that's the point). Both are
+/// floors, not sizes: [`estimate_disk_gb`] raises them per-model so fat
+/// models (flux2-dev, qwen-image) don't fill the disk mid-download.
 pub const POD_DISK_GB: f64 = 80.0;
+/// Disk floor for persistent `pod up` pods — fits the runtime env plus
+/// several fp8 models.
+pub const POD_UP_DISK_GB: f64 = 120.0;
 /// Per-host boot budget without visible progress (status/status_msg frozen).
 /// Duds get destroyed and the next offer is tried, so this can be tight —
 /// good hosts come up in 1-3 minutes.
@@ -646,6 +651,14 @@ pub async fn run_pod_training(spec: TrainJobSpec, opts: PodOptions) -> Result<()
             }
         );
     }
+    if opts.disk_gb > POD_DISK_GB {
+        eprintln!(
+            "{} sizing disk to {:.0}GB for {}",
+            style("→").cyan(),
+            opts.disk_gb,
+            spec.model.base_model_id
+        );
+    }
 
     // Clock starts before provision so the billed boot minutes count toward
     // the estimate (an interactive confirm inflates it slightly — better a
@@ -703,6 +716,31 @@ pub async fn run_pod_training(spec: TrainJobSpec, opts: PodOptions) -> Result<()
     );
 
     result
+}
+
+/// Estimated disk (GB) a pod needs to hold `model_ids`, from models.toml
+/// param counts: bf16 weights are ~2 GB per billion params, times a margin
+/// for HF cache layout and training checkpoints, plus a flat base for the
+/// extracted image + runtime env. Ids that don't resolve to a base model
+/// (LoRAs, other registry items) contribute nothing — they're hundreds of
+/// MB, inside the margin. `None` when nothing resolves.
+pub fn estimate_disk_gb<'a>(model_ids: impl IntoIterator<Item = &'a str>) -> Option<f64> {
+    const BASE_GB: f64 = 50.0;
+    const WEIGHTS_MARGIN: f64 = 1.2;
+    let weights_gb: f64 = model_ids
+        .into_iter()
+        .filter_map(crate::core::model_family::find_model)
+        .map(|m| 2.0 * f64::from(m.total_b))
+        .sum();
+    (weights_gb > 0.0).then(|| (BASE_GB + WEIGHTS_MARGIN * weights_gb).ceil())
+}
+
+/// Disk to provision for a one-shot training pod: sized to the base model
+/// when it's known, never below the flat [`POD_DISK_GB`] floor.
+pub fn disk_gb_for_train(spec: &TrainJobSpec) -> f64 {
+    estimate_disk_gb([spec.model.base_model_id.as_str()])
+        .unwrap_or(POD_DISK_GB)
+        .max(POD_DISK_GB)
 }
 
 /// VRAM floor for a training job, from models.toml. Presets enable
@@ -1355,6 +1393,22 @@ mod tests {
         assert_eq!(back.ssh.host, "ssh5.vast.ai");
         assert_eq!(back.dph_total, 0.19);
         assert_eq!(back.dph_storage, 0.04);
+    }
+
+    #[test]
+    fn disk_estimate_scales_with_model_size() {
+        // flux2-dev is 46B total params → well above the flat floors.
+        let fat = estimate_disk_gb(["flux2-dev"]).unwrap();
+        assert!(fat > POD_UP_DISK_GB, "flux2-dev estimate {fat} too small");
+        // sdxl is tiny — the estimate itself sits below the train floor,
+        // callers clamp with .max(POD_DISK_GB).
+        let small = estimate_disk_gb(["sdxl"]).unwrap();
+        assert!(small < POD_DISK_GB);
+        // Unknown ids (LoRAs, registry items) resolve to nothing.
+        assert!(estimate_disk_gb(["my-custom-lora"]).is_none());
+        // A mixed list only counts the base models.
+        let mixed = estimate_disk_gb(["flux2-dev", "my-custom-lora"]).unwrap();
+        assert_eq!(mixed, fat);
     }
 
     #[test]

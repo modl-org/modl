@@ -456,7 +456,7 @@ fn tool_definitions() -> Value {
                     },
                     "disk": {
                         "type": "number",
-                        "description": "Disk to provision in GB (default 120 — fits the runtime env plus several fp8 models; storage bills hourly on the full amount, so go leaner for single-model sessions)"
+                        "description": "Disk to provision in GB. Omit to auto-size: 120 by default, raised from the `models` list when it names something bigger (e.g. flux2-dev → ~160). Storage bills hourly on the full amount, so only set this explicitly to go leaner for single-small-model sessions."
                     },
                     "models": {
                         "type": "array",
