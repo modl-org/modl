@@ -23,7 +23,7 @@ pub async fn run(id: &str) -> Result<()> {
     }
 
     // 3. Trained LoRA artifact.
-    show_trained_artifact(&db, id)
+    show_trained_artifact(&db, id, &index)
 }
 
 fn show_registry_model(
@@ -452,12 +452,26 @@ fn show_installed_model(model: &crate::core::db::InstalledModel) -> Result<()> {
     Ok(())
 }
 
-fn show_trained_artifact(db: &Database, query: &str) -> Result<()> {
+fn show_trained_artifact(db: &Database, query: &str, index: &RegistryIndex) -> Result<()> {
     let artifact = db.find_artifact(query)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "'{}' not found in registry or trained outputs. Run `modl system update` first?",
-            query
-        )
+        let suggestions = index.suggest(query, 5);
+        if suggestions.is_empty() {
+            anyhow::anyhow!(
+                "'{}' not found in registry or trained outputs. \
+                 If it was added recently, try `modl system update`.",
+                query
+            )
+        } else {
+            let list: Vec<String> = suggestions
+                .iter()
+                .map(|m| format!("  {} — {}", m.id, m.name))
+                .collect();
+            anyhow::anyhow!(
+                "'{}' not found in registry or trained outputs. Did you mean:\n\n{}",
+                query,
+                list.join("\n")
+            )
+        }
     })?;
 
     // Parse metadata JSON

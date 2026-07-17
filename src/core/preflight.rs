@@ -66,15 +66,49 @@ pub fn check_base_model(base_model_id: &str) -> Result<()> {
         return Ok(());
     }
 
+    // Known model (registry or models.toml) that simply isn't installed →
+    // suggest pulling it. Unknown id → it's a typo; suggest close matches
+    // instead of a pull command that would also fail.
+    let known = model_family::resolve_model(base_model_id).is_some()
+        || crate::core::registry::RegistryIndex::load()
+            .map(|i| i.find(base_model_id).is_some())
+            .unwrap_or(false);
+    if known {
+        bail!(
+            "Base model '{}' is not installed.\n\n\
+             Pull it first:\n\n  \
+             modl pull {}\n\n\
+             Or see available models:\n\n  \
+             modl search \"{}\"",
+            base_model_id,
+            base_model_id,
+            base_model_id.split('-').next().unwrap_or(base_model_id)
+        );
+    }
+
+    let mut candidates: Vec<String> = crate::core::registry::RegistryIndex::load()
+        .map(|i| i.items.iter().map(|m| m.id.clone()).collect())
+        .unwrap_or_default();
+    candidates.extend(db.list_installed(None)?.into_iter().map(|m| m.id));
+    let suggestions = crate::core::registry::suggest_from_ids(
+        base_model_id,
+        candidates.iter().map(|s| s.as_str()),
+        5,
+    );
+    if suggestions.is_empty() {
+        bail!(
+            "'{}' is not a known model id.\n\n  \
+             See installed models: modl ls\n  \
+             Search the registry:  modl search \"{}\"",
+            base_model_id,
+            base_model_id
+        );
+    }
     bail!(
-        "Base model '{}' is not installed.\n\n\
-         Pull it first:\n\n  \
-         modl pull {}\n\n\
-         Or see available models:\n\n  \
-         modl search \"{}\"",
+        "'{}' is not a known model id. Did you mean:\n\n  {}\n\n  \
+         See installed models: modl ls",
         base_model_id,
-        base_model_id,
-        base_model_id.split('-').next().unwrap_or(base_model_id)
+        suggestions.join("\n  ")
     )
 }
 

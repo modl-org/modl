@@ -20,6 +20,9 @@ pub enum OutputCommands {
         /// Show only favorited outputs
         #[arg(long, short = 'f')]
         favorites: bool,
+        /// Emit machine-readable JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Show full metadata for an output (prompt, seed, model, params)
     Show {
@@ -90,7 +93,8 @@ pub async fn run(command: OutputCommands) -> Result<()> {
             limit,
             kind,
             favorites,
-        } => run_list(limit, kind.as_deref(), favorites).await,
+            json,
+        } => run_list(limit, kind.as_deref(), favorites, json).await,
         OutputCommands::Show { id } => run_show(&id).await,
         OutputCommands::Open { id } => run_open(&id).await,
         OutputCommands::Search { query, limit } => run_search(&query, limit).await,
@@ -126,13 +130,22 @@ fn run_reconcile() -> Result<()> {
 // List
 // ---------------------------------------------------------------------------
 
-async fn run_list(limit: usize, kind_filter: Option<&str>, favorites_only: bool) -> Result<()> {
+async fn run_list(
+    limit: usize,
+    kind_filter: Option<&str>,
+    favorites_only: bool,
+    json: bool,
+) -> Result<()> {
     let db = Database::open()?;
     let artifacts = db.list_artifacts(None)?;
     // Single query used both for the ⭐ column and the --favorites filter.
     let all_favorites = db.get_favorite_paths()?;
 
     if artifacts.is_empty() {
+        if json {
+            println!("[]");
+            return Ok(());
+        }
         println!("No outputs yet.");
         println!(
             "  Run {} to generate images.",
@@ -158,6 +171,26 @@ async fn run_list(limit: usize, kind_filter: Option<&str>, favorites_only: bool)
         .take(limit)
         .collect();
 
+    if json {
+        let out: Vec<serde_json::Value> = filtered
+            .iter()
+            .map(|artifact| {
+                let summary = artifact_summary(artifact, &db);
+                serde_json::json!({
+                    "id": artifact.artifact_id,
+                    "kind": artifact.kind,
+                    "prompt": summary.prompt_or_name,
+                    "model": summary.model,
+                    "path": artifact.path,
+                    "favorite": all_favorites.contains(&artifact.path),
+                    "created_at": artifact.created_at,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
     if filtered.is_empty() {
         if let Some(k) = kind_filter {
             println!("No outputs of kind '{k}'.");
@@ -178,7 +211,7 @@ async fn run_list(limit: usize, kind_filter: Option<&str>, favorites_only: bool)
     ]);
 
     for artifact in &filtered {
-        let short_id = short_id(&artifact.artifact_id);
+        let short_id = &artifact.artifact_id;
         let summary = artifact_summary(artifact, &db);
         let star = if all_favorites.contains(&artifact.path) {
             "⭐"
@@ -187,7 +220,7 @@ async fn run_list(limit: usize, kind_filter: Option<&str>, favorites_only: bool)
         };
 
         table.add_row(vec![
-            Cell::new(&short_id).fg(Color::Yellow),
+            Cell::new(short_id).fg(Color::Yellow),
             Cell::new(star).fg(Color::Yellow),
             Cell::new(&artifact.kind),
             Cell::new(truncate(&summary.prompt_or_name, 50)),
@@ -455,9 +488,9 @@ async fn run_search(query: &str, limit: usize) -> Result<()> {
     ]);
 
     for (artifact, prompt) in &matching_artifacts {
-        let short = short_id(&artifact.artifact_id);
+        let short = &artifact.artifact_id;
         table.add_row(vec![
-            Cell::new(&short).fg(Color::Yellow),
+            Cell::new(short).fg(Color::Yellow),
             Cell::new(&artifact.kind),
             Cell::new(truncate(prompt, 40)),
             Cell::new(truncate(&artifact.path, 40)),
@@ -484,7 +517,7 @@ async fn run_fav(id: &str, favorited: bool) -> Result<()> {
     let artifact = output_service::find_artifact_by_prefix(id, &db)?;
     let changed = output_service::set_favorite(&artifact.path, favorited)?;
 
-    let short = short_id(&artifact.artifact_id);
+    let short = &artifact.artifact_id;
     if favorited {
         if changed {
             println!(
@@ -523,7 +556,7 @@ async fn run_fav(id: &str, favorited: bool) -> Result<()> {
 async fn run_rm(id: &str, force: bool) -> Result<()> {
     let db = Database::open()?;
     let artifact = output_service::find_artifact_by_prefix(id, &db)?;
-    let short = short_id(&artifact.artifact_id);
+    let short = &artifact.artifact_id;
 
     let path = std::path::Path::new(&artifact.path);
     let filename = path
@@ -682,15 +715,6 @@ async fn run_export(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Return the first 8 chars of an ID for display.
-fn short_id(id: &str) -> String {
-    if id.len() > 12 {
-        id[..12].to_string()
-    } else {
-        id.to_string()
-    }
-}
 
 /// Truncate a string for table display.
 fn truncate(s: &str, max: usize) -> String {
