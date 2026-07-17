@@ -82,8 +82,8 @@ export function GenerateView() {
         )
         if (editModel) {
           updates.base_model_id = editModel.id
-          const info = findModelFamily(editModel.name, families)
-          const defaults = modelDefaults(editModel.name, info)
+          const info = findModelFamily(editModel.id, families)
+          const defaults = modelDefaults(editModel.id, info)
           updates.steps = defaults.steps
           updates.guidance = defaults.guidance
         }
@@ -95,20 +95,20 @@ export function GenerateView() {
           const savedModel = savedId ? models.find((m) => m.id === savedId) : null
           if (savedModel) {
             updates.base_model_id = savedModel.id
-            const info = findModelFamily(savedModel.name, families)
-            const defaults = modelDefaults(savedModel.name, info)
+            const info = findModelFamily(savedModel.id, families)
+            const defaults = modelDefaults(savedModel.id, info)
             updates.steps = defaults.steps
             updates.guidance = defaults.guidance
           } else {
             const fallback = models.find((m) => {
               if (m.model_type !== 'checkpoint' && m.model_type !== 'diffusion_model') return false
-              const info = findModelFamily(m.name, families)
+              const info = findModelFamily(m.id, families)
               return !info || info.capabilities.txt2img
             })
             if (fallback) {
               updates.base_model_id = fallback.id
-              const info = findModelFamily(fallback.name, families)
-              const defaults = modelDefaults(fallback.name, info)
+              const info = findModelFamily(fallback.id, families)
+              const defaults = modelDefaults(fallback.id, info)
               updates.steps = defaults.steps
               updates.guidance = defaults.guidance
             }
@@ -274,7 +274,15 @@ export function GenerateView() {
           {!isEditMode && (
             <CollapsibleSection title="Dimensions">
               <div className="space-y-3">
-                <SizePanel form={form} setForm={setForm} />
+                <SizePanel
+                  form={form}
+                  setForm={setForm}
+                  nativeResolution={
+                    selectedModel
+                      ? modelDefaults(selectedModel.id, findModelFamily(selectedModel.id, families)).resolution
+                      : 1024
+                  }
+                />
                 <BatchPanel form={form} setForm={setForm} />
               </div>
             </CollapsibleSection>
@@ -285,7 +293,7 @@ export function GenerateView() {
               <Img2ImgPanel
                 form={form}
                 setForm={setForm}
-                modelInfo={selectedModel ? findModelFamily(selectedModel.name, families) : null}
+                modelInfo={selectedModel ? findModelFamily(selectedModel.id, families) : null}
               />
             </CollapsibleSection>
           )}

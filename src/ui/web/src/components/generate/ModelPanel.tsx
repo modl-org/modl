@@ -6,7 +6,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import type { InstalledModel, ModelFamily } from '../../api'
-import { modelDefaults, findModelFamily, type GenerateFormState } from './generate-state'
+import { modelDefaults, findModelFamily, detectSizePreset, scaledSizePresets, type GenerateFormState } from './generate-state'
 
 type Props = {
   models: InstalledModel[]
@@ -44,10 +44,25 @@ export function ModelPanel({ models, families, form, setForm, autoDefaults = tru
       const patch: Partial<GenerateFormState> = { base_model_id: modelId }
 
       if (autoDefaults) {
-        const info = findModelFamily(model.name, families)
-        const defaults = modelDefaults(model.name, info)
+        const info = findModelFamily(model.id, families)
+        const defaults = modelDefaults(model.id, info)
         patch.steps = defaults.steps
         patch.guidance = defaults.guidance
+
+        // Re-apply the active size preset at the new model's native
+        // resolution (SD 1.5 is 512-native). Custom sizes are kept as-is.
+        const prevModel = checkpoints.find((m) => m.id === prev.base_model_id)
+        const prevNative = prevModel
+          ? modelDefaults(prevModel.id, findModelFamily(prevModel.id, families)).resolution
+          : 1024
+        const activeLabel = detectSizePreset(prev.width, prev.height, prevNative)
+        if (activeLabel !== 'custom') {
+          const preset = scaledSizePresets(defaults.resolution).find((p) => p.label === activeLabel)
+          if (preset) {
+            patch.width = preset.width
+            patch.height = preset.height
+          }
+        }
       }
 
       return { ...prev, ...patch }
@@ -56,7 +71,7 @@ export function ModelPanel({ models, families, form, setForm, autoDefaults = tru
 
   // Compact trigger label — always a single line regardless of model info
   const selectedCheckpoint = checkpoints.find((m) => m.id === form.base_model_id)
-  const selectedInfo = selectedCheckpoint ? findModelFamily(selectedCheckpoint.name, families) : null
+  const selectedInfo = selectedCheckpoint ? findModelFamily(selectedCheckpoint.id, families) : null
   const triggerLabel = selectedCheckpoint
     ? [selectedCheckpoint.name, selectedCheckpoint.variant, selectedInfo ? `${selectedInfo.total_b}B` : null]
         .filter(Boolean).join(' · ')
@@ -76,7 +91,7 @@ export function ModelPanel({ models, families, form, setForm, autoDefaults = tru
         </SelectTrigger>
         <SelectContent>
           {checkpoints.map((model) => {
-            const info = findModelFamily(model.name, families)
+            const info = findModelFamily(model.id, families)
             const sizeGB = (model.size_bytes / 1024 / 1024 / 1024).toFixed(1)
             const triggerLabel = [
               model.name,

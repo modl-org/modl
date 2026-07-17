@@ -118,7 +118,7 @@ export function LoraPanel({ models, families, form, setForm }: Props) {
 
   // Split into compatible and incompatible
   const compatibleLoras = allLoras.filter((l) =>
-    isLoraCompatible(l, selectedModel?.name ?? '', families),
+    isLoraCompatible(l, selectedModel?.id ?? '', families),
   )
   const loras = compatibleLoras
 
@@ -236,7 +236,7 @@ export function LoraPanel({ models, families, form, setForm }: Props) {
                   <SelectContent>
                     {allLoras.map((model) => {
                       const d = displayName(model.name)
-                      const compatible = isLoraCompatible(model, selectedModel?.name ?? '', families)
+                      const compatible = isLoraCompatible(model, selectedModel?.id ?? '', families)
                       return (
                         <SelectItem key={model.id} value={model.id} disabled={!compatible}>
                           <span className="flex items-center gap-2">

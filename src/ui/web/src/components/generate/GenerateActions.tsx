@@ -160,7 +160,7 @@ function GpuInfoLine({
 
   // Estimate VRAM needed for the selected model
   const selectedModel = models.find((m) => m.id === form.base_model_id)
-  const modelInfo = selectedModel ? findModelFamily(selectedModel.name, families) : null
+  const modelInfo = selectedModel ? findModelFamily(selectedModel.id, families) : null
   const estimateGb = modelInfo
     ? (selectedModel?.variant?.includes('fp8') || selectedModel?.variant?.includes('gguf'))
       ? modelInfo.vram_fp8_gb
