@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { api, type GeneratedImage, type GeneratedOutput } from '../../api'
@@ -41,6 +41,64 @@ export function useGenerateQueue() {
     return items
   }
 
+  // ── Progress event throttling ───────────────────────────────────────
+  // The worker emits log/step events far faster than 60fps, and every
+  // setProgressState re-renders the whole Generate tree. Buffer events in
+  // refs and flush at ~10Hz; terminal events bypass the buffer.
+  const pendingLinesRef = useRef<string[]>([])
+  const pendingStepRef = useRef<{ step: number; totalSteps: number } | null>(null)
+  const flushTimerRef = useRef<number | null>(null)
+
+  const flushProgress = useCallback(() => {
+    flushTimerRef.current = null
+    const lines = pendingLinesRef.current
+    pendingLinesRef.current = []
+    const stepInfo = pendingStepRef.current
+    pendingStepRef.current = null
+    if (lines.length === 0 && !stepInfo) return
+
+    setProgressState((prev) => {
+      if (prev.status !== 'streaming' && prev.status !== 'submitting') return prev
+      const merged =
+        prev.status === 'streaming' ? [...prev.lines, ...lines].slice(-60) : lines.slice(-60)
+      return {
+        status: 'streaming',
+        lines: merged,
+        step: stepInfo?.step ?? (prev.status === 'streaming' ? prev.step : undefined),
+        totalSteps:
+          stepInfo?.totalSteps ?? (prev.status === 'streaming' ? prev.totalSteps : undefined),
+      }
+    })
+    if (stepInfo) {
+      setSessionItems((prev) => {
+        const idx = prev.findIndex((s) => s.status === 'active')
+        if (idx === -1) return prev
+        const updated = [...prev]
+        updated[idx] = { ...updated[idx], step: stepInfo.step, totalSteps: stepInfo.totalSteps }
+        return updated
+      })
+    }
+  }, [])
+
+  const scheduleFlush = useCallback(() => {
+    if (flushTimerRef.current == null) {
+      flushTimerRef.current = window.setTimeout(flushProgress, 100)
+    }
+  }, [flushProgress])
+
+  /** Drop buffered progress — call before terminal states so a stale flush
+   *  can't fire into the next generation's 'submitting' phase. */
+  const resetProgressBuffer = useCallback(() => {
+    pendingLinesRef.current = []
+    pendingStepRef.current = null
+    if (flushTimerRef.current != null) {
+      window.clearTimeout(flushTimerRef.current)
+      flushTimerRef.current = null
+    }
+  }, [])
+
+  useEffect(() => resetProgressBuffer, [resetProgressBuffer])
+
   // ── SSE message handler ─────────────────────────────────────────────
   const handleSSEMessage = useCallback(
     (message: string) => {
@@ -55,6 +113,7 @@ export function useGenerateQueue() {
         const errMsg = message.slice(6).trim() || 'Generation failed.'
         console.error('[generate] server error:', errMsg)
         toast.error(errMsg)
+        resetProgressBuffer()
         setProgressState({ status: 'error', message: errMsg })
         setSessionItems((prev) => {
           const idx = prev.findIndex((s) => s.status === 'active')
@@ -69,6 +128,7 @@ export function useGenerateQueue() {
       // Completion
       if (lower.includes('completed') || lower.includes('done')) {
         const count = expectedCountRef.current
+        resetProgressBuffer()
 
         // Refetch the lightweight recent-outputs strip; the full gallery
         // query is just marked stale and refetches when the tab is viewed.
@@ -111,39 +171,19 @@ export function useGenerateQueue() {
         return
       }
 
-      // Streaming log lines
-      setProgressState((prev) => {
-        if (prev.status !== 'streaming' && prev.status !== 'submitting') return prev
-        const lines = prev.status === 'streaming' ? [...prev.lines.slice(-59), message] : [message]
-        return {
-          status: 'streaming',
-          lines,
-          step: prev.status === 'streaming' ? prev.step : undefined,
-          totalSteps: prev.status === 'streaming' ? prev.totalSteps : undefined,
-        }
-      })
-
-      // Parse structured step progress
+      // Streaming log lines — buffered, flushed at ~10Hz (see flushProgress)
+      pendingLinesRef.current.push(message)
       try {
         const parsed = JSON.parse(message)
         if (parsed.step != null && parsed.total_steps != null) {
-          setProgressState((prev) => {
-            if (prev.status !== 'streaming') return prev
-            return { ...prev, step: parsed.step, totalSteps: parsed.total_steps }
-          })
-          setSessionItems((prev) => {
-            const idx = prev.findIndex((s) => s.status === 'active')
-            if (idx === -1) return prev
-            const updated = [...prev]
-            updated[idx] = { ...updated[idx], step: parsed.step, totalSteps: parsed.total_steps }
-            return updated
-          })
+          pendingStepRef.current = { step: parsed.step, totalSteps: parsed.total_steps }
         }
       } catch {
-        // Not JSON — raw log line, already handled
+        // Not JSON — raw log line, already buffered
       }
+      scheduleFlush()
     },
-    [queryClient],
+    [queryClient, scheduleFlush, resetProgressBuffer],
   )
 
   const handleSSEError = useCallback(() => {
