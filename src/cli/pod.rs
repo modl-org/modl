@@ -306,17 +306,30 @@ pub async fn pull(run_id: String, dest: Option<std::path::PathBuf>, json: bool) 
 
     let (local_dir, artifacts) =
         crate::core::pod_run::export_run(&pod_obj, &run_id, dest.as_deref())?;
-    if json {
-        // Same shape as `run --pod --json` so agents parse one schema.
-        println!(
-            "{}",
-            serde_json::to_string(&serde_json::json!({
-                "status": status,
-                "run_id": run_id,
-                "output_dir": local_dir,
-                "images": artifacts,
-            }))?
+    // Same shape as `run --pod --json` so agents parse one schema.
+    let result = serde_json::json!({
+        "status": status,
+        "run_id": run_id,
+        "output_dir": local_dir,
+        "images": artifacts,
+    });
+    // Record the synced-home marker the MCP tools key on. Without it, a
+    // pulled run still answers job_status/list_run_outputs with "not synced
+    // yet — use pod_pull" (circular), and after `pod rm` becomes a dead end.
+    // Deliberately overwrites a reaper "failed" marker — the artifacts being
+    // home is the truer, terminal answer.
+    let result_path = crate::core::pod_run::run_result_path(&run_id);
+    if let Some(parent) = result_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&result_path, result.to_string()) {
+        eprintln!(
+            "{} Could not record the synced-home marker ({e}) — job_status may still report the run as not synced.",
+            style("⚠").yellow()
         );
+    }
+    if json {
+        println!("{}", serde_json::to_string(&result)?);
     }
     Ok(())
 }
