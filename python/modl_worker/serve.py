@@ -410,6 +410,13 @@ class WorkerDaemon:
         server.bind(str(self.socket_path))
         server.listen(5)
         server.settimeout(1.0)  # Check idle timeout every second
+        # Remember the inode of the socket we bound. A daemon draining an
+        # in-flight job during stop/start can outlive its successor's bind —
+        # shutdown must only unlink files it still owns.
+        try:
+            self._sock_ino = self.socket_path.stat().st_ino
+        except OSError:
+            self._sock_ino = None
 
         print(f"modl worker: listening on {self.socket_path}", file=sys.stderr)
         print(f"modl worker: idle timeout {self.idle_timeout}s, max models {self.cache._max_models}", file=sys.stderr)
@@ -670,14 +677,29 @@ class WorkerDaemon:
             self.socket_path.unlink()
 
     def _shutdown(self, server: socket.socket) -> None:
-        """Clean shutdown: close socket, evict models, remove files."""
+        """Clean shutdown: close socket, evict models, remove files.
+
+        Only removes the socket/pid files if this process still owns them —
+        a successor daemon may have already bound a new socket and written
+        its own pid while we were draining an in-flight job.
+        """
         print("modl worker: shutting down...", file=sys.stderr)
         server.close()
         self.cache.evict_all()
-        if self.socket_path.exists():
-            self.socket_path.unlink()
-        if self.pid_path.exists():
-            self.pid_path.unlink()
+        try:
+            if (
+                self.socket_path.exists()
+                and getattr(self, "_sock_ino", None) is not None
+                and self.socket_path.stat().st_ino == self._sock_ino
+            ):
+                self.socket_path.unlink()
+        except OSError:
+            pass
+        try:
+            if self.pid_path.exists() and self.pid_path.read_text().strip() == str(os.getpid()):
+                self.pid_path.unlink()
+        except OSError:
+            pass
         print(f"modl worker: served {self._jobs_served} job(s), goodbye", file=sys.stderr)
         if getattr(self, "_log_file", None) is not None:
             self._log_file.close()

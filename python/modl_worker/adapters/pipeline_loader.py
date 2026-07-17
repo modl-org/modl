@@ -449,6 +449,104 @@ def _load_component_fallback(
     return model.to(get_inference_dtype())
 
 
+def _normalize_te_state_dict(state_dict: dict, model, filename: str, emitter):
+    """Normalize a single-file text-encoder state dict to the model's keys.
+
+    Handles the zoo of community text-encoder layouts:
+      - "model."-prefixed keys (ComfyUI ForConditionalGeneration-style)
+      - ComfyUI Qwen3-VL files, which put the language model at
+        "model.layers.*" instead of "language_model.layers.*"
+      - ComfyUI scaled-fp8 quantization: ".weight_scale" scalars are applied
+        and the Linear weights re-cast to fp8 so they stay quantized on GPU
+        (compute runs in bf16 via ``_prepare_fp8_model`` hooks);
+        ".comfy_quant" metadata blobs are dropped.
+
+    Raises when fewer than 90% of the model's keys are covered — with
+    ``load_state_dict(strict=False)`` a silent partial load leaves the model
+    on random init weights and produces garbage output.
+
+    Returns ``(state_dict, kept_fp8)``.
+    """
+    import torch
+
+    model_keys = set(model.state_dict().keys())
+
+    state_dict = {
+        k: v for k, v in state_dict.items() if not k.endswith(".comfy_quant")
+    }
+
+    kept_fp8 = False
+    scale_keys = [k for k in state_dict if k.endswith(".weight_scale")]
+    for sk in scale_keys:
+        wk = sk.removesuffix("_scale")
+        w = state_dict.get(wk)
+        if w is not None and w.dtype == torch.float8_e4m3fn:
+            state_dict[wk] = (w.float() * state_dict[sk].float()).to(
+                torch.float8_e4m3fn
+            )
+            kept_fp8 = True
+        del state_dict[sk]
+
+    def overlap(sd):
+        return len(model_keys & sd.keys()) / max(len(model_keys), 1)
+
+    def strip_model(sd):
+        return {k.removeprefix("model."): v for k, v in sd.items()}
+
+    def qwen3vl_comfy(sd):
+        out = {}
+        for k, v in sd.items():
+            k = k.removeprefix("model.")
+            if k.startswith(("layers.", "embed_tokens.", "norm.")):
+                k = "language_model." + k
+            out[k] = v
+        return out
+
+    best = state_dict
+    for transform in (lambda sd: sd, strip_model, qwen3vl_comfy):
+        candidate = transform(state_dict)
+        if overlap(candidate) >= 0.9:
+            best = candidate
+            break
+        if overlap(candidate) > overlap(best):
+            best = candidate
+
+    coverage = overlap(best)
+    if coverage < 0.9:
+        raise RuntimeError(
+            f"text encoder weights mismatch: only {coverage:.0%} of model keys "
+            f"found in {filename} — the file is in an unsupported key format. "
+            f"Loading it would leave the model with random weights and produce "
+            f"garbage output. Re-install with `modl pull` to get compatible "
+            f"weights."
+        )
+    if kept_fp8:
+        emitter.info(
+            f"  → Applied {len(scale_keys)} fp8 weight scales (weights stay fp8)"
+        )
+    return best, kept_fp8
+
+
+def _cast_non_fp8_to_dtype(model, dtype):
+    """Cast every non-fp8 floating param/buffer to *dtype* in place.
+
+    The blanket ``model.to(dtype)`` used for full-precision text encoders
+    would upcast fp8 Linear weights and destroy the VRAM saving — this is
+    the fp8-preserving equivalent.
+    """
+    import torch
+
+    for module in model.modules():
+        for name, p in list(module._parameters.items()):
+            if p is not None and p.is_floating_point() and p.dtype != torch.float8_e4m3fn:
+                module._parameters[name] = torch.nn.Parameter(
+                    p.to(dtype), requires_grad=False
+                )
+        for name, b in list(module._buffers.items()):
+            if b is not None and b.is_floating_point() and b.dtype != torch.float8_e4m3fn:
+                module._buffers[name] = b.to(dtype)
+
+
 def _load_safetensors_lenient(filepath: str) -> dict:
     """Load a safetensors file, tolerating trailing data beyond the header coverage.
 
@@ -808,17 +906,29 @@ def assemble_pipeline(
                 )
                 components[param_name] = model
             else:
-                # Transformers models (CLIP, T5) — use empty weights to
-                # avoid ~44GB fp32 allocation for large models like T5-XXL
+                # Transformers models (CLIP, T5, Qwen3-VL) — use empty weights
+                # to avoid ~44GB fp32 allocation for large models like T5-XXL
                 config_obj = ModelClass.config_class.from_pretrained(str(config_dir))
                 with init_empty_weights():
                     model = ModelClass(config_obj)
                 state_dict = safetensors.torch.load_file(resolved_path)
+                state_dict, kept_fp8 = _normalize_te_state_dict(
+                    state_dict, model, filename, emitter,
+                )
                 model.load_state_dict(state_dict, strict=False, assign=True)
                 _materialize_meta_tensors(model)
-                # Always cast text encoders to inference dtype for numerical stability.
-                # fp8 text encoders produce unreliable embeddings.
-                model = model.to(get_inference_dtype())
+                if kept_fp8:
+                    # Scaled-fp8 file: Linear weights stay fp8 on GPU, compute
+                    # in bf16 via hooks (same trick as the fp8 transformer).
+                    _cast_non_fp8_to_dtype(model, get_inference_dtype())
+                    hook_count, _ = _prepare_fp8_model(model)
+                    emitter.info(
+                        f"  → fp8 text encoder: {hook_count} Linear layers hooked"
+                    )
+                else:
+                    # Always cast text encoders to inference dtype for numerical
+                    # stability. Unscaled fp8 embeddings are unreliable.
+                    model = model.to(get_inference_dtype())
                 components[param_name] = model
         else:
             emitter.info(f"Skipping {param_name} (no weights found)")

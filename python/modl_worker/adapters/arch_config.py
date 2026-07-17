@@ -564,7 +564,7 @@ ARCH_CONFIGS: dict[str, dict] = {
                 "config_dir": "krea2-turbo-transformer",
             },
             "text_encoder": {
-                "model_id": "krea2-qwen3-vl-4b-text-encoder",
+                "model_id": ["krea2-qwen3-vl-4b-text-encoder-fp8", "krea2-qwen3-vl-4b-text-encoder"],
                 "model_class": "Qwen3VLModel",
                 "config_dir": "qwen3-vl-4b",
             },
