@@ -145,14 +145,31 @@ class ModelCache:
             # Check for exact mode match in cache
             if key in self._cache:
                 cached = self._cache[key]
-                cached.last_used = time.time()
-                emitter.info(f"Model cache HIT: {base_model_id} mode={mode} (loaded {self._ago(cached.loaded_at)})")
-                self._reconcile_lora(cached, spec, emitter)
-                return cached.pipeline, cached.cls_name
+                # A pipeline with an irreversibly-fused LoRA (krea2: fused +
+                # adapter unloaded to fit VRAM) can't hot-swap — unfuse would
+                # be a no-op and leave the base contaminated. If the requested
+                # LoRA differs, drop the entry and fall through to a reload.
+                if self._must_reload_for_lora(cached, spec):
+                    emitter.info(
+                        f"Cache DROP: {base_model_id} mode={mode} — "
+                        "LoRA change on an irreversibly-fused pipeline needs a reload"
+                    )
+                    self._drop(key, emitter)
+                else:
+                    cached.last_used = time.time()
+                    emitter.info(f"Model cache HIT: {base_model_id} mode={mode} (loaded {self._ago(cached.loaded_at)})")
+                    self._reconcile_lora(cached, spec, emitter)
+                    return cached.pipeline, cached.cls_name
 
             # If we need img2img/inpaint but have the base txt2img cached,
-            # use from_pipe() to create the mode variant (shares weights, ~0ms)
-            if mode != "txt2img" and base_key in self._cache:
+            # use from_pipe() to create the mode variant (shares weights, ~0ms).
+            # Skip this reuse if the base is irreversibly fused and the LoRA
+            # differs — the mode variant would inherit the wrong fused weights.
+            if (
+                mode != "txt2img"
+                and base_key in self._cache
+                and not self._must_reload_for_lora(self._cache[base_key], spec)
+            ):
                 base_cached = self._cache[base_key]
                 base_cached.last_used = time.time()
                 target_cls_name = resolve_pipeline_class_for_mode(base_model_id, mode)
@@ -298,6 +315,31 @@ class ModelCache:
                 self._utility_order.clear()
             gc.collect()
             torch.cuda.empty_cache()
+
+    def _must_reload_for_lora(self, cached: CachedPipeline, spec: dict) -> bool:
+        """True if the cached pipeline was irreversibly fused (krea2) and the
+        requested LoRA differs — a reload is the only correct option."""
+        if not getattr(cached.pipeline, "_modl_lora_fused_irreversible", False):
+            return False
+        lora_info = spec.get("lora")
+        requested_lora = lora_info.get("path") if lora_info else None
+        requested_weight = lora_info.get("weight", 1.0) if lora_info else 0.0
+        return not (cached.lora_id == requested_lora and cached.lora_weight == requested_weight)
+
+    def _drop(self, key: "CacheKey", emitter: EventEmitter) -> None:
+        """Evict a single cache entry and free its VRAM."""
+        import gc
+        import torch
+
+        cached = self._cache.pop(key, None)
+        if cached is None:
+            return
+        try:
+            del cached.pipeline
+        except Exception:
+            pass
+        gc.collect()
+        torch.cuda.empty_cache()
 
     def _reconcile_lora(self, cached: CachedPipeline, spec: dict, emitter: EventEmitter) -> None:
         """Hot-swap LoRA if the base model matches but LoRA changed."""

@@ -350,6 +350,11 @@ def load_lora_with_conversion(
             pipeline.fuse_lora(adapter_names=["default"], lora_scale=lora_weight)
             pipeline.unload_lora_weights()
             _apply_deferred_fp8_casting(pipeline, emitter)
+            # Mark the fuse as irreversible: we unloaded the adapter (to fit
+            # 24GB), so a later unfuse_lora() is a no-op and would leave the
+            # base contaminated. The persistent worker checks this to force a
+            # full reload instead of an in-place LoRA swap.
+            pipeline._modl_lora_fused_irreversible = True
             if emitter:
                 emitter.info(f"  → Fused krea2 LoRA at strength {lora_weight}")
             return True
