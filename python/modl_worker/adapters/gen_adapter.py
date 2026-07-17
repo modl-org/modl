@@ -411,12 +411,28 @@ def run_generate_with_pipeline(
             result = pipe(**gen_kwargs)
             image = result.images[0]
         except Exception as exc:
-            emitter.error(
-                "GENERATION_FAILED",
-                f"Generation failed on image {i + 1}/{count}: {exc}",
-                recoverable=(i + 1 < count),
-            )
-            continue
+            # A resident-placed pipeline can OOM on denoise transients the
+            # placement estimate missed. Demote to cpu offload and retry the
+            # image once instead of failing the job.
+            from modl_worker.device import demote_pipe_to_offload
+            if demote_pipe_to_offload(pipe, exc, emitter):
+                try:
+                    result = pipe(**gen_kwargs)
+                    image = result.images[0]
+                except Exception as exc2:
+                    emitter.error(
+                        "GENERATION_FAILED",
+                        f"Generation failed on image {i + 1}/{count}: {exc2}",
+                        recoverable=(i + 1 < count),
+                    )
+                    continue
+            else:
+                emitter.error(
+                    "GENERATION_FAILED",
+                    f"Generation failed on image {i + 1}/{count}: {exc}",
+                    recoverable=(i + 1 < count),
+                )
+                continue
 
         elapsed = time.time() - t0
 

@@ -100,11 +100,14 @@ def _has_accelerate_hooks(pipe) -> bool:
 
 # Headroom for activations, per-layer dtype-cast transients, VAE decode and
 # CUDA context when deciding whether a pipeline can live fully resident.
-# Calibrated on Krea 2 Turbo (fp8, 18.4GB weights): denoise transients
-# measured ~7GB over weights (~38%) — layerwise-cast bf16 compute buffers
-# dominate. 35% of weights with a 6GB floor keeps the decision honest.
-_RESIDENT_RESERVE_FLOOR_BYTES = 6 * 1024**3
-_RESIDENT_RESERVE_WEIGHT_FRACTION = 0.35
+# Calibrated on Krea 2 Turbo (fp8, 17.4GiB weights): denoise transients
+# measured ≥8GB over weights (layerwise-cast bf16 compute buffers dominate)
+# — and a borderline pass promoted it straight into an OOM. 50% of weights
+# with an 8GB floor plus a 5% free-VRAM margin keeps the decision solidly
+# conservative; a wrong promote is additionally self-healed at runtime by
+# ``demote_pipe_to_offload``.
+_RESIDENT_RESERVE_FLOOR_BYTES = 8 * 1024**3
+_RESIDENT_RESERVE_WEIGHT_FRACTION = 0.50
 
 
 def rebalance_pipe_placement(pipe, emitter=None) -> None:
@@ -133,7 +136,7 @@ def rebalance_pipe_placement(pipe, emitter=None) -> None:
         int(weight_bytes * _RESIDENT_RESERVE_WEIGHT_FRACTION),
     )
     needed = weight_bytes + reserve
-    if needed > free_bytes:
+    if needed > int(free_bytes * 0.95):
         if emitter:
             emitter.info(
                 f"  → Keeping cpu offload: {weight_bytes / 1024**3:.1f}GB weights "
@@ -154,6 +157,33 @@ def rebalance_pipe_placement(pipe, emitter=None) -> None:
         pipe.enable_model_cpu_offload()
         if emitter:
             emitter.info("  → Resident placement OOMed, reverting to cpu offload")
+
+
+def demote_pipe_to_offload(pipe, exc, emitter=None) -> bool:
+    """Demote a resident pipeline back to cpu offload after a CUDA OOM.
+
+    Runtime safety net for ``rebalance_pipe_placement``: if a promoted
+    pipeline OOMs on denoise transients the placement estimate missed,
+    re-enable offload so the job can retry instead of failing.
+
+    Returns True if a retry makes sense (the pipeline was resident and has
+    been demoted), False otherwise (not an OOM, or already offloaded).
+    """
+    if not isinstance(exc, torch.cuda.OutOfMemoryError):
+        return False
+    if get_device() != "cuda":
+        return False
+    if _has_accelerate_hooks(pipe):
+        return False  # already offloaded — a retry would just OOM again
+
+    torch.cuda.empty_cache()
+    pipe.enable_model_cpu_offload()
+    torch.cuda.empty_cache()
+    if emitter:
+        emitter.info(
+            "  → OOM while fully resident — demoted to cpu offload, retrying"
+        )
+    return True
 
 
 def empty_cache():
