@@ -483,6 +483,15 @@ pub fn model_defaults(model_id: &str) -> (u32, f32) {
     }
 }
 
+/// Native (default) resolution for a model, from models.toml.
+/// Models like SD 1.5 are 512-native — generating at 1024 distorts anatomy.
+pub fn default_resolution(model_id: &str) -> u32 {
+    match resolve_model(model_id) {
+        Some(m) => m.default_resolution,
+        None => 1024,
+    }
+}
+
 #[allow(dead_code)]
 pub fn models_with_capability(capability: &str) -> Vec<&'static ModelInfo> {
     PARSED

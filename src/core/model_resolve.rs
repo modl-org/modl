@@ -78,6 +78,28 @@ pub const SIZE_PRESETS: &[(&str, u32, u32)] = &[
     ("3:4", 896, 1152),
 ];
 
+/// Resolve a size preset string to (width, height), scaled to a model's
+/// native resolution. Presets are defined at 1024-native; a 512-native model
+/// (SD 1.5) gets 1:1 → 512×512, 16:9 → 704×384, etc. Explicit WxH is used
+/// as-is — the user asked for those exact dimensions.
+pub fn resolve_size_for_model(size: &str, native_resolution: u32) -> Result<(u32, u32)> {
+    for &(name, w, h) in SIZE_PRESETS {
+        if size == name {
+            return Ok((
+                scale_to_native(w, native_resolution),
+                scale_to_native(h, native_resolution),
+            ));
+        }
+    }
+    resolve_size(size)
+}
+
+/// Scale a 1024-reference dimension to a model's native resolution,
+/// snapped to the nearest multiple of 64 (UNet/DiT dimension constraint).
+fn scale_to_native(dim: u32, native: u32) -> u32 {
+    (((dim * native / 1024) + 32) / 64).max(1) * 64
+}
+
 /// Resolve a size preset string to (width, height).
 pub fn resolve_size(size: &str) -> Result<(u32, u32)> {
     for &(name, w, h) in SIZE_PRESETS {

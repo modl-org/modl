@@ -975,7 +975,11 @@ pub async fn execute_plan(
         match &step.kind {
             StepKind::Generate(g) => {
                 let gen_inputs = resolve_generate_inputs(g, &step_outputs, &step.id)?;
-                print_generate_preview(g, sub_jobs.len());
+                print_generate_preview(
+                    g,
+                    sub_jobs.len(),
+                    model_family::default_resolution(effective_model_key),
+                );
                 for (sub_idx, (seed, count)) in sub_jobs.iter().enumerate() {
                     // Skip sub-jobs already in the completion index (default behaviour).
                     // Random-seed sub-jobs (seed == None) are never skipped.
@@ -1387,8 +1391,9 @@ fn print_plan_human(plan: &Plan, in_order: bool) {
 
         match &step.kind {
             StepKind::Generate(g) => {
-                let width = g.width.unwrap_or(1024);
-                let height = g.height.unwrap_or(1024);
+                let native = model_family::default_resolution(&planned.resolved_model.id);
+                let width = g.width.unwrap_or(native);
+                let height = g.height.unwrap_or(native);
                 let steps = g.steps.unwrap_or(default_steps);
                 let guidance = g.guidance.unwrap_or(default_guidance);
                 let seed_desc = if let Some(ref seeds) = g.seeds {
@@ -1501,8 +1506,12 @@ fn print_plan_json(plan: &Plan, in_order: bool) -> Result<()> {
                     seed: g.seed,
                     seeds: g.seeds.clone(),
                     effective: EffectiveJson {
-                        width: g.width.unwrap_or(1024),
-                        height: g.height.unwrap_or(1024),
+                        width: g.width.unwrap_or_else(|| {
+                            model_family::default_resolution(&planned.resolved_model.id)
+                        }),
+                        height: g.height.unwrap_or_else(|| {
+                            model_family::default_resolution(&planned.resolved_model.id)
+                        }),
                         steps: g.steps.unwrap_or(default_steps),
                         guidance: g.guidance.unwrap_or(default_guidance),
                         count: g.count.unwrap_or(1),
@@ -1803,8 +1812,9 @@ fn build_generate_spec(
         .guidance
         .or(lightning.map(|l| l.guidance))
         .unwrap_or(default_guidance);
-    let width = step.width.unwrap_or(1024);
-    let height = step.height.unwrap_or(1024);
+    let native_resolution = model_family::default_resolution(wf_model);
+    let width = step.width.unwrap_or(native_resolution);
+    let height = step.height.unwrap_or(native_resolution);
 
     GenerateJobSpec {
         prompt: step.prompt.clone(),
@@ -2121,10 +2131,10 @@ fn step_kind_label(kind: &StepKind) -> &'static str {
     }
 }
 
-fn print_generate_preview(step: &GenerateStep, sub_job_count: usize) {
+fn print_generate_preview(step: &GenerateStep, sub_job_count: usize, native_resolution: u32) {
     println!("  Prompt: {}", style(&step.prompt).italic());
-    let width = step.width.unwrap_or(1024);
-    let height = step.height.unwrap_or(1024);
+    let width = step.width.unwrap_or(native_resolution);
+    let height = step.height.unwrap_or(native_resolution);
     println!("  Size:   {}×{}", width, height);
     if let Some(ref seeds) = step.seeds {
         println!(
