@@ -57,7 +57,15 @@ pub struct Instance {
     pub gpu_name: String,
     pub ssh_host: Option<String>,
     pub ssh_port: Option<u16>,
+    /// ALL-IN hourly rate (gpu + storage). Field-name trap: on the
+    /// *instances* endpoint `dph_total = dph_base + storage`, while on the
+    /// *offers* endpoint `dph_total` is the GPU rate alone (storage is
+    /// priced separately per GB/month). Verified live 2026-07-17: offer
+    /// quoted $0.169, same instance reported $0.207.
     pub dph_total: f64,
+    /// GPU-only hourly rate — the value comparable to an offer's
+    /// `dph_total`. 0.0 when the API omits it.
+    pub dph_base: f64,
     pub label: Option<String>,
 }
 
@@ -350,6 +358,7 @@ fn parse_instance(inst: &serde_json::Value, fallback_id: u64) -> Result<Instance
         ssh_host: Option<String>,
         ssh_port: Option<u16>,
         dph_total: Option<f64>,
+        dph_base: Option<f64>,
         label: Option<String>,
     }
     let raw: Raw = serde_json::from_value(inst.clone())
@@ -362,6 +371,7 @@ fn parse_instance(inst: &serde_json::Value, fallback_id: u64) -> Result<Instance
         ssh_host: raw.ssh_host,
         ssh_port: raw.ssh_port,
         dph_total: raw.dph_total.unwrap_or(0.0),
+        dph_base: raw.dph_base.unwrap_or(0.0),
         label: raw.label,
     })
 }
@@ -423,18 +433,22 @@ mod tests {
         let single = serde_json::json!({
             "id": 12345, "actual_status": "running", "gpu_name": "RTX 4090",
             "ssh_host": "ssh4.vast.ai", "ssh_port": 22222, "dph_total": 0.44,
-            "label": "modl-pod-train"
+            "dph_base": 0.40, "label": "modl-pod-train"
         });
         let inst = parse_instance(&single, 0).unwrap();
         assert_eq!(inst.id, 12345);
         assert_eq!(inst.ssh_port, Some(22222));
         assert_eq!(inst.actual_status, "running");
+        // Instances report dph_total ALL-IN; dph_base is the GPU-only rate.
+        assert!((inst.dph_total - 0.44).abs() < 1e-9);
+        assert!((inst.dph_base - 0.40).abs() < 1e-9);
 
         // Missing optional fields
         let sparse = serde_json::json!({"actual_status": "loading"});
         let inst = parse_instance(&sparse, 777).unwrap();
         assert_eq!(inst.id, 777);
         assert!(inst.ssh_host.is_none());
+        assert_eq!(inst.dph_base, 0.0);
     }
 
     fn offer_with(dph: f64, storage: f64, inet_down: f64, dlperf: f64) -> Offer {

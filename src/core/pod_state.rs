@@ -210,8 +210,13 @@ pub async fn active_pod() -> Result<Option<PodRecord>> {
             if !inst.gpu_name.is_empty() {
                 rec.gpu_name = inst.gpu_name.clone();
             }
-            if inst.dph_total > 0.0 {
-                rec.dph_total = inst.dph_total;
+            // Refresh the GPU rate from `dph_base`, never `dph_total`: the
+            // instances endpoint's dph_total is ALL-IN (base + storage), so
+            // writing it into rec.dph_total would double-count storage in
+            // every dph_all_in() display after the first reconcile
+            // (observed live: $0.169 offer became a $0.247 "all-in" line).
+            if inst.dph_base > 0.0 {
+                rec.dph_total = inst.dph_base;
             }
         }
     }
