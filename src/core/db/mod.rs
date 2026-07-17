@@ -7,7 +7,7 @@ mod sessions;
 mod training_queue;
 
 pub use artifacts::ArtifactRecord;
-pub use jobs::JobRecord;
+pub use jobs::{JobRecord, RunSummary};
 pub use lora_library::LibraryLoraRecord;
 pub use models::{InstalledModel, InstalledModelRecord};
 

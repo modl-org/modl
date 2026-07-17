@@ -806,19 +806,18 @@ pub fn find_artifact_by_prefix(prefix: &str, db: &Database) -> Result<ArtifactRe
         0 => bail!("No output found matching '{prefix}'."),
         1 => Ok(matches.into_iter().next().unwrap()),
         n => {
-            let ids: Vec<_> = matches
-                .iter()
-                .map(|a| {
-                    if a.artifact_id.len() > 12 {
-                        a.artifact_id[..12].to_string()
-                    } else {
-                        a.artifact_id.clone()
-                    }
-                })
-                .collect();
+            let mut ids: Vec<_> = matches.iter().map(|a| a.artifact_id.clone()).collect();
+            ids.sort();
+            ids.dedup();
+            let shown = ids.len().min(10);
+            let more = if ids.len() > shown {
+                format!(" (+{} more)", ids.len() - shown)
+            } else {
+                String::new()
+            };
             bail!(
-                "Ambiguous ID '{prefix}' matches {n} outputs: {}. Be more specific.",
-                ids.join(", ")
+                "Ambiguous ID '{prefix}' matches {n} outputs:\n  {}{more}",
+                ids[..shown].join("\n  ")
             );
         }
     }

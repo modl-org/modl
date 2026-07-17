@@ -16,7 +16,17 @@ pub async fn run(id: &str, force: bool) -> Result<()> {
     }
 
     if !db.is_installed(id)? {
-        anyhow::bail!("'{}' is not installed.", id);
+        let installed = db.list_installed(None)?;
+        let suggestions =
+            crate::core::registry::suggest_from_ids(id, installed.iter().map(|m| m.id.as_str()), 5);
+        if suggestions.is_empty() {
+            anyhow::bail!("'{}' is not installed. See installed models: modl ls", id);
+        }
+        anyhow::bail!(
+            "'{}' is not installed. Did you mean:\n\n  {}",
+            id,
+            suggestions.join("\n  ")
+        );
     }
 
     // Check for dependents (items that depend on this one)

@@ -189,6 +189,38 @@ impl Database {
             .context("Failed to collect job results")
     }
 
+    /// Summarize recent workflow runs (newest first): per-run step counts by
+    /// status, for the no-arg `modl status` listing.
+    pub fn list_recent_runs(&self, limit: usize) -> Result<Vec<RunSummary>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT workflow_run_id, COUNT(*), \
+                        SUM(status = 'completed'), SUM(status = 'error'), \
+                        SUM(status = 'running'), SUM(status = 'cancelled'), \
+                        MIN(created_at) \
+                 FROM jobs WHERE workflow_run_id IS NOT NULL \
+                 GROUP BY workflow_run_id \
+                 ORDER BY MIN(created_at) DESC LIMIT ?1",
+            )
+            .context("Failed to prepare recent-runs query")?;
+        let rows = stmt
+            .query_map(params![limit as i64], |row| {
+                Ok(RunSummary {
+                    run_id: row.get(0)?,
+                    total: row.get::<_, i64>(1)? as usize,
+                    completed: row.get::<_, i64>(2)? as usize,
+                    failed: row.get::<_, i64>(3)? as usize,
+                    running: row.get::<_, i64>(4)? as usize,
+                    cancelled: row.get::<_, i64>(5)? as usize,
+                    started_at: row.get(6)?,
+                })
+            })
+            .context("Failed to query recent runs")?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("Failed to collect recent runs")
+    }
+
     /// Count total jobs in the database.
     pub fn count_jobs(&self) -> Result<usize> {
         let count: i64 = self
@@ -208,6 +240,18 @@ impl Database {
             .context("Failed to insert job event")?;
         Ok(())
     }
+}
+
+/// Aggregate summary of one workflow run, from `list_recent_runs`.
+#[derive(Debug, Clone)]
+pub struct RunSummary {
+    pub run_id: String,
+    pub total: usize,
+    pub completed: usize,
+    pub failed: usize,
+    pub running: usize,
+    pub cancelled: usize,
+    pub started_at: String,
 }
 
 #[derive(Debug)]

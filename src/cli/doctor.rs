@@ -67,7 +67,7 @@ pub async fn run(verify_hashes: bool, repair: bool) -> Result<()> {
             );
             println!(
                 "    Fix: {}",
-                style(format!("modl uninstall {} && modl install {}", m.id, m.id)).cyan()
+                style(format!("modl rm {} && modl pull {}", m.id, m.id)).cyan()
             );
             issues += 1;
             store_ok = false;
@@ -173,8 +173,7 @@ pub async fn run(verify_hashes: bool, repair: bool) -> Result<()> {
                         );
                         println!(
                             "    Fix: {}",
-                            style(format!("modl uninstall {} && modl install {}", m.id, m.id))
-                                .cyan()
+                            style(format!("modl rm {} && modl pull {}", m.id, m.id)).cyan()
                         );
                         hash_issues += 1;
                     }

@@ -149,7 +149,7 @@ pub struct InstalledModelRecord<'a> {
     pub store_path: &'a str,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct InstalledModel {
     pub id: String,
     pub name: String,

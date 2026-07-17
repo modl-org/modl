@@ -955,7 +955,7 @@ pub enum Commands {
 
     // ── Model Management ─────────────────────────────────────────────
     /// Download models from registry, HuggingFace (hf:), CivitAI (civitai:), or hub (user/slug)
-    #[command(after_help = MODEL_PULL_EXAMPLES)]
+    #[command(after_help = MODEL_PULL_EXAMPLES, alias = "install")]
     Pull {
         /// Registry ID (e.g. flux-dev) or HuggingFace repo (hf:owner/model)
         id: String,
@@ -1041,9 +1041,13 @@ pub enum Commands {
         /// Show all items including internal dependencies (VAEs, text encoders, etc.)
         #[arg(long, short = 'a')]
         all: bool,
+        /// Emit machine-readable JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Remove an installed model
+    #[command(alias = "uninstall")]
     Rm {
         /// Model ID to remove
         id: String,
@@ -1298,8 +1302,9 @@ See `modl/docs/guides/workflows.md` for the full reference.")]
     ///   modl status 20240101-120000-my-workflow
     ///   MODL_BASE_URL=http://server:3939 modl status <run-id> --json
     Status {
-        /// Workflow run ID (from `modl run` output or MCP run_workflow response)
-        run_id: String,
+        /// Workflow run ID (from `modl run` output or MCP run_workflow
+        /// response). Omit to list recent runs.
+        run_id: Option<String>,
         /// Emit machine-readable JSON
         #[arg(long)]
         json: bool,
@@ -1611,11 +1616,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             r#type,
             summary,
             all,
+            json,
         } => {
             if summary {
                 space::run(all).await
             } else {
-                list::run(r#type, all).await
+                list::run(r#type, all, json).await
             }
         }
         Commands::Rm { id, force } => uninstall::run(&id, force).await,
@@ -1741,7 +1747,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
-        Commands::Status { run_id, json, pod } => run_status::run(&run_id, json, pod).await,
+        Commands::Status { run_id, json, pod } => {
+            run_status::run(run_id.as_deref(), json, pod).await
+        }
 
         // ── Hidden ───────────────────────────────────────────────────
         Commands::Init { defaults, root } => init::run(defaults, root.as_deref()).await,

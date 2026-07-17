@@ -3,7 +3,10 @@ use console::style;
 
 use crate::core::db::Database;
 
-pub async fn run(run_id: &str, json: bool, pod: bool) -> Result<()> {
+pub async fn run(run_id: Option<&str>, json: bool, pod: bool) -> Result<()> {
+    let Some(run_id) = run_id else {
+        return list_recent_runs(json);
+    };
     if pod {
         return run_on_pod(run_id, json).await;
     }
@@ -140,6 +143,80 @@ pub async fn run(run_id: &str, json: bool, pod: bool) -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+/// No-arg `modl status` — list recent workflow runs so run IDs are
+/// discoverable without spelunking `~/.modl/run-logs/`.
+fn list_recent_runs(json: bool) -> Result<()> {
+    let db = Database::open()?;
+    let runs = db.list_recent_runs(20)?;
+
+    if runs.is_empty() {
+        if json {
+            println!("[]");
+        } else {
+            println!("No workflow runs yet. Start one with: modl run <workflow.yaml>");
+        }
+        return Ok(());
+    }
+
+    let aggregate = |r: &crate::core::db::RunSummary| -> &'static str {
+        let is_terminal = r.running == 0 && r.completed + r.failed + r.cancelled == r.total;
+        if r.failed > 0 && is_terminal {
+            "partial_failure"
+        } else if r.running > 0 {
+            "running"
+        } else if r.completed == r.total {
+            "completed"
+        } else if r.cancelled > 0 && is_terminal {
+            "cancelled"
+        } else {
+            "pending"
+        }
+    };
+
+    if json {
+        let out: Vec<serde_json::Value> = runs
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "run_id": r.run_id,
+                    "status": aggregate(r),
+                    "steps": { "total": r.total, "completed": r.completed,
+                               "failed": r.failed, "running": r.running,
+                               "cancelled": r.cancelled },
+                    "started_at": r.started_at,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    println!("Recent workflow runs:\n");
+    for r in &runs {
+        let status = aggregate(r);
+        let status_styled = match status {
+            "completed" => style(status).green(),
+            "running" => style(status).cyan(),
+            "partial_failure" | "cancelled" => style(status).red(),
+            _ => style(status).yellow(),
+        };
+        println!(
+            "  {}  {:<16} {}/{} steps  {}",
+            style(&r.run_id).bold(),
+            status_styled,
+            r.completed,
+            r.total,
+            style(&r.started_at).dim()
+        );
+    }
+    println!(
+        "\n  {} runs shown. Use {} for details.",
+        runs.len(),
+        style("modl status <run-id>").cyan()
+    );
     Ok(())
 }
 

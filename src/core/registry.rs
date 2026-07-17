@@ -214,6 +214,32 @@ impl RegistryIndex {
     }
 }
 
+/// Suggest the closest matches to `query` from arbitrary candidate ids —
+/// same matching rules as `RegistryIndex::suggest` (substring first, then
+/// edit distance). Used for did-you-mean hints on `info`, `rm`, and
+/// generate/edit base-model resolution.
+pub fn suggest_from_ids<'a, I>(query: &str, ids: I, max: usize) -> Vec<String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let q = query.to_lowercase();
+    let mut candidates: Vec<(String, usize)> = ids
+        .into_iter()
+        .filter_map(|id| {
+            let lower = id.to_lowercase();
+            let dist = edit_distance(&q, &lower);
+            if lower.contains(&q) || q.contains(&lower) || dist <= q.len().max(3) / 2 {
+                Some((id.to_string(), dist))
+            } else {
+                None
+            }
+        })
+        .collect();
+    candidates.sort_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
+    candidates.dedup_by(|a, b| a.0 == b.0);
+    candidates.into_iter().take(max).map(|(id, _)| id).collect()
+}
+
 /// Simple Levenshtein edit distance for typo suggestions.
 fn edit_distance(a: &str, b: &str) -> usize {
     let a_len = a.len();

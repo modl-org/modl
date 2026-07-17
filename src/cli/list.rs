@@ -42,7 +42,7 @@ const INTERNAL_TYPES: &[&str] = &[
     "ipadapter",
 ];
 
-pub async fn run(type_filter: Option<AssetType>, show_all: bool) -> Result<()> {
+pub async fn run(type_filter: Option<AssetType>, show_all: bool, json: bool) -> Result<()> {
     let db = Database::open()?;
 
     // Sync any store entries not yet in the local DB from the shared index.yaml.
@@ -51,6 +51,15 @@ pub async fn run(type_filter: Option<AssetType>, show_all: bool) -> Result<()> {
     let n = reconcile::reconcile_from_index(&db)
         .or_else(|_| reconcile::reconcile_store(&db))
         .unwrap_or(0);
+    if json {
+        let filter_str = type_filter.as_ref().map(|t| t.to_string());
+        let mut models = db.list_installed(filter_str.as_deref())?;
+        if !show_all && type_filter.is_none() {
+            models.retain(|m| !INTERNAL_TYPES.contains(&m.asset_type.as_str()));
+        }
+        println!("{}", serde_json::to_string_pretty(&models)?);
+        return Ok(());
+    }
     if n > 0 {
         println!(
             "  {} Auto-registered {} model{} found on disk",
@@ -71,7 +80,7 @@ pub async fn run(type_filter: Option<AssetType>, show_all: bool) -> Result<()> {
             println!("No models installed yet.");
             println!(
                 "  Run {} to get started.",
-                style("modl install flux-dev").cyan()
+                style("modl pull flux-dev").cyan()
             );
         }
         return Ok(());
