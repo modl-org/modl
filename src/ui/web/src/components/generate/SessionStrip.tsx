@@ -44,11 +44,12 @@ export function SessionStrip({
   activePath,
   activeSessionId,
 }: Props) {
+  // No polling: generation completions refetch this key explicitly
+  // (useGenerateQueue), and gallery mutations invalidate the 'outputs' prefix.
   const { data: outputs = [] } = useQuery({
-    queryKey: ['outputs'],
-    queryFn: api.outputs,
+    queryKey: ['outputs', 'recent'],
+    queryFn: () => api.outputsRecent(30),
     staleTime: STALE_REALTIME,
-    refetchInterval: 15_000,
   })
 
   const recentImages = useMemo(() => {
@@ -178,7 +179,7 @@ function SessionCard({
         onClick={onSelect}
         title={item.prompt}
       >
-        <LazyImage src={firstImg.url} alt={item.prompt} className="h-full w-full" />
+        <LazyImage src={firstImg.url} alt={item.prompt} className="h-full w-full" thumbWidth={THUMB * 2} />
         {item.images.length > 1 && (
           <span className="absolute bottom-0 right-0 rounded-tl bg-black/60 px-1 font-mono text-[8px] text-white/80">
             {item.images.length}

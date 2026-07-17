@@ -36,9 +36,9 @@ export function AppSidebar({ activeTab, onTabChange, collapsed, onToggleCollapse
   const { data: gpu } = useGpuStatus()
 
   const { data: status = [] } = useQuery({
-    queryKey: ['status'],
-    queryFn: api.status,
-    refetchInterval: 2000,
+    queryKey: ['status', 'active'],
+    queryFn: api.statusActive,
+    refetchInterval: 10_000,
   })
 
   const { data: queueStatus } = useQuery<QueueStatus>({

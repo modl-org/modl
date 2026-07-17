@@ -3,10 +3,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::outputs as output_service;
 
-pub async fn api_list_outputs() -> impl IntoResponse {
-    let outputs = tokio::task::spawn_blocking(output_service::list_outputs)
-        .await
-        .unwrap_or_default();
+#[derive(Deserialize)]
+pub struct ListOutputsQuery {
+    /// Cap the number of images returned (newest first, across date groups).
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+pub async fn api_list_outputs(
+    axum::extract::Query(q): axum::extract::Query<ListOutputsQuery>,
+) -> impl IntoResponse {
+    let outputs =
+        tokio::task::spawn_blocking(move || output_service::list_outputs_limited(q.limit))
+            .await
+            .unwrap_or_default();
     Json(outputs)
 }
 

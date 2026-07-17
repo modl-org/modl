@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useMemo, type ReactNode } from 'react'
 import { useLocation } from 'wouter'
 import { useLocalStorage } from '../hooks/useLocalStorage'
 import {
@@ -25,11 +25,10 @@ export function FormProvider({ children }: { children: ReactNode }) {
     'modl:generate-form-v2',
     createDefaultGenerateFormState,
   )
-  return (
-    <FormContext.Provider value={{ form, setForm }}>
-      {children}
-    </FormContext.Provider>
-  )
+  // Stable value object — a fresh {form, setForm} per render would re-render
+  // every consumer even when the form is unchanged.
+  const value = useMemo(() => ({ form, setForm }), [form, setForm])
+  return <FormContext.Provider value={value}>{children}</FormContext.Provider>
 }
 
 export function useForm(): FormContextValue {

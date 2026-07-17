@@ -393,6 +393,8 @@ export const api = {
   },
   run: (name: string) => fetchJson<TrainingRun>(`/api/runs/${encodeURIComponent(name)}`),
   status: () => fetchJson<TrainingStatusRun[]>('/api/status'),
+  /** Running trainings only — cheap poll for the sidebar activity dot. */
+  statusActive: () => fetchJson<TrainingStatusRun[]>('/api/status?active=true'),
   statusSingle: (name: string) =>
     fetchJson<TrainingStatusRun>(`/api/status/${encodeURIComponent(name)}`),
   datasets: async (): Promise<DatasetSummary[]> => {
@@ -413,6 +415,8 @@ export const api = {
       `/api/datasets/${encodeURIComponent(name)}?limit=${limit}&offset=${offset}`,
     ),
   outputs: () => fetchJson<GeneratedOutput[]>('/api/outputs'),
+  /** Newest N images only — the session strip doesn't need the full library. */
+  outputsRecent: (limit = 30) => fetchJson<GeneratedOutput[]>(`/api/outputs?limit=${limit}`),
   deleteOutput: (req: DeleteOutputRequest) =>
     fetchJson<DeleteOutputResponse>('/api/outputs', {
       method: 'DELETE',
