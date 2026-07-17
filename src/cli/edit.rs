@@ -195,7 +195,13 @@ fn resolve_base_model_path(base_model: &str, db: &Database) -> Option<String> {
 }
 
 fn resolve_lora(name: &str, weight: f32, db: &Database) -> Result<Option<LoraRef>> {
-    model_resolve::resolve_lora(name, weight, db)
+    let result = model_resolve::resolve_lora(name, weight, db)?;
+    if result.is_none() {
+        anyhow::bail!(
+            "LoRA not found: {name}. Use `modl model ls --type lora` to see installed LoRAs, or provide a file path."
+        );
+    }
+    Ok(result)
 }
 
 fn resolve_edit_size(size: &str) -> Result<(u32, u32)> {
