@@ -556,6 +556,48 @@ ARCH_CONFIGS: dict[str, dict] = {
         "sample": {"sampler": "flowmatch", "steps": 8, "guidance": 1.0, "neg": ""},
         "inference": {"extra_call_kwargs": {"use_pe": True}},
     },
+    "krea2_turbo": {
+        "pipeline_class": "Krea2Pipeline",
+        "gen_components": {
+            "transformer": {
+                "model_class": "Krea2Transformer2DModel",
+                "config_dir": "krea2-turbo-transformer",
+            },
+            "text_encoder": {
+                "model_id": "krea2-qwen3-vl-4b-text-encoder",
+                "model_class": "Qwen3VLModel",
+                "config_dir": "qwen3-vl-4b",
+            },
+            "tokenizer": {
+                "model_class": "AutoTokenizer",
+                "config_dir": "qwen3-vl-tokenizer",
+            },
+            "vae": {
+                "model_id": "qwen-image-vae",
+                "model_class": "AutoencoderKLQwenImage",
+                "config_dir": "qwen-image-vae",
+            },
+            "scheduler": {
+                "model_class": "FlowMatchEulerDiscreteScheduler",
+                "config_dir": "krea2-scheduler",
+            },
+        },
+        # Mirrors krea/Krea-2-Turbo model_index.json: the pipeline taps 12
+        # intermediate Qwen3-VL decoder layers and uses a fixed timestep
+        # shift (is_distilled) instead of resolution-computed mu.
+        "pipeline_kwargs": {
+            "is_distilled": True,
+            "patch_size": 2,
+            "text_encoder_select_layers": [2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35],
+        },
+        "model_flags": {"arch": "krea2", "quantize": True, "quantize_te": True, "low_vram": True},
+        "noise_scheduler": "flowmatch",
+        "dtype": "bf16",
+        "train_text_encoder": False,
+        "resolutions": [512, 768, 1024],
+        "default_resolution": 1024,
+        "sample": {"sampler": "flowmatch", "steps": 8, "guidance": 0.0, "neg": ""},
+    },
     "qwen_image": {
         "pipeline_class": "QwenImagePipeline",
         "gen_components": {
@@ -830,6 +872,8 @@ MODEL_REGISTRY: dict[str, tuple[str, str]] = {
     "z-image-turbo":  ("zimage_turbo",  "Tongyi-MAI/Z-Image-Turbo"),
     "z-image":        ("zimage",        "Tongyi-MAI/Z-Image"),
     "chroma":         ("chroma",        "lodestones/Chroma"),
+    "krea-2-turbo":   ("krea2_turbo",   "krea/Krea-2-Turbo"),
+    "krea2-turbo":    ("krea2_turbo",   "krea/Krea-2-Turbo"),
     "qwen-image":     ("qwen_image",    "Qwen/Qwen-Image-2512"),
     "qwen_image":     ("qwen_image",    "Qwen/Qwen-Image-2512"),
     "qwen-image-edit":       ("qwen_image_edit",      "Qwen/Qwen-Image-Edit"),
@@ -857,6 +901,7 @@ TRANSFORMER_HF_SOURCES: dict[str, tuple[str, str]] = {
     "flux2_klein_9b":      ("black-forest-labs/FLUX.2-klein-9b-fp8",      "flux-2-klein-9b-fp8.safetensors"),
     "flux2_klein_base":    ("black-forest-labs/FLUX.2-klein-base-4b-fp8", "flux-2-klein-base-4b-fp8.safetensors"),
     "flux2_klein_base_9b": ("black-forest-labs/FLUX.2-klein-base-9b-fp8", "flux-2-klein-base-9b-fp8.safetensors"),
+    "krea2_turbo":         ("Comfy-Org/Krea-2",                           "diffusion_models/krea2_turbo_fp8_scaled.safetensors"),
 }
 
 # Text encoders / VAEs are shared across variants → keyed by registry model_id.
@@ -864,6 +909,11 @@ COMPONENT_HF_SOURCES: dict[str, tuple[str, str]] = {
     "flux2-qwen3-4b-text-encoder": ("Comfy-Org/vae-text-encorder-for-flux-klein-4b", "split_files/text_encoders/qwen_3_4b.safetensors"),
     "flux2-qwen3-8b-text-encoder": ("Comfy-Org/vae-text-encorder-for-flux-klein-9b", "split_files/text_encoders/qwen_3_8b.safetensors"),
     "flux2-vae":                   ("Comfy-Org/flux2-dev",                            "split_files/vae/flux2-vae.safetensors"),
+    # Krea 2 vendors its own Qwen3-VL-4B copy in proper Qwen3VLModel key
+    # layout (the Comfy-Org single file has ForConditionalGeneration-style
+    # "model."-prefixed keys, which would silently zero-overlap on load).
+    "krea2-qwen3-vl-4b-text-encoder": ("krea/Krea-2-Turbo",                           "text_encoder/model.safetensors"),
+    "qwen-image-vae":              ("Comfy-Org/Qwen-Image_ComfyUI",                   "split_files/vae/qwen_image_vae.safetensors"),
 }
 
 
@@ -907,6 +957,8 @@ def detect_arch(base_model_id: str, arch_key: str | None = None) -> str:
         return "zimage"
     if "chroma" in bid:
         return "chroma"
+    if "krea" in bid:
+        return "krea2_turbo"
     if "flux" in bid and "schnell" in bid:
         return "flux_schnell"
     if "klein" in bid and ("flux2" in bid or "flux.2" in bid or "flux-2" in bid):

@@ -257,13 +257,113 @@ def _strip_comfy_prefix(checkpoint, **kwargs):
     }
 
 
+def _convert_krea2_checkpoint_to_diffusers(checkpoint, **kwargs):
+    """Convert original krea-ai/krea-2 checkpoint keys to Krea2Transformer2DModel.
+
+    Diffusers 0.39.0 has no single-file support for Krea2 (the class is not in
+    SINGLE_FILE_LOADABLE_CLASSES), so this converter lives here.  The module
+    correspondence matches diffusers' own
+    ``_convert_non_diffusers_krea2_lora_to_diffusers`` (lora_conversion_utils),
+    extended to the non-linear tensors (norm scales, modulation tables).
+    Norm ``.scale`` tensors copy directly: Krea2RMSNorm keeps the checkpoint's
+    zero-centered convention (effective multiplier is ``1 + weight``).
+    """
+    import re
+
+    attn_map = {"wq": "to_q", "wk": "to_k", "wv": "to_v", "wo": "to_out.0", "gate": "to_gate"}
+    standalone_map = {
+        "first.weight": "img_in.weight",
+        "first.bias": "img_in.bias",
+        "last.linear.weight": "final_layer.linear.weight",
+        "last.linear.bias": "final_layer.linear.bias",
+        "last.norm.scale": "final_layer.norm.weight",
+        "tmlp.0.weight": "time_embed.linear_1.weight",
+        "tmlp.0.bias": "time_embed.linear_1.bias",
+        "tmlp.2.weight": "time_embed.linear_2.weight",
+        "tmlp.2.bias": "time_embed.linear_2.bias",
+        "tproj.1.weight": "time_mod_proj.weight",
+        "tproj.1.bias": "time_mod_proj.bias",
+        "txtmlp.0.scale": "txt_in.norm.weight",
+        "txtmlp.1.weight": "txt_in.linear_1.weight",
+        "txtmlp.1.bias": "txt_in.linear_1.bias",
+        "txtmlp.3.weight": "txt_in.linear_2.weight",
+        "txtmlp.3.bias": "txt_in.linear_2.bias",
+        "txtfusion.projector.weight": "text_fusion.projector.weight",
+    }
+
+    def convert_inner(rest):
+        """Map the per-block suffix (attn/mlp/norms) shared by transformer
+        and text-fusion blocks. Returns None if unrecognized."""
+        m = re.match(r"attn\.(\w+)\.weight$", rest)
+        if m and m.group(1) in attn_map:
+            return f"attn.{attn_map[m.group(1)]}.weight"
+        if rest == "attn.qknorm.qnorm.scale":
+            return "attn.norm_q.weight"
+        if rest == "attn.qknorm.knorm.scale":
+            return "attn.norm_k.weight"
+        m = re.match(r"mlp\.(gate|up|down)\.weight$", rest)
+        if m:
+            return f"ff.{m.group(1)}.weight"
+        if rest == "prenorm.scale":
+            return "norm1.weight"
+        if rest == "postnorm.scale":
+            return "norm2.weight"
+        return None
+
+    converted = {}
+    for key, value in checkpoint.items():
+        k = key
+        for prefix in ("model.diffusion_model.", "diffusion_model."):
+            if k.startswith(prefix):
+                k = k[len(prefix):]
+                break
+
+        if k in standalone_map:
+            converted[standalone_map[k]] = value
+            continue
+        if k == "last.modulation.lin":
+            converted["final_layer.scale_shift_table"] = value
+            continue
+
+        m = re.match(r"blocks\.(\d+)\.(.+)$", k)
+        if m:
+            idx, rest = m.groups()
+            if rest == "mod.lin":
+                converted[f"transformer_blocks.{idx}.scale_shift_table"] = value.reshape(6, -1)
+                continue
+            inner = convert_inner(rest)
+            if inner is not None:
+                converted[f"transformer_blocks.{idx}.{inner}"] = value
+                continue
+
+        m = re.match(r"txtfusion\.(layerwise_blocks|refiner_blocks)\.(\d+)\.(.+)$", k)
+        if m:
+            block, idx, rest = m.groups()
+            inner = convert_inner(rest)
+            if inner is not None:
+                converted[f"text_fusion.{block}.{idx}.{inner}"] = value
+                continue
+
+        # Unknown key — keep as-is so the strict-ish overlap check in the
+        # caller can surface a real format mismatch instead of hiding it.
+        converted[k] = value
+    return converted
+
+
 def _get_checkpoint_converter(model_class_name: str):
     """Get the right ComfyUI→diffusers key converter for a transformer class.
 
     Models with complex key remapping (Flux, Chroma, Z-Image) have dedicated
     converters in diffusers.  Models whose ComfyUI keys match diffusers after
     prefix stripping (QwenImage) use the generic ``_strip_comfy_prefix``.
+    Classes diffusers cannot convert at all (Krea2) have local converters.
     """
+    _LOCAL_CONVERTER_MAP = {
+        "Krea2Transformer2DModel": _convert_krea2_checkpoint_to_diffusers,
+    }
+    local = _LOCAL_CONVERTER_MAP.get(model_class_name)
+    if local is not None:
+        return local
     _CONVERTER_MAP = {
         "FluxTransformer2DModel": "convert_flux_transformer_checkpoint_to_diffusers",
         "Flux2Transformer2DModel": "convert_flux2_transformer_checkpoint_to_diffusers",
