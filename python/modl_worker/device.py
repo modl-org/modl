@@ -71,6 +71,121 @@ def move_pipe_to_device(pipe):
         pipe.to(dev)
 
 
+def _pipe_weight_bytes(pipe) -> int:
+    """Sum of parameter + buffer bytes across all pipeline components.
+
+    fp8-stored weights count 1 byte/element, so a layerwise-cast
+    transformer is sized at its actual GPU footprint.
+    """
+    total = 0
+    for name in getattr(pipe, "components", {}) or {}:
+        comp = getattr(pipe, name, None)
+        if comp is None or not hasattr(comp, "parameters"):
+            continue
+        for p in comp.parameters():
+            total += p.numel() * p.element_size()
+        for b in comp.buffers():
+            total += b.numel() * b.element_size()
+    return total
+
+
+def _has_accelerate_hooks(pipe) -> bool:
+    """True if any component carries an accelerate offload hook."""
+    for name in getattr(pipe, "components", {}) or {}:
+        comp = getattr(pipe, name, None)
+        if comp is not None and getattr(comp, "_hf_hook", None) is not None:
+            return True
+    return False
+
+
+# Headroom for activations, per-layer dtype-cast transients, VAE decode and
+# CUDA context when deciding whether a pipeline can live fully resident.
+# Calibrated on Krea 2 Turbo (fp8, 17.4GiB weights): denoise transients
+# measured ≥8GB over weights (layerwise-cast bf16 compute buffers dominate)
+# — and a borderline pass promoted it straight into an OOM. 50% of weights
+# with an 8GB floor plus a 5% free-VRAM margin keeps the decision solidly
+# conservative; a wrong promote is additionally self-healed at runtime by
+# ``demote_pipe_to_offload``.
+_RESIDENT_RESERVE_FLOOR_BYTES = 8 * 1024**3
+_RESIDENT_RESERVE_WEIGHT_FRACTION = 0.50
+
+
+def rebalance_pipe_placement(pipe, emitter=None) -> None:
+    """Promote an offloaded pipeline to full GPU residency when it fits.
+
+    ``enable_model_cpu_offload`` re-transfers weights CPU→GPU on every job —
+    for a stack that genuinely fits VRAM (SDXL, SD15, Klein 4B on a 24GB
+    card) that transfer is pure per-job overhead. Called after LoRA /
+    deferred-fp8 state is final, because the footprint before layerwise
+    casting (bf16) can be ~2x the end state.
+
+    No-op on non-CUDA devices, when the pipeline is already resident, when
+    the stack doesn't fit with reserve, or when MODL_FORCE_OFFLOAD=1.
+    """
+    if get_device() != "cuda":
+        return
+    if os.environ.get("MODL_FORCE_OFFLOAD") == "1":
+        return
+    if not _has_accelerate_hooks(pipe):
+        return  # already resident (or never offloaded)
+
+    weight_bytes = _pipe_weight_bytes(pipe)
+    free_bytes, _total = torch.cuda.mem_get_info()
+    reserve = max(
+        _RESIDENT_RESERVE_FLOOR_BYTES,
+        int(weight_bytes * _RESIDENT_RESERVE_WEIGHT_FRACTION),
+    )
+    needed = weight_bytes + reserve
+    if needed > int(free_bytes * 0.95):
+        if emitter:
+            emitter.info(
+                f"  → Keeping cpu offload: {weight_bytes / 1024**3:.1f}GB weights "
+                f"+ {reserve / 1024**3:.1f}GB reserve > {free_bytes / 1024**3:.1f}GB free"
+            )
+        return
+
+    try:
+        pipe.remove_all_hooks()
+        pipe.to("cuda")
+        if emitter:
+            emitter.info(
+                f"  → Pipeline fits VRAM ({weight_bytes / 1024**3:.1f}GB weights) — "
+                f"running fully resident (no per-job offload transfers)"
+            )
+    except torch.cuda.OutOfMemoryError:
+        torch.cuda.empty_cache()
+        pipe.enable_model_cpu_offload()
+        if emitter:
+            emitter.info("  → Resident placement OOMed, reverting to cpu offload")
+
+
+def demote_pipe_to_offload(pipe, exc, emitter=None) -> bool:
+    """Demote a resident pipeline back to cpu offload after a CUDA OOM.
+
+    Runtime safety net for ``rebalance_pipe_placement``: if a promoted
+    pipeline OOMs on denoise transients the placement estimate missed,
+    re-enable offload so the job can retry instead of failing.
+
+    Returns True if a retry makes sense (the pipeline was resident and has
+    been demoted), False otherwise (not an OOM, or already offloaded).
+    """
+    if not isinstance(exc, torch.cuda.OutOfMemoryError):
+        return False
+    if get_device() != "cuda":
+        return False
+    if _has_accelerate_hooks(pipe):
+        return False  # already offloaded — a retry would just OOM again
+
+    torch.cuda.empty_cache()
+    pipe.enable_model_cpu_offload()
+    torch.cuda.empty_cache()
+    if emitter:
+        emitter.info(
+            "  → OOM while fully resident — demoted to cpu offload, retrying"
+        )
+    return True
+
+
 def empty_cache():
     """Free GPU cache for the active device."""
     dev = get_device()

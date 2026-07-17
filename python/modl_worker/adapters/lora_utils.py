@@ -155,8 +155,21 @@ def apply_lora_from_spec(pipeline, spec: dict, emitter) -> bool:
       - Missing file warning
       - Key conversion fallback via ``load_lora_with_conversion``
 
+    Afterwards — once LoRA / deferred-fp8 state is final and the pipeline's
+    true footprint is known — promotes the pipeline to full GPU residency
+    when it fits VRAM (skipped for ControlNet jobs, which need the offload
+    headroom for the ControlNet weights).
+
     Returns True if LoRA was applied, False otherwise.
     """
+    applied = _apply_lora_from_spec_inner(pipeline, spec, emitter)
+    if not spec.get("params", {}).get("controlnet"):
+        from modl_worker.device import rebalance_pipe_placement
+        rebalance_pipe_placement(pipeline, emitter)
+    return applied
+
+
+def _apply_lora_from_spec_inner(pipeline, spec: dict, emitter) -> bool:
     lora_info = spec.get("lora")
     if not lora_info:
         # No LoRA — apply deferred fp8 casting now (was deferred for LoRA compat)
