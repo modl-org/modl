@@ -148,10 +148,20 @@ fn show_registry_model(
 
         // Lightning LoRA
         if let Some(lightning) = model_family::lightning_config(id) {
-            println!(
-                "    Fast mode:     --fast (4-step) or --fast 8 (8-step) via {}",
-                style(&lightning.lora_registry_id).cyan()
-            );
+            if let Some(q) = lightning.quality {
+                println!(
+                    "    Fast mode:     --fast 8 (≈ distilled model) or --fast 12-15 \
+                     (quality: LoRA @ {:.1}, CFG {:.1}) via {}",
+                    q.strength,
+                    q.guidance,
+                    style(&lightning.lora_registry_id).cyan()
+                );
+            } else {
+                println!(
+                    "    Fast mode:     --fast (4-step) or --fast 8 (8-step) via {}",
+                    style(&lightning.lora_registry_id).cyan()
+                );
+            }
         }
 
         print_prompt_guides(model);

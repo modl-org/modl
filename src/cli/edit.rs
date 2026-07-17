@@ -284,21 +284,22 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
             )
         })?;
 
-        let (variant, resolved_steps) = lightning.resolve(fast_steps);
-        let lora_ref = resolve_lora(&lightning.lora_registry_id, 1.0, &db).with_context(|| {
-            format!(
-                "Lightning LoRA '{}' is not installed.\n\n  \
-                 Install it:\n\n    modl pull {} --variant {}\n",
-                lightning.lora_registry_id, lightning.lora_registry_id, variant,
-            )
-        })?;
+        let fast_mode = lightning.resolve(fast_steps);
+        let lora_ref = resolve_lora(&lightning.lora_registry_id, fast_mode.strength, &db)
+            .with_context(|| {
+                format!(
+                    "Lightning LoRA '{}' is not installed.\n\n  \
+                         Install it:\n\n    modl pull {} --variant {}\n",
+                    lightning.lora_registry_id, lightning.lora_registry_id, fast_mode.variant,
+                )
+            })?;
 
         let sched_overrides = lightning.scheduler_overrides_json();
 
         (
             lora_ref,
-            Some(resolved_steps),
-            Some(lightning.guidance),
+            Some(fast_mode.steps),
+            Some(fast_mode.guidance),
             sched_overrides,
         )
     } else {

@@ -308,14 +308,21 @@ class ModelCache:
         if cached.lora_id == requested_lora and cached.lora_weight == requested_weight:
             return  # Already the right LoRA at the right weight
 
-        # Unfuse current LoRA
+        # Unfuse current LoRA. Diff patches (additive weight patches like
+        # krea2-filter-bypass) can't go through PEFT — restore the stashed
+        # original weights instead.
         if cached.lora_id:
-            try:
-                cached.pipeline.unfuse_lora()
-                cached.pipeline.unload_lora_weights()
-                emitter.info(f"Unloaded LoRA: {cached.lora_id}")
-            except Exception as exc:
-                emitter.warning("LORA_UNFUSE_WARN", f"LoRA unfuse warning: {exc}")
+            from modl_worker.adapters.lora_utils import revert_diff_patch
+
+            if revert_diff_patch(cached.pipeline, emitter):
+                emitter.info(f"Unloaded diff patch: {cached.lora_id}")
+            else:
+                try:
+                    cached.pipeline.unfuse_lora()
+                    cached.pipeline.unload_lora_weights()
+                    emitter.info(f"Unloaded LoRA: {cached.lora_id}")
+                except Exception as exc:
+                    emitter.warning("LORA_UNFUSE_WARN", f"LoRA unfuse warning: {exc}")
             cached.lora_id = None
             cached.lora_weight = 0.0
 

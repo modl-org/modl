@@ -83,6 +83,122 @@ def _apply_deferred_fp8_casting(pipeline, emitter=None) -> None:
         emitter.info("  → Applied deferred fp8 layerwise casting")
 
 
+def _is_diff_patch(lora_path: str) -> bool:
+    """True if the file is a ComfyUI-style additive weight patch.
+
+    Diff patches (e.g. krea2-filter-bypass) ship raw weight deltas instead
+    of lora_A/lora_B factors: every tensor key ends in ``.diff`` and the
+    delta is added directly onto the matching model weight.
+    """
+    try:
+        from safetensors import safe_open
+
+        with safe_open(lora_path, framework="pt") as f:
+            keys = list(f.keys())
+        return bool(keys) and all(k.endswith(".diff") for k in keys)
+    except Exception:
+        return False
+
+
+def apply_diff_patch(pipeline, lora_path: str, weight: float = 1.0, emitter=None) -> bool:
+    """Apply a ComfyUI-style additive weight patch: W += weight * diff.
+
+    Keys use ComfyUI naming (``diffusion_model.<module>.diff``, targeting the
+    module's ``.weight``); they are converted to diffusers names with the same
+    per-class converter used for checkpoint loading.
+
+    The original values of every patched tensor are stashed on the
+    *transformer* (``_modl_diff_patch_originals`` — the transformer is shared
+    across ``from_pipe()`` mode clones) so the persistent worker can restore
+    them exactly when the LoRA changes: a diff patch cannot be unfused
+    through PEFT.
+    """
+    import torch
+    from safetensors.torch import load_file
+
+    transformer = getattr(pipeline, "transformer", None)
+    if transformer is None:
+        _warn_lora_failed(emitter, "diff patch: pipeline has no transformer")
+        return False
+
+    sd = load_file(lora_path)
+
+    # Strip prefix + `.diff`; ComfyUI diff patches target the module weight.
+    raw = {}
+    for key, delta in sd.items():
+        name = key[: -len(".diff")]
+        for prefix in ("diffusion_model.", "transformer."):
+            if name.startswith(prefix):
+                name = name[len(prefix):]
+                break
+        if not name.endswith((".weight", ".bias", ".scale")):
+            name += ".weight"
+        raw[name] = delta
+
+    try:
+        from modl_worker.adapters.pipeline_loader import _get_checkpoint_converter
+
+        converter = _get_checkpoint_converter(type(transformer).__name__)
+        converted = converter(raw) if converter is not None else raw
+    except Exception:
+        converted = raw
+
+    params = dict(transformer.named_parameters())
+    matched = []
+    for name, delta in converted.items():
+        p = params.get(name)
+        if p is None or p.shape != delta.shape:
+            _warn_lora_failed(
+                emitter,
+                f"diff patch key `{name}` does not match any transformer weight "
+                f"(shape {'mismatch' if p is not None else 'n/a'})",
+            )
+            return False
+        matched.append((name, p, delta))
+
+    originals = getattr(transformer, "_modl_diff_patch_originals", {})
+    with torch.no_grad():
+        for name, p, delta in matched:
+            if name not in originals:
+                originals[name] = p.detach().clone()
+            # Upcast so the addition also works on fp8-stored weights.
+            new = p.detach().to(torch.float32) + float(weight) * delta.to(
+                device=p.device, dtype=torch.float32
+            )
+            p.copy_(new.to(p.dtype))
+    transformer._modl_diff_patch_originals = originals
+
+    _apply_deferred_fp8_casting(pipeline, emitter)
+    if emitter:
+        emitter.info(f"  → Applied diff patch: {len(matched)} tensor(s) at weight {weight}")
+    return True
+
+
+def revert_diff_patch(pipeline, emitter=None) -> bool:
+    """Restore weights patched by `apply_diff_patch`.
+
+    Returns True if a patch was present and reverted, False if there was
+    nothing to revert (so callers can fall back to PEFT unfuse).
+    """
+    import torch
+
+    transformer = getattr(pipeline, "transformer", None)
+    originals = getattr(transformer, "_modl_diff_patch_originals", None) if transformer else None
+    if not originals:
+        return False
+
+    params = dict(transformer.named_parameters())
+    with torch.no_grad():
+        for name, orig in originals.items():
+            p = params.get(name)
+            if p is not None:
+                p.copy_(orig.to(device=p.device, dtype=p.dtype))
+    del transformer._modl_diff_patch_originals
+    if emitter:
+        emitter.info(f"  → Reverted diff patch ({len(originals)} tensor(s))")
+    return True
+
+
 def load_lora_with_conversion(
     pipeline,
     lora_path: str,
@@ -100,6 +216,9 @@ def load_lora_with_conversion(
 
     Returns True if the LoRA was successfully loaded and fused, False otherwise.
     """
+    if _is_diff_patch(lora_path):
+        return apply_diff_patch(pipeline, lora_path, lora_weight, emitter)
+
     lora_dir = os.path.dirname(lora_path)
     lora_file = os.path.basename(lora_path)
 

@@ -339,7 +339,7 @@ text_encoder_b = 4.4
 total_b = 17.3
 vram_bf16 = 36
 vram_fp8 = 16
-capabilities = ["txt2img"]
+capabilities = ["txt2img", "lora"]
 quality = 5
 speed = 4
 text_rendering = false
@@ -347,7 +347,48 @@ defaults = { steps = 8, guidance = 0.0, resolution = 1024 }
 prompt_guide = """
 Runs at guidance 0.0 — CFG is baked in, negative prompts do nothing.
 Photographic, aesthetic-forward outputs; descriptive prose prompts with
-lighting and composition detail work best. Supports 1K–2K resolutions."""
+lighting and composition detail work best. Supports 1K–2K resolutions.
+Krea 2 ships with a content filter baked into the weights that also dampens
+prompt adherence for benign content — strong facial expressions, blood and
+injuries, unusual body types, some poses come back quietly sanitized. Fix:
+`modl pull krea2-filter-bypass` and apply it as the LoRA at strength 0.4–1.0;
+it only rescales the model's text-fusion alignment vector (adds no content
+knowledge). Raise the strength until adherence returns."""
+
+[families.krea.models.krea-2-raw]
+name = "Krea 2 Raw"
+arch_key = "krea2_raw"
+description = "Base (midtrain) 12.9B MMDiT — real CFG, best LoRA fidelity, ~20 steps"
+transformer_b = 12.9
+text_encoder = "Qwen3-VL 4B"
+text_encoder_b = 4.4
+total_b = 17.3
+vram_bf16 = 36
+vram_fp8 = 16
+capabilities = ["txt2img", "lora"]
+quality = 5
+speed = 3
+text_rendering = false
+defaults = { steps = 20, guidance = 3.0, resolution = 1024 }
+prompt_guide = """
+Base (midtrain) checkpoint: real CFG — negative prompts work; guidance ~3.0
+at ~20 steps. Better identity/LoRA fidelity and seed-to-seed variance than
+Turbo, at ~2.5x the inference time. Community LoRAs are trained against Raw.
+`--fast 8` applies the turbo-distill LoRA at full strength (≈ Krea 2 Turbo);
+`--fast 12`–`--fast 15` is quality mode (distill LoRA at 0.6, guidance 1.5) —
+Turbo-class speed with better detail and seed variance. Same content-filter
+note as krea-2-turbo: if benign prompts (expressions, injuries, body types)
+come back sanitized, `modl pull krea2-filter-bypass` and apply it as the
+LoRA at strength 0.4–1.0."""
+
+[families.krea.models.krea-2-raw.lightning]
+lora_registry_id = "krea2-turbo-distill-lora"
+variant_4step = "r256"
+variant_8step = "r256"
+guidance = 0.0
+# mu=1.15 exponential shift == static shift e^1.15 (what Turbo pins).
+scheduler_overrides = { base_shift = "1.15", max_shift = "1.15" }
+quality = { strength = 0.6, guidance = 1.5 }
 
 # ─── Qwen Image (generation) ─────────────────────────────────────────
 

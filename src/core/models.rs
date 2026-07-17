@@ -72,6 +72,14 @@ struct TomlLightning {
     variant_8step: String,
     guidance: f32,
     scheduler_overrides: HashMap<String, String>,
+    #[serde(default)]
+    quality: Option<TomlLightningQuality>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TomlLightningQuality {
+    strength: f32,
+    guidance: f32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -162,14 +170,59 @@ pub struct LightningConfig {
     pub variant_8step: String,
     pub guidance: f32,
     pub scheduler_overrides: Vec<(String, String)>,
+    /// Partial-strength "quality mode" for `fast` step counts above 8:
+    /// the Lightning LoRA is applied below full strength with real CFG,
+    /// trading some speed for seed variance and detail (Krea 2 recipe).
+    pub quality: Option<LightningQuality>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LightningQuality {
+    pub strength: f32,
+    pub guidance: f32,
+}
+
+/// A resolved `--fast N` request: which LoRA variant to use and the
+/// effective steps / LoRA strength / guidance.
+#[derive(Debug, Clone, Copy)]
+pub struct ResolvedFastMode<'a> {
+    pub variant: &'a str,
+    pub steps: u32,
+    pub strength: f32,
+    pub guidance: f32,
 }
 
 impl LightningConfig {
-    pub fn resolve(&self, fast_steps: u32) -> (&str, u32) {
+    pub fn resolve(&self, fast_steps: u32) -> ResolvedFastMode<'_> {
         if fast_steps <= 4 {
-            (&self.variant_4step, 4)
+            ResolvedFastMode {
+                variant: &self.variant_4step,
+                steps: 4,
+                strength: 1.0,
+                guidance: self.guidance,
+            }
+        } else if fast_steps <= 8 {
+            ResolvedFastMode {
+                variant: &self.variant_8step,
+                steps: 8,
+                strength: 1.0,
+                guidance: self.guidance,
+            }
+        } else if let Some(q) = self.quality {
+            ResolvedFastMode {
+                variant: &self.variant_8step,
+                steps: fast_steps,
+                strength: q.strength,
+                guidance: q.guidance,
+            }
         } else {
-            (&self.variant_8step, 8)
+            // No quality tier for this model: clamp to the 8-step variant.
+            ResolvedFastMode {
+                variant: &self.variant_8step,
+                steps: 8,
+                strength: 1.0,
+                guidance: self.guidance,
+            }
         }
     }
 
@@ -265,6 +318,10 @@ fn build_parsed(root: TomlRoot) -> ParsedModels {
                     variant_8step: l.variant_8step,
                     guidance: l.guidance,
                     scheduler_overrides: l.scheduler_overrides.into_iter().collect(),
+                    quality: l.quality.map(|q| LightningQuality {
+                        strength: q.strength,
+                        guidance: q.guidance,
+                    }),
                 });
             }
 
@@ -689,5 +746,29 @@ mod tests {
         assert!(w.contains("5"), "got: {w}");
         let w = check_edit_image_count("qwen-image-edit-2511", 4).expect("should warn");
         assert!(w.contains("up to 3"), "got: {w}");
+    }
+
+    #[test]
+    fn lightning_resolve_without_quality_clamps_to_8() {
+        let cfg = lightning_config("qwen-image").expect("qwen-image has lightning");
+        assert!(cfg.quality.is_none());
+        let r = cfg.resolve(14);
+        assert_eq!(r.steps, 8);
+        assert_eq!(r.strength, 1.0);
+        assert_eq!(r.variant, cfg.variant_8step);
+    }
+
+    #[test]
+    fn lightning_resolve_krea_quality_tier() {
+        let cfg = lightning_config("krea-2-raw").expect("krea-2-raw has lightning");
+        // fast 8 → full-strength distill LoRA ≈ Turbo
+        let r8 = cfg.resolve(8);
+        assert_eq!((r8.steps, r8.strength, r8.guidance), (8, 1.0, 0.0));
+        // fast 14 → quality tier: partial strength, real CFG
+        let r14 = cfg.resolve(14);
+        assert_eq!(r14.steps, 14);
+        assert_eq!(r14.strength, 0.6);
+        assert_eq!(r14.guidance, 1.5);
+        assert_eq!(r14.variant, "r256");
     }
 }
