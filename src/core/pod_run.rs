@@ -511,6 +511,16 @@ pub fn check_pod_supported(yaml: &str) -> Result<()> {
             }
         }
     }
+
+    // The checks above are pod-specific messaging; the pod runs the real
+    // parser, so run it here too — schema errors, unknown `$name`/`$step`
+    // refs, and undecodable base64 must fail at submit time, not minutes
+    // later on the pod after install/auth/model-pull time is already paid.
+    // Everything left is data URIs and `$refs` (bare paths bailed above), so
+    // data URIs materialize into a throwaway dir and a parse success here is
+    // a parse success on the pod.
+    let tmp = tempfile::tempdir().context("Failed to create a scratch dir for validation")?;
+    crate::core::workflow::parse_str(yaml, tmp.path())?;
     Ok(())
 }
 
@@ -686,6 +696,21 @@ pub fn export_run(
 fn wait_for_run(pod: &Pod, run_id: &str, log: &str, pidfile: &str) -> Result<String> {
     let mut tail = spawn_log_tail(pod, log);
     let mut poll_failures = 0u32;
+    // Liveness probe for the detached runner. `run_ssh_capture` returns Ok("")
+    // on transport failure, which matches neither "alive" nor "dead" — so a
+    // flaky link never masquerades as a verdict.
+    let probe_cmd = format!(
+        "if [ -f {pf} ] && kill -0 \"$(cat {pf})\" 2>/dev/null; \
+         then echo alive; else echo dead; fi",
+        pf = shell_quote(pidfile)
+    );
+    let dead_runner_err = |status: &str| -> anyhow::Error {
+        let tail_txt = run_ssh_capture(&pod.ssh, &format!("tail -n 30 {}", shell_quote(log)))
+            .unwrap_or_default();
+        anyhow::anyhow!(
+            "The workflow runner on the pod died before finishing (status: {status}).\n\nLast run log:\n{tail_txt}"
+        )
+    };
 
     loop {
         // Drain whatever the tail has produced since the last poll.
@@ -717,29 +742,28 @@ fn wait_for_run(pod: &Pod, run_id: &str, log: &str, pidfile: &str) -> Result<Str
                 }
                 // Not terminal — if the runner process died the DB will never
                 // reach a terminal state; catch that instead of hanging.
-                if status == "running" || status == "pending" {
-                    let probe = run_ssh_capture(
-                        &pod.ssh,
-                        &format!(
-                            "if [ -f {pf} ] && kill -0 \"$(cat {pf})\" 2>/dev/null; \
-                             then echo alive; else echo dead; fi",
-                            pf = shell_quote(pidfile)
-                        ),
-                    );
-                    if let Ok(out) = probe
-                        && out.contains("dead")
-                    {
-                        let tail_txt =
-                            run_ssh_capture(&pod.ssh, &format!("tail -n 30 {}", shell_quote(log)))
-                                .unwrap_or_default();
-                        bail!(
-                            "The workflow runner on the pod died before finishing (status still '{status}').\n\nLast run log:\n{tail_txt}"
-                        );
-                    }
+                if (status == "running" || status == "pending")
+                    && let Ok(out) = run_ssh_capture(&pod.ssh, &probe_cmd)
+                    && out.contains("dead")
+                {
+                    return Err(dead_runner_err(&format!("still '{status}'")));
                 }
             }
             Err(e) => {
-                // Flaky link — the run is unaffected, keep trying.
+                // A failed status poll is either a flaky link (run unaffected,
+                // keep trying) or a runner that died before the run was ever
+                // registered in the pod's DB — a state the status query alone
+                // can't distinguish, and one that would otherwise burn the
+                // full poll budget before bailing with a wrong "lost contact"
+                // diagnosis. Probe the runner: a reachable pod with a dead
+                // pid means the run is never coming.
+                if let Ok(out) = run_ssh_capture(&pod.ssh, &probe_cmd)
+                    && out.contains("dead")
+                {
+                    return Err(dead_runner_err(
+                        "never registered — it likely failed at startup",
+                    ));
+                }
                 poll_failures += 1;
                 if poll_failures >= MAX_POLL_FAILURES {
                     bail!(
@@ -1415,8 +1439,27 @@ steps:
             assert!(err.contains("local file path"), "{yaml}: {err}");
         }
         // Sentinel masks are fine.
-        let ok = "name: t\nmodel: m\nsteps:\n  - id: a\n    edit: \"$x\"\n    prompt: p\n    mask: from-alpha\n";
+        let ok = "name: t\nmodel: m\nimages:\n  x: \"data:image/png;base64,aWs=\"\nsteps:\n  - id: a\n    edit: \"$x\"\n    prompt: p\n    mask: from-alpha\n";
         check_pod_supported(ok).unwrap();
+    }
+
+    #[test]
+    fn runs_the_full_parser_at_submit_time() {
+        // An undefined $name passed the path-only checks before — now the
+        // real parser runs locally, so it fails at submit instead of minutes
+        // later pod-side.
+        let undefined =
+            "name: t\nmodel: m\nsteps:\n  - id: a\n    edit: \"$nope\"\n    prompt: p\n";
+        let err = check_pod_supported(undefined).unwrap_err().to_string();
+        assert!(err.contains("not defined"), "{err}");
+
+        // Undecodable base64 in the images map fails the same way.
+        let bad_b64 = "name: t\nmodel: m\nimages:\n  x: \"data:image/png;base64,%%%\"\nsteps:\n  - id: a\n    edit: \"$x\"\n    prompt: p\n";
+        assert!(check_pod_supported(bad_b64).is_err());
+
+        // A $step ref into a step id that doesn't exist is caught too.
+        let bad_step = "name: t\nmodel: m\nsteps:\n  - id: a\n    edit: \"$ghost.outputs[0]\"\n    prompt: p\n";
+        assert!(check_pod_supported(bad_step).is_err());
     }
 
     #[test]

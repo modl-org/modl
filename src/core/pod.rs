@@ -116,6 +116,8 @@ pub struct Pod {
     pub instance_id: u64,
     pub gpu_name: String,
     pub dph_total: f64,
+    /// Hourly storage cost for the provisioned disk (see `PodRecord`).
+    pub dph_storage: f64,
     pub(crate) ssh: SshTarget,
     /// RFC3339 — set when the pod was first provisioned.
     pub created_at: String,
@@ -129,6 +131,7 @@ impl Pod {
             instance_id: self.instance_id,
             gpu_name: self.gpu_name.clone(),
             dph_total: self.dph_total,
+            dph_storage: self.dph_storage,
             ssh_host: self.ssh.host.clone(),
             ssh_port: self.ssh.port,
             created_at: self.created_at.clone(),
@@ -144,6 +147,7 @@ impl From<PodRecord> for Pod {
             instance_id: r.instance_id,
             gpu_name: r.gpu_name,
             dph_total: r.dph_total,
+            dph_storage: r.dph_storage,
             ssh: SshTarget {
                 host: r.ssh_host,
                 port: r.ssh_port,
@@ -294,6 +298,7 @@ pub async fn provision(opts: &PodOptions, min_vram_gb: Option<u32>) -> Result<Po
             instance_id: id,
             gpu_name: offer.gpu_name.clone(),
             dph_total: offer.dph_total,
+            dph_storage: offer.storage_dph(opts.disk_gb),
             ssh_host: String::new(),
             ssh_port: 0,
             created_at: pod_state::now_rfc3339(),
@@ -306,31 +311,37 @@ pub async fn provision(opts: &PodOptions, min_vram_gb: Option<u32>) -> Result<Po
             );
         }
 
-        match wait_for_instance(id).await {
-            Ok(ssh) => {
-                booted = Some((id, offer.clone(), ssh));
-                break;
-            }
-            Err(e) => {
-                eprintln!("{} {e}", style("!").yellow());
-                eprintln!(
-                    "{} Host never booted — destroying instance {} and trying the next offer...",
-                    style("!").yellow(),
-                    id
-                );
-                bad_machines.insert(offer.machine_id);
-                match vast::destroy_instance(id).await {
-                    // Only forget a dud we actually destroyed — a record for
-                    // a still-billing instance must survive.
-                    Ok(()) => {
-                        let _ = pod_state::remove(id);
-                    }
-                    Err(e) => eprintln!(
-                        "{} Could not destroy {id}: {e} — still billing, check with: modl pod ls",
-                        style("✗").red()
-                    ),
+        // Boot AND ssh-readiness both count as "did this host work": an
+        // instance that reaches `running` but never accepts SSH is just as
+        // much a dud as one that never boots — destroy it and try the next
+        // offer instead of bailing out with a silently-billing instance.
+        let dud_reason = match wait_for_instance(id).await {
+            Ok(ssh) => match wait_for_ssh(&ssh) {
+                Ok(()) => {
+                    booted = Some((id, offer.clone(), ssh));
+                    break;
                 }
+                Err(e) => e,
+            },
+            Err(e) => e,
+        };
+        eprintln!("{} {dud_reason}", style("!").yellow());
+        eprintln!(
+            "{} Host never became reachable — destroying instance {} and trying the next offer...",
+            style("!").yellow(),
+            id
+        );
+        bad_machines.insert(offer.machine_id);
+        match vast::destroy_instance(id).await {
+            // Only forget a dud we actually destroyed — a record for
+            // a still-billing instance must survive.
+            Ok(_) => {
+                let _ = pod_state::remove(id);
             }
+            Err(e) => eprintln!(
+                "{} Could not destroy {id}: {e} — still billing, check with: modl pod ls",
+                style("✗").red()
+            ),
         }
     }
     let (instance_id, rented_offer, ssh) =
@@ -338,8 +349,9 @@ pub async fn provision(opts: &PodOptions, min_vram_gb: Option<u32>) -> Result<Po
 
     let pod = Pod {
         instance_id,
-        gpu_name: rented_offer.gpu_name,
         dph_total: rented_offer.dph_total,
+        dph_storage: rented_offer.storage_dph(opts.disk_gb),
+        gpu_name: rented_offer.gpu_name,
         ssh,
         created_at: pod_state::now_rfc3339(),
         bootstrap_fingerprint: None,
@@ -351,11 +363,6 @@ pub async fn provision(opts: &PodOptions, min_vram_gb: Option<u32>) -> Result<Po
             style("⚠").yellow()
         );
     }
-
-    // ---------------------------------------------------------------
-    // 3. Wait for sshd to accept connections (running != ssh-ready)
-    // ---------------------------------------------------------------
-    wait_for_ssh(&pod.ssh)?;
 
     Ok(pod)
 }
@@ -586,7 +593,7 @@ pub async fn teardown(pod: &Pod) -> Result<()> {
         pod.instance_id
     );
     match vast::destroy_instance(pod.instance_id).await {
-        Ok(()) => {
+        Ok(_) => {
             eprintln!("{} Pod destroyed — billing stopped.", style("✓").green());
             let _ = pod_state::remove(pod.instance_id);
             Ok(())
@@ -622,8 +629,11 @@ pub async fn run_pod_training(spec: TrainJobSpec, opts: PodOptions) -> Result<()
         );
     }
 
-    let pod = provision(&opts, min_vram_gb).await?;
+    // Clock starts before provision so the billed boot minutes count toward
+    // the estimate (an interactive confirm inflates it slightly — better a
+    // little high than silently low).
     let started_at = std::time::Instant::now();
+    let pod = provision(&opts, min_vram_gb).await?;
 
     // Everything after boot runs inside a fallible block so the pod is
     // destroyed on error unless --keep-pod was passed.
@@ -669,9 +679,9 @@ pub async fn run_pod_training(spec: TrainJobSpec, opts: PodOptions) -> Result<()
 
     let hours = started_at.elapsed().as_secs_f64() / 3600.0;
     eprintln!(
-        "  Pod time: {:.0}m — estimated cost ${:.2}",
+        "  Pod time: {:.0}m — estimated cost ${:.2} all-in (gpu + storage)",
         hours * 60.0,
-        hours * pod.dph_total
+        hours * (pod.dph_total + pod.dph_storage)
     );
 
     result
@@ -1010,22 +1020,41 @@ fn wait_for_ssh(ssh: &SshTarget) -> Result<()> {
         ssh.port
     );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(SSH_TIMEOUT_SECS);
+    // Keep the last real ssh error: without it every retry fails identically
+    // and invisibly for the whole window, and the final message blames a
+    // missing account key when the actual cause is often a stale known_hosts
+    // entry (Vast reuses proxy host:port pairs across tenants, so accept-new
+    // hard-fails with "HOST IDENTIFICATION HAS CHANGED").
+    let mut last_err = String::new();
     loop {
-        let ok = Command::new("ssh")
+        match Command::new("ssh")
             .args(ssh.base_args())
             .arg("true")
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if ok {
-            return Ok(());
+            .output()
+        {
+            Ok(out) if out.status.success() => return Ok(()),
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if let Some(line) = stderr.lines().rev().find(|l| !l.trim().is_empty()) {
+                    last_err = line.trim().to_string();
+                }
+            }
+            Err(e) => last_err = format!("failed to spawn ssh: {e}"),
         }
         if std::time::Instant::now() > deadline {
             bail!(
-                "SSH to root@{}:{} never came up. Is an SSH key registered on your \
-                 Vast.ai account (https://cloud.vast.ai/account)?",
+                "SSH to root@{}:{} never came up.\n  Last ssh error: {}\n  \
+                 If a key isn't registered on your Vast.ai account, add one: \
+                 https://cloud.vast.ai/account\n  \
+                 For a host-key mismatch, clear the stale entry: ssh-keygen -R '[{}]:{}'",
+                ssh.host,
+                ssh.port,
+                if last_err.is_empty() {
+                    "(none captured)"
+                } else {
+                    &last_err
+                },
                 ssh.host,
                 ssh.port
             );
@@ -1290,6 +1319,7 @@ mod tests {
             instance_id: 999,
             gpu_name: "RTX 3090".into(),
             dph_total: 0.19,
+            dph_storage: 0.04,
             ssh: SshTarget {
                 host: "ssh5.vast.ai".into(),
                 port: 4242,
@@ -1305,6 +1335,7 @@ mod tests {
         assert_eq!(back.instance_id, 999);
         assert_eq!(back.ssh.host, "ssh5.vast.ai");
         assert_eq!(back.dph_total, 0.19);
+        assert_eq!(back.dph_storage, 0.04);
     }
 
     #[test]

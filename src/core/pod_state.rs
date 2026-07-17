@@ -26,6 +26,12 @@ pub struct PodRecord {
     pub instance_id: u64,
     pub gpu_name: String,
     pub dph_total: f64,
+    /// Hourly storage cost for the provisioned disk — bills alongside the GPU
+    /// rate from the moment of rent, and can rival it on cheap cards.
+    /// Recorded at rent time (the instances API doesn't report it); defaults
+    /// to 0 for records written before this field existed.
+    #[serde(default)]
+    pub dph_storage: f64,
     pub ssh_host: String,
     pub ssh_port: u16,
     /// RFC3339 timestamp of when the record was first created.
@@ -44,9 +50,16 @@ impl PodRecord {
             .unwrap_or(0)
     }
 
-    /// Running-cost estimate so far: age × hourly rate.
+    /// All-in hourly rate: GPU + storage. Every user-facing cost figure must
+    /// use this — the rent quote deliberately prices all-in, and a stale nag
+    /// showing half the true burn defeats its purpose.
+    pub fn dph_all_in(&self) -> f64 {
+        self.dph_total + self.dph_storage
+    }
+
+    /// Running-cost estimate so far: age × all-in hourly rate.
     pub fn cost_so_far(&self) -> f64 {
-        (self.age_secs() as f64 / 3600.0) * self.dph_total
+        (self.age_secs() as f64 / 3600.0) * self.dph_all_in()
     }
 }
 
@@ -234,6 +247,7 @@ mod tests {
             instance_id: id,
             gpu_name: "RTX 3090".into(),
             dph_total: 0.20,
+            dph_storage: 0.0,
             ssh_host: "ssh5.vast.ai".into(),
             ssh_port: 12345,
             created_at: now_rfc3339(),
@@ -258,6 +272,24 @@ mod tests {
         r.dph_total = 0.30;
         assert!(r.age_secs() >= 3 * 3600 - 5);
         assert!((r.cost_so_far() - 0.90).abs() < 0.01);
+    }
+
+    #[test]
+    fn cost_so_far_includes_storage() {
+        let mut r = rec(1);
+        r.created_at = (now() - chrono::Duration::hours(10)).to_rfc3339();
+        r.dph_total = 0.12;
+        r.dph_storage = 0.10; // storage can rival the GPU rate on cheap cards
+        assert!((r.cost_so_far() - 2.20).abs() < 0.02);
+    }
+
+    #[test]
+    fn old_records_without_storage_field_still_parse() {
+        let json = r#"{"instance_id": 7, "gpu_name": "RTX 3090", "dph_total": 0.2,
+                       "ssh_host": "h", "ssh_port": 1, "created_at": "x",
+                       "bootstrap_fingerprint": null, "label": "modl-pod"}"#;
+        let r: PodRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(r.dph_storage, 0.0);
     }
 
     #[test]

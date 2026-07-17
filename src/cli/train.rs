@@ -80,7 +80,7 @@ async fn run_pod(spec: TrainJobSpec, args: PodArgs) -> Result<()> {
             style("→").cyan(),
             rec.instance_id,
             rec.gpu_name,
-            rec.dph_total
+            rec.dph_all_in()
         );
 
         // VRAM guard: if we can estimate the pod's VRAM and it's below the
@@ -123,7 +123,7 @@ async fn run_pod(spec: TrainJobSpec, args: PodArgs) -> Result<()> {
             "{} Pod {} still running (${:.3}/hr) — {} when done.",
             style("⚠").yellow(),
             rec.instance_id,
-            rec.dph_total,
+            rec.dph_all_in(),
             style(format!("modl pod rm {}", rec.instance_id)).bold()
         );
         return Ok(());

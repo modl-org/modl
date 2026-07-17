@@ -211,7 +211,7 @@ async fn run_on_pod(args: &GenerateArgs<'_>) -> Result<()> {
         style("→").cyan(),
         rec.instance_id,
         rec.gpu_name,
-        rec.dph_total
+        rec.dph_all_in()
     );
     let pod = crate::core::pod::Pod::from(rec.clone());
     let outcome =
@@ -223,7 +223,7 @@ async fn run_on_pod(args: &GenerateArgs<'_>) -> Result<()> {
         "{} Pod {} still running (${:.3}/hr) — {} when done.",
         style("⚠").yellow(),
         rec.instance_id,
-        rec.dph_total,
+        rec.dph_all_in(),
         style(format!("modl pod rm {}", rec.instance_id)).bold()
     );
     Ok(())
