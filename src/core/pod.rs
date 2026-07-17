@@ -441,13 +441,31 @@ pub fn run_train_job(pod: &Pod, spec: &TrainJobSpec) -> Result<()> {
 
     // A worker from a previous run may still be alive: nohup survives a
     // dropped link, and proceeding would wipe its dataset and events file
-    // out from under it and launch a second trainer on the same GPU.
-    if matches!(probe_worker(ssh), WorkerProbe::Alive) {
-        bail!(
+    // out from under it and launch a second trainer on the same GPU. Only a
+    // definitive `dead` permits relaunch — an SSH-flake `Unknown` must not
+    // fall through to the dataset wipe below, so retry the probe a couple of
+    // times and bail if it never resolves.
+    let mut probe = probe_worker(ssh);
+    for _ in 0..2 {
+        if !matches!(probe, WorkerProbe::Unknown) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        probe = probe_worker(ssh);
+    }
+    match probe {
+        WorkerProbe::Dead => {}
+        WorkerProbe::Alive => bail!(
             "A job is already running on pod {} — wait for it to finish, or destroy the pod: modl pod rm {}",
             pod.instance_id,
             pod.instance_id
-        );
+        ),
+        WorkerProbe::Unknown => bail!(
+            "Could not verify that no job is running on pod {} (the ssh probe kept failing) — \
+             proceeding would wipe a live job's dataset. Retry shortly, or inspect the pod: \
+             modl pod exec -- nvidia-smi",
+            pod.instance_id
+        ),
     }
 
     // ---------------------------------------------------------------
@@ -914,7 +932,8 @@ enum WorkerProbe {
 
 /// Ask the pod whether the worker process (from this or a previous job) is
 /// running. `Unknown` on SSH failure — callers pick the safe direction:
-/// the liveness loop only acts on `Dead`, the relaunch guard only on `Alive`.
+/// the liveness loop only acts on `Dead`, the relaunch guard only proceeds
+/// on `Dead` (an `Unknown` must never green-light the dataset wipe).
 fn probe_worker(ssh: &SshTarget) -> WorkerProbe {
     let cmd = format!(
         "if [ -f {REMOTE_ROOT}/worker.pid ] && kill -0 \"$(cat {REMOTE_ROOT}/worker.pid)\" 2>/dev/null; \

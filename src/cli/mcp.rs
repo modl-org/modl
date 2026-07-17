@@ -1049,11 +1049,10 @@ fn tool_remove_bg(args: &Value) -> Result<Value, (i32, String)> {
 
 /// Local path of the JSON result a detached pod run writes on completion
 /// (`modl run --pod --json` stdout). Existence = the run finished AND its
-/// artifacts were synced home.
+/// artifacts were synced home. Shared with `modl pod pull`, which writes the
+/// same file on the re-attach path.
 fn pod_result_path(run_id: &str) -> std::path::PathBuf {
-    crate::core::paths::modl_root()
-        .join("run-logs")
-        .join(format!("{run_id}.result.json"))
+    crate::core::pod_run::run_result_path(run_id)
 }
 
 /// Read + parse the pod run result file, if the run has synced home yet.

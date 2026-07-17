@@ -51,6 +51,18 @@ pub struct RemoteRunOutcome {
     pub artifacts: Vec<PathBuf>,
 }
 
+/// Local path of the JSON result recorded once a pod run's artifacts are on
+/// THIS machine — written by the MCP layer (captured `run --pod --json`
+/// stdout, or the reaper's `{"status":"failed"}` marker when the detached
+/// runner dies) and by `modl pod pull` (the re-attach path). Its existence is
+/// the terminal answer for `job_status(pod: true)`: pod runs aren't in the
+/// local DB, so this file is the only cross-process completion signal.
+pub fn run_result_path(run_id: &str) -> PathBuf {
+    crate::core::paths::modl_root()
+        .join("run-logs")
+        .join(format!("{run_id}.result.json"))
+}
+
 /// Caller-controlled knobs for a remote workflow run. Everything here maps
 /// 1:1 onto the pod-side `modl run` invocation so local and pod flags behave
 /// identically.
