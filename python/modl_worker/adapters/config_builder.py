@@ -299,9 +299,11 @@ def spec_to_aitoolkit_config(spec: dict, train_overrides: dict | None = None) ->
 
     # Detect model architecture.
     # Klein: remap to base (undistilled) arch for training.
+    # Krea 2: always train against Raw (LoRAs transfer to Turbo).
     _klein_arch_remap = {
         "flux2_klein": "flux2_klein_base",
         "flux2_klein_9b": "flux2_klein_base_9b",
+        "krea2_turbo": "krea2_raw",
     }
     arch_key = detect_arch(base_model_id)
     arch_key = _klein_arch_remap.get(arch_key, arch_key)
@@ -356,6 +358,9 @@ def spec_to_aitoolkit_config(spec: dict, train_overrides: dict | None = None) ->
 
     if arch_key == "qwen_image":
         _apply_qwen_model_config(model_config, lora_type)
+
+    if arch_key == "krea2_raw":
+        _apply_krea2_model_config(model_config, local_path)
 
     # Resolution
     resolution = params.get("resolution", arch["default_resolution"])
@@ -495,6 +500,38 @@ def _resolve_trigger_word(params: dict, arch_key: str, lora_type: str) -> str:
     if no_trigger_style and tw.upper() in ("NONE", ""):
         return ""
     return tw
+
+
+def _apply_krea2_model_config(model_config: dict, local_path: str | None) -> None:
+    """Point ai-toolkit's krea2 arch at usable transformer weights.
+
+    ai-toolkit builds the original SingleStreamDiT and strict-loads the
+    ORIGINAL krea key layout — the fp8-scaled Comfy repackage in the store
+    (extra scale tensors, fp8 dtype) cannot strict-load, and krea/Krea-2-Raw
+    ships no root-level single file for the hub-fallback filename derivation.
+    So: use a local bf16 single file when installed, otherwise download the
+    byte-identical Comfy-Org bf16 file (ai-toolkit quantizes to qfloat8
+    per model_flags, so 24GB cards still fit at 512px).
+    """
+    import os
+
+    base = os.path.basename(local_path) if local_path else ""
+    is_quantized_file = any(m in base for m in ("fp8", "int8", "mxfp8", "nvfp4"))
+    if local_path and os.path.isfile(local_path) and local_path.endswith(".safetensors") \
+            and not is_quantized_file:
+        model_config["name_or_path"] = local_path
+        return
+
+    if local_path:
+        print(
+            "[modl] Krea 2: store variant is quantized (fp8) — training needs the "
+            "original bf16 key layout; streaming Comfy-Org bf16 from HF instead "
+            "(pull `krea-2-raw --variant bf16` to train from the store).",
+            file=sys.stderr,
+        )
+    model_config["name_or_path"] = "Comfy-Org/Krea-2"
+    kwargs = model_config.setdefault("model_kwargs", {})
+    kwargs["checkpoint_filename"] = "diffusion_models/krea2_raw_bf16.safetensors"
 
 
 def _apply_qwen_model_config(model_config: dict, lora_type: str) -> None:

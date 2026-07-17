@@ -11,10 +11,118 @@ fuse to get fp8 storage / bf16 compute on GPU.
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+# Original krea-ai/krea-2 (ComfyUI / ai-toolkit) module names → the
+# Krea2Transformer2DModel names diffusers uses. Mirrors diffusers'
+# `_convert_non_diffusers_krea2_lora_to_diffusers`, but our loader DROPS
+# residual keys that have no diffusers target instead of raising — the
+# diffusers refactor folded the original per-block/final `modulation.lin`
+# projections into a shared `time_mod_proj` + per-block `scale_shift_table`
+# parameters, so those LoRA tensors (2/530 in the community distill extract)
+# are unmappable and simply skipped.
+_KREA2_ATTN_MAP = {"wq": "to_q", "wk": "to_k", "wv": "to_v", "wo": "to_out.0", "gate": "to_gate"}
+_KREA2_FF_MAP = {"gate": "ff.gate", "up": "ff.up", "down": "ff.down"}
+_KREA2_STANDALONE_MAP = {
+    "first": "img_in",
+    "last.linear": "final_layer.linear",
+    "tmlp.0": "time_embed.linear_1",
+    "tmlp.2": "time_embed.linear_2",
+    "tproj.1": "time_mod_proj",
+    "txtmlp.1": "txt_in.linear_1",
+    "txtmlp.3": "txt_in.linear_2",
+    "txtfusion.projector": "text_fusion.projector",
+}
+
+
+def _krea2_map_module(module: str) -> str | None:
+    m = re.match(r"blocks\.(\d+)\.(attn|mlp)\.(\w+)$", module)
+    if m:
+        idx, kind, sub = m.groups()
+        if kind == "attn" and sub in _KREA2_ATTN_MAP:
+            return f"transformer_blocks.{idx}.attn.{_KREA2_ATTN_MAP[sub]}"
+        if kind == "mlp" and sub in _KREA2_FF_MAP:
+            return f"transformer_blocks.{idx}.{_KREA2_FF_MAP[sub]}"
+        return None
+    m = re.match(r"txtfusion\.(layerwise_blocks|refiner_blocks)\.(\d+)\.(attn|mlp)\.(\w+)$", module)
+    if m:
+        block, idx, kind, sub = m.groups()
+        if kind == "attn" and sub in _KREA2_ATTN_MAP:
+            return f"text_fusion.{block}.{idx}.attn.{_KREA2_ATTN_MAP[sub]}"
+        if kind == "mlp" and sub in _KREA2_FF_MAP:
+            return f"text_fusion.{block}.{idx}.{_KREA2_FF_MAP[sub]}"
+        return None
+    return _KREA2_STANDALONE_MAP.get(module)
+
+
+def _is_krea2_lora(state_dict: dict) -> bool:
+    """True if the LoRA uses original krea module names (needs remapping)."""
+    for k in state_dict:
+        base = k.replace("base_model.model.", "").replace("diffusion_model.", "")
+        if re.match(r"blocks\.\d+\.attn\.(wq|wk|wv|wo)", base) or base.startswith("txtfusion."):
+            return True
+    return False
+
+
+def convert_krea2_lora_to_diffusers(state_dict: dict) -> tuple[dict, int]:
+    """Map an original-format krea2 LoRA onto Krea2Transformer2DModel names.
+
+    Returns ``(converted, dropped)`` where converted keys are prefixed with
+    ``transformer.`` (diffusers PEFT format) and *dropped* counts the tensors
+    with no diffusers target (unmappable modulation residuals — logged, not
+    fatal). Non-lora keys (e.g. ``.alpha``) are carried through when their
+    module maps.
+    """
+    stripped = {
+        k.replace("base_model.model.", "").replace("diffusion_model.", ""): v
+        for k, v in state_dict.items()
+    }
+    converted: dict = {}
+    dropped = 0
+    for key, val in stripped.items():
+        m = re.search(r"\.(lora_[AB]\.weight|alpha)$", key)
+        if m is None:
+            dropped += 1
+            continue
+        module = _krea2_map_module(key[: m.start()])
+        if module is None:
+            dropped += 1
+            continue
+        converted[f"transformer.{module}{key[m.start():]}"] = val
+    return converted, dropped
+
+
+def _maybe_convert_krea2_lora(lora_path: str, emitter=None) -> str | None:
+    """If *lora_path* is an original-format krea2 LoRA, write a diffusers-key
+    copy to a temp file and return its path; otherwise return None.
+
+    The caller owns the temp file and must delete it after loading.
+    """
+    try:
+        from safetensors.torch import load_file, save_file
+
+        sd = load_file(lora_path)
+        if not _is_krea2_lora(sd):
+            return None
+        converted, dropped = convert_krea2_lora_to_diffusers(sd)
+        if not converted:
+            return None
+        with tempfile.NamedTemporaryFile(suffix=".safetensors", delete=False) as tmp:
+            tmp_path = tmp.name
+            save_file(converted, tmp_path)
+        if emitter:
+            note = f" ({dropped} unmappable tensor(s) skipped)" if dropped else ""
+            emitter.info(f"  → Converted krea2 LoRA keys to diffusers format{note}")
+        return tmp_path
+    except Exception as exc:
+        if emitter:
+            emitter.info(f"  krea2 LoRA conversion skipped: {exc}")
+        return None
 
 
 def convert_lora_keys_if_needed(lora_path: str) -> tuple[str | None, str | None]:
@@ -218,6 +326,41 @@ def load_lora_with_conversion(
     """
     if _is_diff_patch(lora_path):
         return apply_diff_patch(pipeline, lora_path, lora_weight, emitter)
+
+    # Krea 2 LoRAs use original krea module names (wq/wk/wv/wo, txtfusion.*,
+    # last.modulation.lin). Diffusers' native converter RAISES on the
+    # unmappable modulation residual, so pre-convert to diffusers keys here
+    # (dropping the orphans) and load that instead of the raw file.
+    krea2_tmp = _maybe_convert_krea2_lora(lora_path, emitter)
+    if krea2_tmp is not None:
+        try:
+            pipeline.load_lora_weights(
+                os.path.dirname(krea2_tmp),
+                weight_name=os.path.basename(krea2_tmp),
+                adapter_name="default",
+            )
+            # Fuse at strength into the bf16 base, then unload the adapter and
+            # apply fp8 casting to the fused weights. Krea 2's full stack
+            # (12.9B transformer + Qwen3-VL TE + a 1.9GB r256 LoRA) doesn't fit
+            # resident on 24GB if the LoRA stays a separate bf16 adapter, and
+            # the cpu-offload + layerwise-cast + PEFT path OOMs. Fusing in bf16
+            # first (base is loaded as bf16 for exactly this) keeps the fp8
+            # storage / bf16 compute footprint identical to a bare generate —
+            # the path that already fits and runs fully resident.
+            pipeline.fuse_lora(adapter_names=["default"], lora_scale=lora_weight)
+            pipeline.unload_lora_weights()
+            _apply_deferred_fp8_casting(pipeline, emitter)
+            if emitter:
+                emitter.info(f"  → Fused krea2 LoRA at strength {lora_weight}")
+            return True
+        except Exception as exc:
+            _warn_lora_failed(emitter, f"krea2 LoRA load failed after conversion: {exc}")
+            return False
+        finally:
+            try:
+                os.unlink(krea2_tmp)
+            except OSError:
+                pass
 
     lora_dir = os.path.dirname(lora_path)
     lora_file = os.path.basename(lora_path)

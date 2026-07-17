@@ -37,7 +37,8 @@ pub(crate) const TRAINER_TORCHAUDIO_VERSION: &str = "2.7.0";
 const GENERATOR_TORCH_VERSION: &str = "2.7.0";
 const GENERATOR_TORCHVISION_VERSION: &str = "0.22.0";
 pub(crate) const AITOOLKIT_REPO_URL: &str = "https://github.com/ostris/ai-toolkit.git";
-pub(crate) const AITOOLKIT_PIN_SHA: &str = "6bb8acbffc2021cc009cc18491f00aa3800bf45a";
+// f1bc650: first pin with the krea2 arch (Krea 2 Raw + edit-LoRA training).
+pub(crate) const AITOOLKIT_PIN_SHA: &str = "f1bc6508ad63369ea2ac684a8ba929a9ab685c1e";
 const AITOOLKIT_CLONE_DIR: &str = "ai-toolkit";
 const DIFFUSERS_VERSION: &str = "0.39.0";
 const DEFAULT_PYTHON_ARTIFACT_URL: &str = "https://github.com/indygreg/python-build-standalone/releases/download/20250409/cpython-3.11.12+20250409-x86_64-unknown-linux-gnu-install_only.tar.gz";
