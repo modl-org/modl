@@ -67,6 +67,38 @@ fn state_path() -> PathBuf {
     crate::core::paths::modl_root().join("pods.json")
 }
 
+/// Guard for cross-process read-modify-write cycles on pods.json. The atomic
+/// rename in `save` prevents torn files, not lost updates — and concurrency
+/// is designed-in: MCP's detached `modl pod up` upserts SSH details while
+/// `pod ls`/`active_pod` reconcile-save from other processes. A lost update
+/// can drop the record of a billing instance, silently disabling the stale
+/// nag. Advisory flock on a sidecar file; released when the guard drops.
+/// Writes are tiny, so blocking on the lock is momentary.
+struct StateLock(#[allow(dead_code)] std::fs::File);
+
+fn lock_state() -> Result<StateLock> {
+    let path = state_path().with_extension("json.lock");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("Failed to open {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("Failed to lock {}", path.display()));
+        }
+    }
+    Ok(StateLock(file))
+}
+
 fn now() -> chrono::DateTime<chrono::Utc> {
     chrono::Utc::now()
 }
@@ -110,6 +142,7 @@ pub fn save(pods: &[PodRecord]) -> Result<()> {
 
 /// Insert or replace a record by instance ID.
 pub fn upsert(rec: PodRecord) -> Result<()> {
+    let _lock = lock_state()?;
     let mut pods = load();
     if let Some(existing) = pods.iter_mut().find(|p| p.instance_id == rec.instance_id) {
         *existing = rec;
@@ -122,6 +155,7 @@ pub fn upsert(rec: PodRecord) -> Result<()> {
 /// Update the bootstrap fingerprint on an existing record. No-op if the
 /// instance isn't tracked.
 pub fn set_fingerprint(instance_id: u64, fingerprint: &str) -> Result<()> {
+    let _lock = lock_state()?;
     let mut pods = load();
     if let Some(rec) = pods.iter_mut().find(|p| p.instance_id == instance_id) {
         rec.bootstrap_fingerprint = Some(fingerprint.to_string());
@@ -132,6 +166,7 @@ pub fn set_fingerprint(instance_id: u64, fingerprint: &str) -> Result<()> {
 
 /// Remove a record by instance ID. No-op if absent.
 pub fn remove(instance_id: u64) -> Result<()> {
+    let _lock = lock_state()?;
     let mut pods = load();
     let before = pods.len();
     pods.retain(|p| p.instance_id != instance_id);
@@ -147,14 +182,22 @@ pub fn remove(instance_id: u64) -> Result<()> {
 /// - Refreshes `ssh_host`/`ssh_port`/`gpu_name`/`dph_total` from live data.
 /// - Returns the newest *running* record (warns if more than one is running).
 pub async fn active_pod() -> Result<Option<PodRecord>> {
-    let mut pods = load();
-    if pods.is_empty() {
+    // Peek without the lock — an empty cache skips the network round-trip.
+    if load().is_empty() {
         return Ok(None);
     }
 
     let live = vast::list_instances().await?;
     let by_id: std::collections::HashMap<u64, &vast::Instance> =
         live.iter().map(|i| (i.id, i)).collect();
+
+    // Reconcile under the lock against a FRESH load: the Vast call above
+    // takes seconds, and a concurrent writer (MCP's detached `pod up`
+    // recording SSH details) may have changed the file since the peek —
+    // saving that stale snapshot would clobber its update. The lock is held
+    // only for the local read-modify-write, never across the network call.
+    let lock = lock_state()?;
+    let mut pods = load();
 
     // Prune dead records; refresh survivors from live data.
     pods.retain(|rec| by_id.contains_key(&rec.instance_id));
@@ -173,6 +216,7 @@ pub async fn active_pod() -> Result<Option<PodRecord>> {
         }
     }
     save(&pods)?;
+    drop(lock);
 
     // Active = running with a usable SSH target.
     let mut running: Vec<PodRecord> = pods
