@@ -685,23 +685,33 @@ fn ensure_profile_dependencies(
 ) -> Result<()> {
     let marker_path = bootstrap_marker_path(env_dir);
 
-    // Force re-bootstrap if the ai-toolkit pin changed (for training profiles
-    // only) — otherwise existing installs keep the old commit forever.
-    let aitoolkit_stale = profile == "trainer-cu124"
-        && marker_path.exists()
+    // Force re-bootstrap if any pinned dep changed (diffusers bump, ai-toolkit
+    // pin, torch) — otherwise existing installs keep old versions forever and
+    // the "runtime dependencies have changed" warning has no working fix.
+    // The pip installs below are idempotent for already-satisfied pins.
+    let expected_marker = if profile == "generator" {
+        format!(
+            "profile={profile}\ntorch={GENERATOR_TORCH_VERSION}\ntorchvision={GENERATOR_TORCHVISION_VERSION}\ndiffusers={DIFFUSERS_VERSION}\n"
+        )
+    } else {
+        format!(
+            "profile={profile}\ntorch={TRAINER_TORCH_VERSION}\ntorchvision={TRAINER_TORCHVISION_VERSION}\ntorchaudio={TRAINER_TORCHAUDIO_VERSION}\ndiffusers={DIFFUSERS_VERSION}\naitoolkit={AITOOLKIT_PIN_SHA}\n"
+        )
+    };
+    let deps_stale = marker_path.exists()
         && !created_env
         && std::fs::read_to_string(&marker_path)
             .ok()
-            .map(|m| !m.contains(&format!("aitoolkit={AITOOLKIT_PIN_SHA}")))
+            .map(|m| m != expected_marker)
             .unwrap_or(false);
 
-    if marker_path.exists() && !created_env && !aitoolkit_stale {
+    if marker_path.exists() && !created_env && !deps_stale {
         return Ok(());
     }
 
-    if aitoolkit_stale {
+    if deps_stale {
         println!(
-            "  {} ai-toolkit pin updated, re-cloning …",
+            "  {} Pinned runtime dependencies changed, updating …",
             style("→").dim()
         );
     }
