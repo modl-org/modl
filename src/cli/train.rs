@@ -47,11 +47,11 @@ pub struct PodArgs {
 }
 
 impl PodArgs {
-    fn into_options(self, label: String) -> crate::core::pod::PodOptions {
+    fn into_options(self, label: String, disk_gb: f64) -> crate::core::pod::PodOptions {
         crate::core::pod::PodOptions {
             gpu_type: self.gpu_type,
             max_price_per_hour: self.max_price,
-            disk_gb: crate::core::pod::POD_DISK_GB,
+            disk_gb,
             yes: self.yes,
             keep_pod: self.keep_pod,
             label,
@@ -131,7 +131,8 @@ async fn run_pod(spec: TrainJobSpec, args: PodArgs) -> Result<()> {
 
     // No active pod (or --fresh): today's one-shot behavior.
     let label = format!("modl-pod-{}", spec.output.lora_name);
-    pod::run_pod_training(spec, args.into_options(label)).await
+    let disk_gb = pod::disk_gb_for_train(&spec);
+    pod::run_pod_training(spec, args.into_options(label, disk_gb)).await
 }
 
 /// Best-effort VRAM (GB) for a Vast GPU name. `None` when the card is unknown

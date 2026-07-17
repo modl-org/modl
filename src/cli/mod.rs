@@ -574,9 +574,10 @@ pub enum PodCommands {
         /// Max hourly price for offers (USD)
         #[arg(long, default_value_t = 3.0)]
         max_price: f64,
-        /// Disk to provision (GB) — persistent pods accumulate an HF cache
-        #[arg(long, default_value_t = 120.0)]
-        disk: f64,
+        /// Disk to provision (GB). Default 120, raised automatically when
+        /// --model names something bigger (sized from models.toml params)
+        #[arg(long)]
+        disk: Option<f64>,
         /// Minimum VRAM (GB) floor; required for "auto" (defaults to 24)
         #[arg(long)]
         min_vram: Option<u32>,

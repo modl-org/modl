@@ -110,7 +110,7 @@ pub async fn ls(json: bool) -> Result<()> {
 pub async fn up(
     gpu: String,
     max_price: f64,
-    disk: f64,
+    disk: Option<f64>,
     min_vram: Option<u32>,
     fresh: bool,
     models: Vec<String>,
@@ -170,6 +170,24 @@ pub async fn up(
             min_vram_gb.unwrap()
         );
     }
+
+    // Disk: explicit --disk wins; otherwise size to the --model pre-pull
+    // list so fat models (flux2-dev, qwen-image) fit, never below the
+    // persistent-pod floor.
+    let disk = disk.unwrap_or_else(|| {
+        let sized = pod::estimate_disk_gb(models.iter().map(String::as_str))
+            .unwrap_or(pod::POD_UP_DISK_GB)
+            .max(pod::POD_UP_DISK_GB);
+        if sized > pod::POD_UP_DISK_GB {
+            eprintln!(
+                "{} sizing disk to {:.0}GB for {} (override with --disk)",
+                style("→").cyan(),
+                sized,
+                models.join(", ")
+            );
+        }
+        sized
+    });
 
     let opts = PodOptions {
         gpu_type: gpu.clone(),
