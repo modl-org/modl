@@ -39,7 +39,7 @@ const GENERATOR_TORCHVISION_VERSION: &str = "0.22.0";
 pub(crate) const AITOOLKIT_REPO_URL: &str = "https://github.com/ostris/ai-toolkit.git";
 pub(crate) const AITOOLKIT_PIN_SHA: &str = "6bb8acbffc2021cc009cc18491f00aa3800bf45a";
 const AITOOLKIT_CLONE_DIR: &str = "ai-toolkit";
-const DIFFUSERS_VERSION: &str = "0.38.0";
+const DIFFUSERS_VERSION: &str = "0.39.0";
 const DEFAULT_PYTHON_ARTIFACT_URL: &str = "https://github.com/indygreg/python-build-standalone/releases/download/20250409/cpython-3.11.12+20250409-x86_64-unknown-linux-gnu-install_only.tar.gz";
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const MACOS_AARCH64_PYTHON_ARTIFACT_URL: &str = "https://github.com/indygreg/python-build-standalone/releases/download/20250409/cpython-3.11.12+20250409-aarch64-apple-darwin-install_only.tar.gz";
@@ -685,23 +685,33 @@ fn ensure_profile_dependencies(
 ) -> Result<()> {
     let marker_path = bootstrap_marker_path(env_dir);
 
-    // Force re-bootstrap if the ai-toolkit pin changed (for training profiles
-    // only) — otherwise existing installs keep the old commit forever.
-    let aitoolkit_stale = profile == "trainer-cu124"
-        && marker_path.exists()
+    // Force re-bootstrap if any pinned dep changed (diffusers bump, ai-toolkit
+    // pin, torch) — otherwise existing installs keep old versions forever and
+    // the "runtime dependencies have changed" warning has no working fix.
+    // The pip installs below are idempotent for already-satisfied pins.
+    let expected_marker = if profile == "generator" {
+        format!(
+            "profile={profile}\ntorch={GENERATOR_TORCH_VERSION}\ntorchvision={GENERATOR_TORCHVISION_VERSION}\ndiffusers={DIFFUSERS_VERSION}\n"
+        )
+    } else {
+        format!(
+            "profile={profile}\ntorch={TRAINER_TORCH_VERSION}\ntorchvision={TRAINER_TORCHVISION_VERSION}\ntorchaudio={TRAINER_TORCHAUDIO_VERSION}\ndiffusers={DIFFUSERS_VERSION}\naitoolkit={AITOOLKIT_PIN_SHA}\n"
+        )
+    };
+    let deps_stale = marker_path.exists()
         && !created_env
         && std::fs::read_to_string(&marker_path)
             .ok()
-            .map(|m| !m.contains(&format!("aitoolkit={AITOOLKIT_PIN_SHA}")))
+            .map(|m| m != expected_marker)
             .unwrap_or(false);
 
-    if marker_path.exists() && !created_env && !aitoolkit_stale {
+    if marker_path.exists() && !created_env && !deps_stale {
         return Ok(());
     }
 
-    if aitoolkit_stale {
+    if deps_stale {
         println!(
-            "  {} ai-toolkit pin updated, re-cloning …",
+            "  {} Pinned runtime dependencies changed, updating …",
             style("→").dim()
         );
     }

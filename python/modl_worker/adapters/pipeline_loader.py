@@ -257,13 +257,113 @@ def _strip_comfy_prefix(checkpoint, **kwargs):
     }
 
 
+def _convert_krea2_checkpoint_to_diffusers(checkpoint, **kwargs):
+    """Convert original krea-ai/krea-2 checkpoint keys to Krea2Transformer2DModel.
+
+    Diffusers 0.39.0 has no single-file support for Krea2 (the class is not in
+    SINGLE_FILE_LOADABLE_CLASSES), so this converter lives here.  The module
+    correspondence matches diffusers' own
+    ``_convert_non_diffusers_krea2_lora_to_diffusers`` (lora_conversion_utils),
+    extended to the non-linear tensors (norm scales, modulation tables).
+    Norm ``.scale`` tensors copy directly: Krea2RMSNorm keeps the checkpoint's
+    zero-centered convention (effective multiplier is ``1 + weight``).
+    """
+    import re
+
+    attn_map = {"wq": "to_q", "wk": "to_k", "wv": "to_v", "wo": "to_out.0", "gate": "to_gate"}
+    standalone_map = {
+        "first.weight": "img_in.weight",
+        "first.bias": "img_in.bias",
+        "last.linear.weight": "final_layer.linear.weight",
+        "last.linear.bias": "final_layer.linear.bias",
+        "last.norm.scale": "final_layer.norm.weight",
+        "tmlp.0.weight": "time_embed.linear_1.weight",
+        "tmlp.0.bias": "time_embed.linear_1.bias",
+        "tmlp.2.weight": "time_embed.linear_2.weight",
+        "tmlp.2.bias": "time_embed.linear_2.bias",
+        "tproj.1.weight": "time_mod_proj.weight",
+        "tproj.1.bias": "time_mod_proj.bias",
+        "txtmlp.0.scale": "txt_in.norm.weight",
+        "txtmlp.1.weight": "txt_in.linear_1.weight",
+        "txtmlp.1.bias": "txt_in.linear_1.bias",
+        "txtmlp.3.weight": "txt_in.linear_2.weight",
+        "txtmlp.3.bias": "txt_in.linear_2.bias",
+        "txtfusion.projector.weight": "text_fusion.projector.weight",
+    }
+
+    def convert_inner(rest):
+        """Map the per-block suffix (attn/mlp/norms) shared by transformer
+        and text-fusion blocks. Returns None if unrecognized."""
+        m = re.match(r"attn\.(\w+)\.weight$", rest)
+        if m and m.group(1) in attn_map:
+            return f"attn.{attn_map[m.group(1)]}.weight"
+        if rest == "attn.qknorm.qnorm.scale":
+            return "attn.norm_q.weight"
+        if rest == "attn.qknorm.knorm.scale":
+            return "attn.norm_k.weight"
+        m = re.match(r"mlp\.(gate|up|down)\.weight$", rest)
+        if m:
+            return f"ff.{m.group(1)}.weight"
+        if rest == "prenorm.scale":
+            return "norm1.weight"
+        if rest == "postnorm.scale":
+            return "norm2.weight"
+        return None
+
+    converted = {}
+    for key, value in checkpoint.items():
+        k = key
+        for prefix in ("model.diffusion_model.", "diffusion_model."):
+            if k.startswith(prefix):
+                k = k[len(prefix):]
+                break
+
+        if k in standalone_map:
+            converted[standalone_map[k]] = value
+            continue
+        if k == "last.modulation.lin":
+            converted["final_layer.scale_shift_table"] = value
+            continue
+
+        m = re.match(r"blocks\.(\d+)\.(.+)$", k)
+        if m:
+            idx, rest = m.groups()
+            if rest == "mod.lin":
+                converted[f"transformer_blocks.{idx}.scale_shift_table"] = value.reshape(6, -1)
+                continue
+            inner = convert_inner(rest)
+            if inner is not None:
+                converted[f"transformer_blocks.{idx}.{inner}"] = value
+                continue
+
+        m = re.match(r"txtfusion\.(layerwise_blocks|refiner_blocks)\.(\d+)\.(.+)$", k)
+        if m:
+            block, idx, rest = m.groups()
+            inner = convert_inner(rest)
+            if inner is not None:
+                converted[f"text_fusion.{block}.{idx}.{inner}"] = value
+                continue
+
+        # Unknown key — keep as-is so the strict-ish overlap check in the
+        # caller can surface a real format mismatch instead of hiding it.
+        converted[k] = value
+    return converted
+
+
 def _get_checkpoint_converter(model_class_name: str):
     """Get the right ComfyUI→diffusers key converter for a transformer class.
 
     Models with complex key remapping (Flux, Chroma, Z-Image) have dedicated
     converters in diffusers.  Models whose ComfyUI keys match diffusers after
     prefix stripping (QwenImage) use the generic ``_strip_comfy_prefix``.
+    Classes diffusers cannot convert at all (Krea2) have local converters.
     """
+    _LOCAL_CONVERTER_MAP = {
+        "Krea2Transformer2DModel": _convert_krea2_checkpoint_to_diffusers,
+    }
+    local = _LOCAL_CONVERTER_MAP.get(model_class_name)
+    if local is not None:
+        return local
     _CONVERTER_MAP = {
         "FluxTransformer2DModel": "convert_flux_transformer_checkpoint_to_diffusers",
         "Flux2Transformer2DModel": "convert_flux2_transformer_checkpoint_to_diffusers",
@@ -347,6 +447,104 @@ def _load_component_fallback(
         )
     model.load_state_dict(state_dict, strict=False)
     return model.to(get_inference_dtype())
+
+
+def _normalize_te_state_dict(state_dict: dict, model, filename: str, emitter):
+    """Normalize a single-file text-encoder state dict to the model's keys.
+
+    Handles the zoo of community text-encoder layouts:
+      - "model."-prefixed keys (ComfyUI ForConditionalGeneration-style)
+      - ComfyUI Qwen3-VL files, which put the language model at
+        "model.layers.*" instead of "language_model.layers.*"
+      - ComfyUI scaled-fp8 quantization: ".weight_scale" scalars are applied
+        and the Linear weights re-cast to fp8 so they stay quantized on GPU
+        (compute runs in bf16 via ``_prepare_fp8_model`` hooks);
+        ".comfy_quant" metadata blobs are dropped.
+
+    Raises when fewer than 90% of the model's keys are covered — with
+    ``load_state_dict(strict=False)`` a silent partial load leaves the model
+    on random init weights and produces garbage output.
+
+    Returns ``(state_dict, kept_fp8)``.
+    """
+    import torch
+
+    model_keys = set(model.state_dict().keys())
+
+    state_dict = {
+        k: v for k, v in state_dict.items() if not k.endswith(".comfy_quant")
+    }
+
+    kept_fp8 = False
+    scale_keys = [k for k in state_dict if k.endswith(".weight_scale")]
+    for sk in scale_keys:
+        wk = sk.removesuffix("_scale")
+        w = state_dict.get(wk)
+        if w is not None and w.dtype == torch.float8_e4m3fn:
+            state_dict[wk] = (w.float() * state_dict[sk].float()).to(
+                torch.float8_e4m3fn
+            )
+            kept_fp8 = True
+        del state_dict[sk]
+
+    def overlap(sd):
+        return len(model_keys & sd.keys()) / max(len(model_keys), 1)
+
+    def strip_model(sd):
+        return {k.removeprefix("model."): v for k, v in sd.items()}
+
+    def qwen3vl_comfy(sd):
+        out = {}
+        for k, v in sd.items():
+            k = k.removeprefix("model.")
+            if k.startswith(("layers.", "embed_tokens.", "norm.")):
+                k = "language_model." + k
+            out[k] = v
+        return out
+
+    best = state_dict
+    for transform in (lambda sd: sd, strip_model, qwen3vl_comfy):
+        candidate = transform(state_dict)
+        if overlap(candidate) >= 0.9:
+            best = candidate
+            break
+        if overlap(candidate) > overlap(best):
+            best = candidate
+
+    coverage = overlap(best)
+    if coverage < 0.9:
+        raise RuntimeError(
+            f"text encoder weights mismatch: only {coverage:.0%} of model keys "
+            f"found in {filename} — the file is in an unsupported key format. "
+            f"Loading it would leave the model with random weights and produce "
+            f"garbage output. Re-install with `modl pull` to get compatible "
+            f"weights."
+        )
+    if kept_fp8:
+        emitter.info(
+            f"  → Applied {len(scale_keys)} fp8 weight scales (weights stay fp8)"
+        )
+    return best, kept_fp8
+
+
+def _cast_non_fp8_to_dtype(model, dtype):
+    """Cast every non-fp8 floating param/buffer to *dtype* in place.
+
+    The blanket ``model.to(dtype)`` used for full-precision text encoders
+    would upcast fp8 Linear weights and destroy the VRAM saving — this is
+    the fp8-preserving equivalent.
+    """
+    import torch
+
+    for module in model.modules():
+        for name, p in list(module._parameters.items()):
+            if p is not None and p.is_floating_point() and p.dtype != torch.float8_e4m3fn:
+                module._parameters[name] = torch.nn.Parameter(
+                    p.to(dtype), requires_grad=False
+                )
+        for name, b in list(module._buffers.items()):
+            if b is not None and b.is_floating_point() and b.dtype != torch.float8_e4m3fn:
+                module._buffers[name] = b.to(dtype)
 
 
 def _load_safetensors_lenient(filepath: str) -> dict:
@@ -708,17 +906,29 @@ def assemble_pipeline(
                 )
                 components[param_name] = model
             else:
-                # Transformers models (CLIP, T5) — use empty weights to
-                # avoid ~44GB fp32 allocation for large models like T5-XXL
+                # Transformers models (CLIP, T5, Qwen3-VL) — use empty weights
+                # to avoid ~44GB fp32 allocation for large models like T5-XXL
                 config_obj = ModelClass.config_class.from_pretrained(str(config_dir))
                 with init_empty_weights():
                     model = ModelClass(config_obj)
                 state_dict = safetensors.torch.load_file(resolved_path)
+                state_dict, kept_fp8 = _normalize_te_state_dict(
+                    state_dict, model, filename, emitter,
+                )
                 model.load_state_dict(state_dict, strict=False, assign=True)
                 _materialize_meta_tensors(model)
-                # Always cast text encoders to inference dtype for numerical stability.
-                # fp8 text encoders produce unreliable embeddings.
-                model = model.to(get_inference_dtype())
+                if kept_fp8:
+                    # Scaled-fp8 file: Linear weights stay fp8 on GPU, compute
+                    # in bf16 via hooks (same trick as the fp8 transformer).
+                    _cast_non_fp8_to_dtype(model, get_inference_dtype())
+                    hook_count, _ = _prepare_fp8_model(model)
+                    emitter.info(
+                        f"  → fp8 text encoder: {hook_count} Linear layers hooked"
+                    )
+                else:
+                    # Always cast text encoders to inference dtype for numerical
+                    # stability. Unscaled fp8 embeddings are unreliable.
+                    model = model.to(get_inference_dtype())
                 components[param_name] = model
         else:
             emitter.info(f"Skipping {param_name} (no weights found)")

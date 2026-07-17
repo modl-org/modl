@@ -248,10 +248,29 @@ pub async fn stop() -> Result<()> {
             .arg("-TERM")
             .arg(pid.to_string())
             .status();
-        std::thread::sleep(Duration::from_millis(500));
+
+        // Wait for the process to actually exit — it drains any in-flight
+        // job first. Removing files or starting a new daemon while the old
+        // one is still draining causes the old shutdown to clobber the new
+        // daemon's socket.
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while std::time::Instant::now() < deadline {
+            let alive = Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !alive {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
     }
 
-    // Clean up files
+    // Clean up any leftover files (crashed daemon). A cleanly-exited daemon
+    // removes its own.
     let sock = socket_path();
     if sock.exists() {
         let _ = std::fs::remove_file(&sock);

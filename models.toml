@@ -322,6 +322,33 @@ prompt_guide = """
 Same prompting as ERNIE-Image (quote exact text to render, EN/ZH) but
 8-step distilled — keep prompts focused; negative prompts have no effect."""
 
+# ─── Krea 2 ──────────────────────────────────────────────────────────
+
+[families.krea]
+name = "Krea 2"
+vendor = "Krea"
+year = 2026
+
+[families.krea.models.krea-2-turbo]
+name = "Krea 2 Turbo"
+arch_key = "krea2_turbo"
+description = "TDM-distilled 12.9B MMDiT, 8 steps, strong photographic aesthetics"
+transformer_b = 12.9
+text_encoder = "Qwen3-VL 4B"
+text_encoder_b = 4.4
+total_b = 17.3
+vram_bf16 = 36
+vram_fp8 = 16
+capabilities = ["txt2img"]
+quality = 5
+speed = 4
+text_rendering = false
+defaults = { steps = 8, guidance = 0.0, resolution = 1024 }
+prompt_guide = """
+Runs at guidance 0.0 — CFG is baked in, negative prompts do nothing.
+Photographic, aesthetic-forward outputs; descriptive prose prompts with
+lighting and composition detail work best. Supports 1K–2K resolutions."""
+
 # ─── Qwen Image (generation) ─────────────────────────────────────────
 
 [families.qwen_image]
