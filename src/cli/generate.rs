@@ -147,7 +147,8 @@ async fn run_on_pod(args: &GenerateArgs<'_>) -> Result<()> {
 
     let (width, height) = match args.size {
         Some(s) => {
-            let (w, h) = model_resolve::resolve_size(s)?;
+            let (w, h) =
+                model_resolve::resolve_size_for_model(s, model_family::default_resolution(model))?;
             (Some(w), Some(h))
         }
         None => (None, None),
@@ -389,14 +390,16 @@ async fn run_local(args: GenerateArgs<'_>, db: Database) -> Result<()> {
     let base_model_path = model_resolve::resolve_base_model_path(&base_model, &db);
 
     // -------------------------------------------------------------------
-    // Resolve size: explicit --size wins, otherwise use init-image dims
+    // Resolve size: explicit --size wins, otherwise use init-image dims.
+    // Presets scale to the model's native resolution (SD 1.5: 1:1 → 512).
     // -------------------------------------------------------------------
+    let native_resolution = model_family::default_resolution(&base_model);
     let (width, height) = if let Some(s) = size {
-        model_resolve::resolve_size(s)?
+        model_resolve::resolve_size_for_model(s, native_resolution)?
     } else if let Some(path) = init_image {
         image_dimensions(path)?
     } else {
-        model_resolve::resolve_size("1:1")?
+        model_resolve::resolve_size_for_model("1:1", native_resolution)?
     };
 
     // -------------------------------------------------------------------
