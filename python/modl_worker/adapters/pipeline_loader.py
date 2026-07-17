@@ -279,6 +279,76 @@ def _get_checkpoint_converter(model_class_name: str):
     return _strip_comfy_prefix
 
 
+def _convert_original_format(model_class_name: str, state_dict: dict, emitter):
+    """Convert an original/ComfyUI-format component state dict to diffusers keys.
+
+    Used by the manual-assembly fallback for classes that diffusers'
+    ``from_single_file`` cannot handle (not in its allowlist).  Returns the
+    converted state dict, or None if no converter is known for this class.
+    """
+    _CONVERTER_MAP = {
+        # The Qwen-Image VAE is architecturally a Wan 2.1 VAE; Comfy-Org
+        # ships it with original Wan key names.
+        "AutoencoderKLQwenImage": "convert_wan_vae_to_diffusers",
+    }
+    fn_name = _CONVERTER_MAP.get(model_class_name)
+    if fn_name is None:
+        return None
+    import importlib
+    sfu = importlib.import_module("diffusers.loaders.single_file_utils")
+    converter = getattr(sfu, fn_name, None)
+    if converter is None:
+        return None
+    emitter.info(f"  → Converting original-format keys via {fn_name}")
+    return converter(dict(state_dict))
+
+
+def _load_component_fallback(
+    param_name: str,
+    ModelClass,
+    model_class_name: str,
+    config_dir,
+    resolved_path: str,
+    emitter,
+):
+    """Manually assemble a component when ``from_single_file`` can't load it.
+
+    Loads config → instantiates → loads weights, converting original-format
+    key layouts when a converter is known.  Refuses to continue when most
+    model keys are missing from the file — ``load_state_dict(strict=False)``
+    would silently leave the model with random init weights, which completes
+    "successfully" and produces garbage output.
+    """
+    import safetensors.torch
+
+    config_dict = ModelClass.load_config(str(config_dir))
+    model = ModelClass.from_config(config_dict)
+    state_dict = safetensors.torch.load_file(resolved_path)
+    model_keys = set(model.state_dict().keys())
+    if not model_keys & set(state_dict.keys()):
+        # Zero overlap: the file is in original/ComfyUI key layout.
+        converted = _convert_original_format(model_class_name, state_dict, emitter)
+        if converted is not None:
+            state_dict = converted
+    missing = model_keys - set(state_dict.keys())
+    if len(missing) > len(model_keys) // 10:
+        raise RuntimeError(
+            f"{param_name} weights mismatch: only "
+            f"{len(model_keys) - len(missing)}/{len(model_keys)} model keys "
+            f"found in {Path(resolved_path).name} — the file is in an "
+            f"unsupported key format. Loading it would leave the model "
+            f"with random weights and produce garbage output. "
+            f"Re-install with `modl pull` to get compatible weights."
+        )
+    if missing:
+        emitter.info(
+            f"  ⚠ {param_name}: {len(missing)} keys missing from "
+            f"{Path(resolved_path).name} (loading anyway)"
+        )
+    model.load_state_dict(state_dict, strict=False)
+    return model.to(get_inference_dtype())
+
+
 def _load_safetensors_lenient(filepath: str) -> dict:
     """Load a safetensors file, tolerating trailing data beyond the header coverage.
 
@@ -616,24 +686,10 @@ def assemble_pipeline(
                         torch_dtype=get_inference_dtype(),
                     )
                 except (ValueError, NotImplementedError):
-                    # Fall back: load config → create model → load weights
-                    config_dict = ModelClass.load_config(str(config_dir))
-                    model = ModelClass.from_config(config_dict)
-                    state_dict = safetensors.torch.load_file(resolved_path)
-                    # Check key overlap before loading — zero overlap means
-                    # the file has non-diffusers keys (e.g. ComfyUI/original format)
-                    model_keys = set(model.state_dict().keys())
-                    file_keys = set(state_dict.keys())
-                    overlap = model_keys & file_keys
-                    if not overlap:
-                        emitter.info(
-                            f"  ⚠ {param_name}: 0/{len(file_keys)} keys match "
-                            f"diffusers format — weights NOT loaded. "
-                            f"Re-install with `modl pull` to get compatible weights."
-                        )
-                    model.load_state_dict(state_dict, strict=False)
-                    model = model.to(get_inference_dtype())
-                    components[param_name] = model
+                    components[param_name] = _load_component_fallback(
+                        param_name, ModelClass, model_class_name,
+                        config_dir, resolved_path, emitter,
+                    )
             elif use_hf_dir:
                 # HF directory layout — use from_pretrained with optional
                 # NF4 quantization (e.g. Flux2's 24B Mistral3 text encoder)
@@ -693,9 +749,6 @@ def _load_gguf_pipeline(
     (text encoder, VAE, scheduler, etc.) from local configs/weights. This
     ensures proper dequantization during inference and LoRA compatibility.
     """
-    import torch
-    import safetensors.torch
-
     dtype = get_inference_dtype()
     PipelineClass = _get_pipeline(cls_name)
     filename = Path(gguf_path).name
@@ -789,12 +842,10 @@ def _load_gguf_pipeline(
                     resolved_path, config=str(config_dir), torch_dtype=dtype,
                 )
             except (ValueError, NotImplementedError):
-                # Fallback: manual load
-                config_dict = ModelClass.load_config(str(config_dir))
-                model = ModelClass.from_config(config_dict)
-                sd = safetensors.torch.load_file(resolved_path)
-                model.load_state_dict(sd, strict=False)
-                components[param_name] = model.to(dtype)
+                components[param_name] = _load_component_fallback(
+                    param_name, ModelClass, model_class_name,
+                    config_dir, resolved_path, emitter,
+                )
         else:
             # Transformers models (text encoder) — from_pretrained with HF layout
             if not use_hf_dir and not os.path.isdir(resolved_path):
