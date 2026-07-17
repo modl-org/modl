@@ -71,6 +71,91 @@ def move_pipe_to_device(pipe):
         pipe.to(dev)
 
 
+def _pipe_weight_bytes(pipe) -> int:
+    """Sum of parameter + buffer bytes across all pipeline components.
+
+    fp8-stored weights count 1 byte/element, so a layerwise-cast
+    transformer is sized at its actual GPU footprint.
+    """
+    total = 0
+    for name in getattr(pipe, "components", {}) or {}:
+        comp = getattr(pipe, name, None)
+        if comp is None or not hasattr(comp, "parameters"):
+            continue
+        for p in comp.parameters():
+            total += p.numel() * p.element_size()
+        for b in comp.buffers():
+            total += b.numel() * b.element_size()
+    return total
+
+
+def _has_accelerate_hooks(pipe) -> bool:
+    """True if any component carries an accelerate offload hook."""
+    for name in getattr(pipe, "components", {}) or {}:
+        comp = getattr(pipe, name, None)
+        if comp is not None and getattr(comp, "_hf_hook", None) is not None:
+            return True
+    return False
+
+
+# Headroom for activations, per-layer dtype-cast transients, VAE decode and
+# CUDA context when deciding whether a pipeline can live fully resident.
+# Calibrated on Krea 2 Turbo (fp8, 18.4GB weights): denoise transients
+# measured ~7GB over weights (~38%) — layerwise-cast bf16 compute buffers
+# dominate. 35% of weights with a 6GB floor keeps the decision honest.
+_RESIDENT_RESERVE_FLOOR_BYTES = 6 * 1024**3
+_RESIDENT_RESERVE_WEIGHT_FRACTION = 0.35
+
+
+def rebalance_pipe_placement(pipe, emitter=None) -> None:
+    """Promote an offloaded pipeline to full GPU residency when it fits.
+
+    ``enable_model_cpu_offload`` re-transfers weights CPU→GPU on every job —
+    for a stack that genuinely fits VRAM (SDXL, SD15, Klein 4B on a 24GB
+    card) that transfer is pure per-job overhead. Called after LoRA /
+    deferred-fp8 state is final, because the footprint before layerwise
+    casting (bf16) can be ~2x the end state.
+
+    No-op on non-CUDA devices, when the pipeline is already resident, when
+    the stack doesn't fit with reserve, or when MODL_FORCE_OFFLOAD=1.
+    """
+    if get_device() != "cuda":
+        return
+    if os.environ.get("MODL_FORCE_OFFLOAD") == "1":
+        return
+    if not _has_accelerate_hooks(pipe):
+        return  # already resident (or never offloaded)
+
+    weight_bytes = _pipe_weight_bytes(pipe)
+    free_bytes, _total = torch.cuda.mem_get_info()
+    reserve = max(
+        _RESIDENT_RESERVE_FLOOR_BYTES,
+        int(weight_bytes * _RESIDENT_RESERVE_WEIGHT_FRACTION),
+    )
+    needed = weight_bytes + reserve
+    if needed > free_bytes:
+        if emitter:
+            emitter.info(
+                f"  → Keeping cpu offload: {weight_bytes / 1024**3:.1f}GB weights "
+                f"+ {reserve / 1024**3:.1f}GB reserve > {free_bytes / 1024**3:.1f}GB free"
+            )
+        return
+
+    try:
+        pipe.remove_all_hooks()
+        pipe.to("cuda")
+        if emitter:
+            emitter.info(
+                f"  → Pipeline fits VRAM ({weight_bytes / 1024**3:.1f}GB weights) — "
+                f"running fully resident (no per-job offload transfers)"
+            )
+    except torch.cuda.OutOfMemoryError:
+        torch.cuda.empty_cache()
+        pipe.enable_model_cpu_offload()
+        if emitter:
+            emitter.info("  → Resident placement OOMed, reverting to cpu offload")
+
+
 def empty_cache():
     """Free GPU cache for the active device."""
     dev = get_device()
