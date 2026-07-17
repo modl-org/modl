@@ -1,9 +1,11 @@
 import { useState, useRef, useEffect } from 'react'
-import { SIZE_PRESETS, detectSizePreset, type GenerateFormState } from './generate-state'
+import { scaledSizePresets, detectSizePreset, type GenerateFormState } from './generate-state'
 
 type Props = {
   form: GenerateFormState
   setForm: React.Dispatch<React.SetStateAction<GenerateFormState>>
+  /** Selected model's native resolution — presets scale to it (SD 1.5: 512) */
+  nativeResolution?: number
 }
 
 /** Snap a value to the nearest multiple of 8, clamped to [128, 2048] */
@@ -69,8 +71,9 @@ function AspectPreview({ w, h, active }: { w: number; h: number; active: boolean
   )
 }
 
-export function SizePanel({ form, setForm }: Props) {
-  const activePreset = detectSizePreset(form.width, form.height)
+export function SizePanel({ form, setForm, nativeResolution = 1024 }: Props) {
+  const presets = scaledSizePresets(nativeResolution)
+  const activePreset = detectSizePreset(form.width, form.height, nativeResolution)
 
   const applyPreset = (width: number, height: number) => {
     setForm((prev) => ({ ...prev, width, height }))
@@ -80,7 +83,7 @@ export function SizePanel({ form, setForm }: Props) {
     <div className="space-y-2.5">
       {/* Preset buttons with aspect ratio previews */}
       <div className="flex gap-1.5">
-        {SIZE_PRESETS.map((preset) => {
+        {presets.map((preset) => {
           const isActive = activePreset === preset.label
           return (
             <button

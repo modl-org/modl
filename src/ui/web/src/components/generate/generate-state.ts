@@ -82,7 +82,9 @@ export function createDefaultGenerateFormState(): GenerateFormState {
   }
 }
 
-/** Size presets available in the UI */
+/** Size presets available in the UI, defined at 1024-native resolution.
+ *  Always render/apply them through `scaledSizePresets` — models like
+ *  SD 1.5 are 512-native and distort badly at 1024. */
 export const SIZE_PRESETS = [
   { label: '1:1', width: 1024, height: 1024, icon: '■' },
   { label: '3:4', width: 896, height: 1152, icon: '▮' },
@@ -93,8 +95,22 @@ export const SIZE_PRESETS = [
 
 export type SizePreset = (typeof SIZE_PRESETS)[number]['label'] | 'custom'
 
-export function detectSizePreset(w: number, h: number): SizePreset {
-  const match = SIZE_PRESETS.find((p) => p.width === w && p.height === h)
+/** Scale a 1024-reference dimension to a model's native resolution, snapped
+ *  to the nearest multiple of 64 (matches the CLI's resolve_size_for_model). */
+export function scaleToNative(dim: number, native: number): number {
+  return Math.max(1, Math.floor((Math.floor((dim * native) / 1024) + 32) / 64)) * 64
+}
+
+export function scaledSizePresets(native: number) {
+  return SIZE_PRESETS.map((p) => ({
+    ...p,
+    width: scaleToNative(p.width, native),
+    height: scaleToNative(p.height, native),
+  }))
+}
+
+export function detectSizePreset(w: number, h: number, native = 1024): SizePreset {
+  const match = scaledSizePresets(native).find((p) => p.width === w && p.height === h)
   return match ? match.label : 'custom'
 }
 
@@ -103,21 +119,25 @@ export function detectSizePreset(w: number, h: number): SizePreset {
 export function modelDefaults(
   modelName: string,
   familyInfo?: import('../../api').ModelFamilyInfo | null,
-): { steps: number; guidance: number } {
+): { steps: number; guidance: number; resolution: number } {
   if (familyInfo) {
-    return { steps: familyInfo.default_steps, guidance: familyInfo.default_guidance }
+    return {
+      steps: familyInfo.default_steps,
+      guidance: familyInfo.default_guidance,
+      resolution: familyInfo.default_resolution,
+    }
   }
   // Fallback: string matching (for initial load before families are fetched)
   const lower = modelName.toLowerCase()
-  if (lower.includes('z-image-turbo') || lower.includes('z_image_turbo')) return { steps: 8, guidance: 1.0 }
-  if (lower.includes('klein') || lower.includes('schnell')) return { steps: 4, guidance: 1.0 }
-  if (lower.includes('qwen')) return { steps: 25, guidance: 3.0 }
-  if (lower.includes('chroma')) return { steps: 25, guidance: 4.0 }
-  if (lower.includes('flux2') || lower.includes('flux.2') || lower.includes('flux-2')) return { steps: 28, guidance: 4.0 }
-  if (lower.includes('turbo')) return { steps: 4, guidance: 1.0 }
-  if (lower.includes('sdxl')) return { steps: 30, guidance: 7.5 }
-  if (lower.includes('sd-1.5') || lower.includes('sd15')) return { steps: 30, guidance: 7.5 }
-  return { steps: 28, guidance: 3.5 }
+  if (lower.includes('z-image-turbo') || lower.includes('z_image_turbo')) return { steps: 8, guidance: 1.0, resolution: 1024 }
+  if (lower.includes('klein') || lower.includes('schnell')) return { steps: 4, guidance: 1.0, resolution: 1024 }
+  if (lower.includes('qwen')) return { steps: 25, guidance: 3.0, resolution: 1024 }
+  if (lower.includes('chroma')) return { steps: 25, guidance: 4.0, resolution: 1024 }
+  if (lower.includes('flux2') || lower.includes('flux.2') || lower.includes('flux-2')) return { steps: 28, guidance: 4.0, resolution: 1024 }
+  if (lower.includes('turbo')) return { steps: 4, guidance: 1.0, resolution: 1024 }
+  if (lower.includes('sdxl')) return { steps: 30, guidance: 7.5, resolution: 1024 }
+  if (lower.includes('sd-1.5') || lower.includes('sd15')) return { steps: 30, guidance: 7.5, resolution: 512 }
+  return { steps: 28, guidance: 3.5, resolution: 1024 }
 }
 
 /** Build a form update that switches to edit mode with the given image.
@@ -137,8 +157,8 @@ export function buildSendToEdit(
     )
     if (editModel) {
       modelId = editModel.id
-      const info = findModelFamily(editModel.name, families)
-      const defaults = modelDefaults(editModel.name, info)
+      const info = findModelFamily(editModel.id, families)
+      const defaults = modelDefaults(editModel.id, info)
       steps = defaults.steps
       guidance = defaults.guidance
     }
