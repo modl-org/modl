@@ -2,6 +2,8 @@
 
 **Train LoRAs and generate images on your own GPU.** Web UI + CLI. Managed runtime. It just works.
 
+![Two modl commands — train a LoRA from a folder of photos, then generate with it — above four images produced by modl: a portrait, a product shot, a steampunk owl, and a dog in space](docs/assets/hero.webp)
+
 ```bash
 curl -fsSL https://modl.run/install.sh | sh
 modl pull z-image-turbo
