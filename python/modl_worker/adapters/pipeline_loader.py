@@ -52,7 +52,16 @@ def _resolve_pipeline_class(base_model_id: str) -> str:
 
 
 def _get_pipeline(cls_name: str):
-    """Import and return the pipeline class from diffusers."""
+    """Import and return the pipeline class.
+
+    Names prefixed with ``modl.`` resolve to a vendored pipeline
+    (``modl_worker.pipelines``); everything else comes from diffusers.
+    """
+    from modl_worker.pipelines import get_vendored_class, is_vendored
+
+    if is_vendored(cls_name):
+        return get_vendored_class(cls_name)
+
     import diffusers
 
     return getattr(diffusers, cls_name)
@@ -148,7 +157,18 @@ def detect_model_format(model_source: str) -> str:
 
 
 def _import_class(class_name: str):
-    """Import a class from diffusers or transformers."""
+    """Import a class from the vendored pipelines, diffusers, or transformers.
+
+    ``modl.``-prefixed names resolve to vendored classes. This matters for
+    ``Krea2Transformer2DModel``, which exists in both diffusers and the vendored
+    module with identical state_dict keys — without the explicit namespace the
+    wrong one would load cleanly and only misbehave at inference.
+    """
+    from modl_worker.pipelines import get_vendored_class, is_vendored
+
+    if is_vendored(class_name):
+        return get_vendored_class(class_name)
+
     import importlib
     for mod in ["diffusers", "transformers"]:
         try:
@@ -358,6 +378,12 @@ def _get_checkpoint_converter(model_class_name: str):
     prefix stripping (QwenImage) use the generic ``_strip_comfy_prefix``.
     Classes diffusers cannot convert at all (Krea2) have local converters.
     """
+    # The vendored edit transformer shares the diffusers key layout exactly
+    # (430/430 keys), so both namespaces use the same converter.
+    from modl_worker.pipelines import strip_prefix
+
+    model_class_name = strip_prefix(model_class_name)
+
     _LOCAL_CONVERTER_MAP = {
         "Krea2Transformer2DModel": _convert_krea2_checkpoint_to_diffusers,
     }
@@ -936,11 +962,26 @@ def assemble_pipeline(
     emitter.info(f"Assembling {cls_name} from {len(components)} components")
     # Pass any extra pipeline constructor kwargs (e.g. is_distilled for Klein)
     arch_name = detect_arch(base_model_id)
-    pipeline_kwargs = ARCH_CONFIGS.get(arch_name, {}).get("pipeline_kwargs", {})
+    arch_cfg = ARCH_CONFIGS.get(arch_name, {})
+    pipeline_kwargs = arch_cfg.get("pipeline_kwargs", {})
     pipe = PipelineClass(**components, **pipeline_kwargs)
     if not no_offload:
-        from modl_worker.device import move_pipe_to_device
-        move_pipe_to_device(pipe)
+        if arch_cfg.get("model_flags", {}).get("requires_resident"):
+            # This pipeline drives the transformer through custom methods
+            # (e.g. Krea2 edit's precompute_ref_kv) rather than forward().
+            # accelerate's model-cpu-offload hooks only fire on forward, so
+            # offloading would leave weights on CPU while inputs are on GPU:
+            #   RuntimeError: found at least two devices, cpu and cuda:0
+            # It must therefore be fully resident — but NOT yet. An fp8 model is
+            # loaded as bf16 with casting deferred until after LoRA fuse, so
+            # moving now would place ~26GB of bf16 weights and OOM a 24GB card.
+            # Defer to rebalance_pipe_placement(), which runs once LoRA and
+            # fp8 state are final.
+            pipe._modl_needs_resident = True
+            emitter.info("  → Resident placement deferred (offload unsupported; awaiting fp8 cast)")
+        else:
+            from modl_worker.device import move_pipe_to_device
+            move_pipe_to_device(pipe)
     # Attach loaded file info for downstream metadata embedding
     pipe._modl_loaded_files = loaded_files
     return pipe

@@ -47,16 +47,54 @@ pipe(prompt=..., image=<reference>, width, height,
      kv_cache=True)
 ```
 
-## Integration TODO (not yet wired — see docs/plans krea2 K6)
+## Local modifications (Apache-2.0 §4b)
 
-1. Component-assembly loader: instantiate `Krea2OstrisEditPipeline.__init__` with
-   modl store components (this vendored transformer + our TE/VAE/tokenizer/
-   scheduler), instead of upstream's `from_pretrained(custom_pipeline=…)`.
-2. `arch_config.py`: `krea2_reid` / `krea2_outpaint` entries →
-   `pipeline_class: Krea2OstrisEditPipeline` (this module), base krea2 weights +
-   the reid/outpaint LoRA as a dependency.
-3. `edit_adapter.py`: route `krea-2-reid` / `krea-2-outpaint`; pass the edit
-   source as `image=` plus the conditioning kwargs above; outpaint two-pass
-   interior placement compiles to two chained step-jobs.
-4. `models.toml` + registry manifests (gated on the feature working +
-   GPU-verified — do NOT surface the models before the path runs end-to-end).
+`krea2_ostris_edit.py` differs from upstream in exactly one place:
+
+- **Removed the diffusers namespace registration.** Upstream ends the
+  transformer section with `diffusers.Krea2Transformer2DModel =
+  Krea2Transformer2DModel`, so that `DiffusionPipeline.from_pretrained` can
+  resolve the Krea 2 repos' `model_index.json` on diffusers releases that predate
+  Krea 2. modl assembles pipelines from local store components with explicitly
+  named classes and never loads those repos via `from_pretrained`, so the
+  registration is unnecessary here — and actively harmful: it is process-global
+  and permanent, so importing this module for one edit job would silently
+  replace the transformer class used by every later *generation* job in the same
+  process (the persistent worker keeps one process alive across jobs). The two
+  classes have identical `state_dict` keys (430/430), so the swap loads cleanly
+  and only changes the compute path — it never raises. The call site is replaced
+  by a comment explaining this; nothing else is touched.
+
+Vendored classes are addressed through the `modl.` namespace
+(`modl.Krea2OstrisEditPipeline`, `modl.Krea2Transformer2DModel`) and resolved in
+`modl_worker/pipelines/__init__.py`, which makes the diffusers-vs-vendored choice
+explicit at every call site.
+
+## Integration status
+
+Wired 2026-07-18. Arch key **`krea2_edit`** in `arch_config.py`:
+
+1. ✅ Component-assembly loader — `assemble_pipeline` builds
+   `Krea2OstrisEditPipeline` from modl store components; the transformer is this
+   module's class, loaded through the existing krea2 checkpoint converter.
+2. ✅ `arch_config.py` — `krea2_edit` entry; `krea-2-edit` / `krea2-edit` model
+   ids, plus `detect_arch` routing for `*edit*` / `*reid*` / `*outpaint*` krea
+   ids. Weights reuse the **Raw** checkpoint: these edit models are LoRAs, not
+   separate checkpoints, so the user supplies the LoRA.
+3. ✅ `edit_adapter.py` — `editing_mode: "krea2_reference"` passes the source as
+   `image=` with the conditioning kwargs above.
+4. ⬜ `models.toml` + registry manifests — deliberately not done. Nothing
+   surfaces `krea-2-edit` to users yet.
+5. ⬜ Outpaint placement (`reference_placements` + `krea2_outpaint_placement.py`
+   two-pass) — `krea2_edit` currently covers the single-reference ReID/identity
+   path only.
+
+**Operational constraints (measured on a 4090, 2026-07-18):**
+
+- `enable_model_cpu_offload()` **does not work** with this pipeline.
+  `precompute_ref_kv()` is a custom method, not `forward()`, so accelerate's
+  hooks never fire and the transformer stays on CPU while its inputs are on GPU.
+  The arch sets `model_flags.requires_resident`, which makes `assemble_pipeline`
+  place the pipeline resident instead.
+- fp8 layerwise casting is **mandatory**: 1024 + CFG peaked at 24.35 GB of a
+  24.56 GB card. 24 GB is the floor for 1024; smaller cards need 512–768.

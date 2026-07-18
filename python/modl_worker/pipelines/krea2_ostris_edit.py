@@ -688,13 +688,27 @@ class Krea2Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         return Transformer2DModelOutput(sample=output)
 
 
-# The Krea 2 hub repos' `model_index.json` points the `transformer` component at
-# `["diffusers", "Krea2Transformer2DModel"]`. Registering the vendored class into the
-# diffusers namespace lets `DiffusionPipeline.from_pretrained` resolve it on diffusers
-# releases that don't ship Krea 2 yet, and guarantees the loaded transformer supports
-# the reference-image forward pass this pipeline needs (the class is a numerically
-# identical superset of the upstream one for text-to-image).
-diffusers.Krea2Transformer2DModel = Krea2Transformer2DModel
+# MODIFIED FOR modl (see README.md "Local modifications").
+#
+# Upstream registers this class into the diffusers namespace here:
+#
+#     diffusers.Krea2Transformer2DModel = Krea2Transformer2DModel
+#
+# so that `DiffusionPipeline.from_pretrained` can resolve the `transformer`
+# component of the Krea 2 hub repos' model_index.json on diffusers releases that
+# don't ship Krea 2 yet.
+#
+# modl never loads these repos that way — pipelines are assembled from local
+# store components with explicitly named classes — so the rationale doesn't
+# apply, while the side effect is harmful: the assignment is process-global and
+# permanent, so importing this module for ONE edit job would silently swap the
+# transformer class used by every subsequent *generation* job in the same
+# process (acutely in the persistent worker). Both classes share identical
+# state_dict keys (430/430), so the wrong one loads cleanly and diverges only in
+# its compute path — an order-dependent bug that never raises.
+#
+# modl resolves the vendored classes explicitly via the `modl.` namespace
+# instead; see modl_worker/pipelines/__init__.py.
 
 
 # ---------------------------------------------------------------------------

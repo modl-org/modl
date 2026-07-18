@@ -446,7 +446,11 @@ def apply_lora_from_spec(pipeline, spec: dict, emitter) -> bool:
     Returns True if LoRA was applied, False otherwise.
     """
     applied = _apply_lora_from_spec_inner(pipeline, spec, emitter)
-    if not spec.get("params", {}).get("controlnet"):
+    # A pipeline flagged _modl_needs_resident was deliberately left on CPU by
+    # assemble_pipeline and cannot run until it is placed — that is not an
+    # optimisation, so it happens even for ControlNet jobs.
+    needs_resident = getattr(pipeline, "_modl_needs_resident", False)
+    if needs_resident or not spec.get("params", {}).get("controlnet"):
         from modl_worker.device import rebalance_pipe_placement
         rebalance_pipe_placement(pipeline, emitter)
     return applied
