@@ -222,19 +222,23 @@ pub fn resolve_params(
             (steps, 16, 1e-4)
         }
 
-        // Krea 2: community consensus — trains unusually well and fast.
-        // Rank 32, 1250–2000 steps typical character sweet spot, 512 res
-        // (generalizes to 1024 inference). Train on Raw, use on Raw + Turbo.
+        // Krea 2: trains unusually well and fast. Rank 32, 512 res (generalizes
+        // to 1024 inference), train on Raw / use on Raw + Turbo. Step targets
+        // LOWERED from the community 1250–2000 after a measured checkpoint A/B
+        // (maxi, 24-img dog, 4090): step 1000 was the keeper; 1250→2000 added
+        // no likeness, only training-context memorization (identity samples
+        // near-identical across 1000/1250/1500 at real inference). ~40 steps/img
+        // is the sweet spot, matching the earlier Z-Image maxi finding.
         (Preset::Quick, _) if is_krea2 => {
-            let steps = compute_steps(img_count, 60, 800, 1250);
+            let steps = compute_steps(img_count, 35, 700, 900);
             (steps, 16, 1e-4)
         }
         (Preset::Standard, _) if is_krea2 => {
-            let steps = compute_steps(img_count, 100, 1250, 2000);
+            let steps = compute_steps(img_count, 45, 900, 1250);
             (steps, 32, 1e-4)
         }
         (Preset::Advanced, _) if is_krea2 => {
-            let steps = compute_steps(img_count, 125, 1500, 2500);
+            let steps = compute_steps(img_count, 60, 1100, 1500);
             (steps, 32, 1e-4)
         }
 
