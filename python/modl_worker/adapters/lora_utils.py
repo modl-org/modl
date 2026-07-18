@@ -102,13 +102,22 @@ def _maybe_convert_krea2_lora(lora_path: str, emitter=None) -> str | None:
     copy to a temp file and return its path; otherwise return None.
 
     The caller owns the temp file and must delete it after loading.
+
+    Detection is header-only (``safe_open`` key list) so the common
+    non-krea2 path doesn't read the whole file just to sniff names —
+    ``load_file`` only runs once a krea2 LoRA is confirmed.
     """
     try:
+        from safetensors import safe_open
+
+        with safe_open(lora_path, framework="pt") as f:
+            keys = list(f.keys())
+        if not _is_krea2_lora(keys):
+            return None
+
         from safetensors.torch import load_file, save_file
 
         sd = load_file(lora_path)
-        if not _is_krea2_lora(sd):
-            return None
         converted, dropped = convert_krea2_lora_to_diffusers(sd)
         if not converted:
             return None
@@ -359,6 +368,13 @@ def load_lora_with_conversion(
                 emitter.info(f"  → Fused krea2 LoRA at strength {lora_weight}")
             return True
         except Exception as exc:
+            # If load_lora_weights succeeded but fuse/casting failed, the
+            # adapter is still attached — reporting False ("continue without
+            # LoRA") while it silently affects generation would be worse.
+            try:
+                pipeline.unload_lora_weights()
+            except Exception:
+                pass
             _warn_lora_failed(emitter, f"krea2 LoRA load failed after conversion: {exc}")
             return False
         finally:

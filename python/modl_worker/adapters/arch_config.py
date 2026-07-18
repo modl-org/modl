@@ -36,6 +36,7 @@ Optional sub-dicts (only present when values differ from defaults):
 """
 
 import os
+import re
 import sqlite3
 from pathlib import Path
 
@@ -1004,7 +1005,9 @@ def detect_arch(base_model_id: str, arch_key: str | None = None) -> str:
     if "chroma" in bid:
         return "chroma"
     if "krea" in bid:
-        if "raw" in bid:
+        # "raw" as a delimited token only — substring matching would
+        # false-positive on ids like "krea2-strawberry" / "krea2-draw".
+        if re.search(r"(?:^|[^a-z0-9])raw(?:[^a-z0-9]|$)", bid):
             return "krea2_raw"
         return "krea2_turbo"
     if "flux" in bid and "schnell" in bid:

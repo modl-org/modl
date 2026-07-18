@@ -154,7 +154,7 @@ fn is_common_word_trigger(trigger: &str) -> bool {
     const HIGH_RISK: &[&str] = &[
         // fashion / garments (the maxi-dress collision and friends)
         "maxi", "mini", "midi", "boho", "denim", "linen", // colours
-        "red", "blue", "green", "amber", "coral", "ivory", "jade", "ruby", "rose",
+        "red", "blue", "green", "amber", "coral", "ivory", "jade",
         // common nouns that dominate as concepts
         "dog", "cat", "man", "woman", "girl", "boy", "car", "house", "tree", "star",
         // frequent short given names with strong priors

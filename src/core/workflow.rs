@@ -52,7 +52,8 @@ pub struct GenerateStep {
     /// Lightning fast mode: target step count. ≤4 and ≤8 resolve to the
     /// model's 4/8-step Lightning distillation LoRA + scheduler overrides
     /// at plan time; >8 resolves to the model's partial-strength quality
-    /// tier where one is defined (e.g. krea-2-raw), else clamps to 8.
+    /// tier where one is defined (e.g. krea-2-raw, clamped to 15 steps),
+    /// else clamps to 8.
     /// Mutually exclusive with `lora` on the same step; overrides an
     /// inherited workflow-level `lora`.
     pub fast: Option<u32>,

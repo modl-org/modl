@@ -211,7 +211,10 @@ impl LightningConfig {
         } else if let Some(q) = self.quality {
             ResolvedFastMode {
                 variant: &self.variant_8step,
-                steps: fast_steps,
+                // Quality tier is documented (modl info, workflow spec) as
+                // 12–15 steps; clamp so an accidental `--fast 60` doesn't
+                // silently run a 60-step job at distill-LoRA settings.
+                steps: fast_steps.min(15),
                 strength: q.strength,
                 guidance: q.guidance,
             }
@@ -770,5 +773,9 @@ mod tests {
         assert_eq!(r14.strength, 0.6);
         assert_eq!(r14.guidance, 1.5);
         assert_eq!(r14.variant, "r256");
+        // quality tier clamps at the documented 15-step ceiling
+        let r60 = cfg.resolve(60);
+        assert_eq!(r60.steps, 15);
+        assert_eq!(r60.strength, 0.6);
     }
 }
