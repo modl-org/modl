@@ -18,8 +18,11 @@ that serves both ReID (full-frame identity reference) and outpaint (placed
 reference) — and the same code path K7 / edit-LoRA-training inference will use.
 
 The LoRA **weights** (`krea2_reid_rank32`, `krea2_outpaint_rank32`) are NOT
-vendored — they are Krea 2 Community License, curated in modl-registry with
-hash-pins (reid `a80349fa…944`, outpaint `1de7c106…e76`) and pulled on demand.
+vendored — they are Krea 2 Community License. The intent is to curate them in
+modl-registry with hash-pins (reid `a80349fa…944`, outpaint `1de7c106…e76`) and
+pull on demand, but **that has not been done yet**: there are no krea2 edit-LoRA
+manifests in modl-registry, so these cannot be `modl pull`ed today. Edit LoRAs
+currently have to be supplied by absolute path (see "Integration status" below).
 
 ## What this pipeline bundles (and why edit arches use it, not the gen one)
 
