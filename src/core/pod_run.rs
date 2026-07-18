@@ -380,7 +380,7 @@ pub fn classify_workflow_loras(
             let id = step.get("id").and_then(|i| i.as_str()).unwrap_or("?");
             bail!("step `{id}`: `fast` is not supported for `{model}` (no Lightning config).");
         };
-        let (variant, _) = cfg.resolve(fast as u32);
+        let variant = cfg.resolve(fast as u32).variant;
         let pull = (cfg.lora_registry_id.clone(), Some(variant.to_string()));
         if !result.pulls.contains(&pull) {
             result.pulls.push(pull);

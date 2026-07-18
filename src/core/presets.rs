@@ -25,6 +25,7 @@ pub enum BaseModelFamily {
     ZImage,
     Chroma,
     QwenImage,
+    Krea2,
     Sdxl,
     Sd15,
 }
@@ -39,6 +40,8 @@ impl BaseModelFamily {
             Ok(Self::Chroma)
         } else if lower.contains("qwen-image") || lower.contains("qwen_image") {
             Ok(Self::QwenImage)
+        } else if lower.contains("krea") {
+            Ok(Self::Krea2)
         } else if lower.contains("flux") && lower.contains("schnell") {
             Ok(Self::FluxSchnell)
         } else if lower.contains("flux2") || lower.contains("flux.2") || lower.contains("flux-2") {
@@ -73,6 +76,9 @@ impl BaseModelFamily {
             | Self::ZImage
             | Self::Chroma
             | Self::QwenImage => 1024,
+            // Krea 2 trains fine at 512 and generalizes to 1024 inference
+            // (community consensus); keeps 24GB cards comfortable.
+            Self::Krea2 => 512,
             Self::Sd15 => 512,
         }
     }
@@ -97,6 +103,7 @@ pub fn resolve_params(
     let is_sdxl = matches!(family, BaseModelFamily::Sdxl);
     let is_schnell = matches!(family, BaseModelFamily::FluxSchnell);
     let is_flux2 = matches!(family, BaseModelFamily::Flux2);
+    let is_krea2 = matches!(family, BaseModelFamily::Krea2);
 
     // Z-Image only needs ~17GB without quantization (per Ostris).
     // On 24GB+ cards, skip quantization for much faster iteration (~1.3s vs ~4s).
@@ -213,6 +220,26 @@ pub fn resolve_params(
         (Preset::Advanced, _) if is_sdxl => {
             let steps = compute_steps(img_count, 150, 1500, 2500);
             (steps, 16, 1e-4)
+        }
+
+        // Krea 2: trains unusually well and fast. Rank 32, 512 res (generalizes
+        // to 1024 inference), train on Raw / use on Raw + Turbo. Step targets
+        // LOWERED from the community 1250–2000 after a measured checkpoint A/B
+        // (maxi, 24-img dog, 4090): step 1000 was the keeper; 1250→2000 added
+        // no likeness, only training-context memorization (identity samples
+        // near-identical across 1000/1250/1500 at real inference). ~40 steps/img
+        // is the sweet spot, matching the earlier Z-Image maxi finding.
+        (Preset::Quick, _) if is_krea2 => {
+            let steps = compute_steps(img_count, 35, 700, 900);
+            (steps, 16, 1e-4)
+        }
+        (Preset::Standard, _) if is_krea2 => {
+            let steps = compute_steps(img_count, 45, 900, 1250);
+            (steps, 32, 1e-4)
+        }
+        (Preset::Advanced, _) if is_krea2 => {
+            let steps = compute_steps(img_count, 60, 1100, 1500);
+            (steps, 32, 1e-4)
         }
 
         // Schnell + Flux2 (Klein): fast convergence, overfit quickly

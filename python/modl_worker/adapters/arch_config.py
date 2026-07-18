@@ -36,6 +36,7 @@ Optional sub-dicts (only present when values differ from defaults):
 """
 
 import os
+import re
 import sqlite3
 from pathlib import Path
 
@@ -598,6 +599,49 @@ ARCH_CONFIGS: dict[str, dict] = {
         "default_resolution": 1024,
         "sample": {"sampler": "flowmatch", "steps": 8, "guidance": 0.0, "neg": ""},
     },
+    "krea2_raw": {
+        "pipeline_class": "Krea2Pipeline",
+        "gen_components": {
+            "transformer": {
+                "model_class": "Krea2Transformer2DModel",
+                # Same architecture/config as Turbo — only the weights differ.
+                "config_dir": "krea2-turbo-transformer",
+            },
+            "text_encoder": {
+                "model_id": ["krea2-qwen3-vl-4b-text-encoder-fp8", "krea2-qwen3-vl-4b-text-encoder"],
+                "model_class": "Qwen3VLModel",
+                "config_dir": "qwen3-vl-4b",
+            },
+            "tokenizer": {
+                "model_class": "AutoTokenizer",
+                "config_dir": "qwen3-vl-tokenizer",
+            },
+            "vae": {
+                "model_id": "qwen-image-vae",
+                "model_class": "AutoencoderKLQwenImage",
+                "config_dir": "qwen-image-vae",
+            },
+            "scheduler": {
+                "model_class": "FlowMatchEulerDiscreteScheduler",
+                "config_dir": "krea2-scheduler",
+            },
+        },
+        # Mirrors krea/Krea-2-Raw model_index.json: is_distilled=False → the
+        # pipeline computes mu from image resolution instead of pinning the
+        # Turbo fixed shift. Real CFG (negative prompts work).
+        "pipeline_kwargs": {
+            "is_distilled": False,
+            "patch_size": 2,
+            "text_encoder_select_layers": [2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35],
+        },
+        "model_flags": {"arch": "krea2", "quantize": True, "quantize_te": True, "low_vram": True},
+        "noise_scheduler": "flowmatch",
+        "dtype": "bf16",
+        "train_text_encoder": False,
+        "resolutions": [512, 768, 1024],
+        "default_resolution": 1024,
+        "sample": {"sampler": "flowmatch", "steps": 20, "guidance": 3.0, "neg": ""},
+    },
     "qwen_image": {
         "pipeline_class": "QwenImagePipeline",
         "gen_components": {
@@ -874,6 +918,8 @@ MODEL_REGISTRY: dict[str, tuple[str, str]] = {
     "chroma":         ("chroma",        "lodestones/Chroma"),
     "krea-2-turbo":   ("krea2_turbo",   "krea/Krea-2-Turbo"),
     "krea2-turbo":    ("krea2_turbo",   "krea/Krea-2-Turbo"),
+    "krea-2-raw":     ("krea2_raw",     "krea/Krea-2-Raw"),
+    "krea2-raw":      ("krea2_raw",     "krea/Krea-2-Raw"),
     "qwen-image":     ("qwen_image",    "Qwen/Qwen-Image-2512"),
     "qwen_image":     ("qwen_image",    "Qwen/Qwen-Image-2512"),
     "qwen-image-edit":       ("qwen_image_edit",      "Qwen/Qwen-Image-Edit"),
@@ -902,6 +948,7 @@ TRANSFORMER_HF_SOURCES: dict[str, tuple[str, str]] = {
     "flux2_klein_base":    ("black-forest-labs/FLUX.2-klein-base-4b-fp8", "flux-2-klein-base-4b-fp8.safetensors"),
     "flux2_klein_base_9b": ("black-forest-labs/FLUX.2-klein-base-9b-fp8", "flux-2-klein-base-9b-fp8.safetensors"),
     "krea2_turbo":         ("Comfy-Org/Krea-2",                           "diffusion_models/krea2_turbo_fp8_scaled.safetensors"),
+    "krea2_raw":           ("Comfy-Org/Krea-2",                           "diffusion_models/krea2_raw_fp8_scaled.safetensors"),
 }
 
 # Text encoders / VAEs are shared across variants → keyed by registry model_id.
@@ -958,6 +1005,10 @@ def detect_arch(base_model_id: str, arch_key: str | None = None) -> str:
     if "chroma" in bid:
         return "chroma"
     if "krea" in bid:
+        # "raw" as a delimited token only — substring matching would
+        # false-positive on ids like "krea2-strawberry" / "krea2-draw".
+        if re.search(r"(?:^|[^a-z0-9])raw(?:[^a-z0-9]|$)", bid):
+            return "krea2_raw"
         return "krea2_turbo"
     if "flux" in bid and "schnell" in bid:
         return "flux_schnell"

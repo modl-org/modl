@@ -135,6 +135,48 @@ async fn run_pod(spec: TrainJobSpec, args: PodArgs) -> Result<()> {
     pod::run_pod_training(spec, args.into_options(label, disk_gb)).await
 }
 
+/// Human label for a LoRA type, used in guidance messages.
+fn lora_type_label(t: LoraType) -> &'static str {
+    match t {
+        LoraType::Character => "character",
+        LoraType::Object => "object",
+        LoraType::Style => "style",
+    }
+}
+
+/// Is the trigger a common word that carries a strong text-encoder prior
+/// (so the LoRA binds to it only weakly)? Rather than guess whether an
+/// arbitrary string is a real word — which false-flags invented rare tokens
+/// like "mxpom" — this checks a curated set of high-risk everyday words
+/// people reach for as triggers. Non-exhaustive by design: it only needs to
+/// catch the obvious foot-guns (the maxi→maxi-dress case that motivated it).
+fn is_common_word_trigger(trigger: &str) -> bool {
+    const HIGH_RISK: &[&str] = &[
+        // fashion / garments (the maxi-dress collision and friends)
+        "maxi", "mini", "midi", "boho", "denim", "linen", // colours
+        "red", "blue", "green", "amber", "coral", "ivory", "jade",
+        // common nouns that dominate as concepts
+        "dog", "cat", "man", "woman", "girl", "boy", "car", "house", "tree", "star",
+        // frequent short given names with strong priors
+        "max", "leo", "luna", "bella", "coco", "milo", "lily", "ruby", "jack", "rose",
+    ];
+    let t = trigger.trim().to_lowercase();
+    HIGH_RISK.contains(&t.as_str())
+}
+
+/// Is the class word a generic category that anchors identity but not size?
+/// The class token pins scale/structure, so "dog"/"car" leave size loose while
+/// the specific breed/model ("pomeranian", "911") locks it. Small curated set —
+/// only the common umbrella terms people default to.
+fn is_generic_class_word(class_word: &str) -> bool {
+    const GENERIC: &[&str] = &[
+        "dog", "cat", "bird", "horse", "animal", "pet", "car", "vehicle", "truck", "person", "man",
+        "woman", "human", "thing", "object", "building", "flower", "plant",
+    ];
+    let c = class_word.trim().to_lowercase();
+    GENERIC.contains(&c.as_str())
+}
+
 /// Best-effort VRAM (GB) for a Vast GPU name. `None` when the card is unknown
 /// (we then skip the reuse VRAM guard rather than guess wrong).
 fn estimate_vram_gb(gpu_name: &str) -> Option<u32> {
@@ -406,6 +448,49 @@ pub async fn run(
     }
     if overrides.class_word.is_some() {
         params.class_word = overrides.class_word.clone();
+    }
+
+    // -------------------------------------------------------------------
+    // Recipe guardrails for character/object LoRAs. Evidence (maxi Pomeranian
+    // runs on krea-2-raw): (1) a bare, common-word trigger with no class word
+    // collapses to the word's prior — samples never converge; (2) the class
+    // token anchors SIZE/structure, so a generic class ("dog") locks colour
+    // and markings but leaves size loose — the specific breed ("pomeranian")
+    // pins it. Non-blocking hints.
+    // -------------------------------------------------------------------
+    if matches!(lora_type, LoraType::Character | LoraType::Object) {
+        match params.class_word.as_deref() {
+            None => eprintln!(
+                "  {} No --class-word set. For {} LoRAs, anchoring the trigger to a category \
+                 markedly improves convergence and makes sample prompts read '{} <class>' \
+                 instead of a bare '{}' that can collapse to the word's prior. Use the MOST \
+                 specific class that fits (the breed/model, e.g. --class-word pomeranian, not \
+                 just 'dog') — the class token also anchors size and structure.",
+                style("!").yellow(),
+                lora_type_label(lora_type),
+                trigger_word,
+                trigger_word,
+            ),
+            Some(cw) if is_generic_class_word(cw) => eprintln!(
+                "  {} --class-word '{}' is generic. It anchors colour and markings but leaves \
+                 size/structure loose (a '{} {}' can render at the wrong size). Prefer the \
+                 specific breed/model (e.g. 'pomeranian' over 'dog') to pin size too.",
+                style("!").yellow(),
+                cw,
+                trigger_word,
+                cw,
+            ),
+            Some(_) => {}
+        }
+        if is_common_word_trigger(&trigger_word) {
+            eprintln!(
+                "  {} Trigger '{}' is a common word — it competes with a strong existing \
+                 prior in the text encoder, so the identity binds weakly to it. Prefer a rare \
+                 token (e.g. an invented string) and/or pair it with --class-word.",
+                style("!").yellow(),
+                trigger_word,
+            );
+        }
     }
     if overrides.sample_every.is_some() {
         params.sample_every = overrides.sample_every;
@@ -1033,4 +1118,38 @@ fn edit_in_editor(content: &str) -> Result<String> {
     let edited = std::fs::read_to_string(&tmp_path).context("Failed to read edited file")?;
     let _ = std::fs::remove_file(&tmp_path);
     Ok(edited)
+}
+
+#[cfg(test)]
+mod recipe_guardrail_tests {
+    use super::*;
+
+    #[test]
+    fn flags_common_word_triggers() {
+        assert!(is_common_word_trigger("maxi"));
+        assert!(is_common_word_trigger("Red"));
+        assert!(is_common_word_trigger("dog"));
+        assert!(is_common_word_trigger("luna"));
+    }
+
+    #[test]
+    fn does_not_flag_rare_or_invented_tokens() {
+        // Invented tokens and the OHWX convention must never warn.
+        assert!(!is_common_word_trigger("mxpom"));
+        assert!(!is_common_word_trigger("ohwx"));
+        assert!(!is_common_word_trigger("m4xi"));
+        assert!(!is_common_word_trigger("sks"));
+        assert!(!is_common_word_trigger("xyzzy42"));
+    }
+
+    #[test]
+    fn flags_generic_class_words_but_not_specific() {
+        assert!(is_generic_class_word("dog"));
+        assert!(is_generic_class_word("car"));
+        assert!(is_generic_class_word("Person"));
+        // Specific breeds/models anchor size — not generic.
+        assert!(!is_generic_class_word("pomeranian"));
+        assert!(!is_generic_class_word("golden retriever"));
+        assert!(!is_generic_class_word("porsche 911"));
+    }
 }

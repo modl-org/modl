@@ -272,6 +272,15 @@ def test_detect_arch_uses_registry() -> None:
         )
 
 
+def test_detect_arch_krea_raw_token_boundary() -> None:
+    # "raw" as a delimited token → Raw arch.
+    assert detect_arch("krea/Krea-2-Raw") == "krea2_raw"
+    assert detect_arch("someuser/krea-2-raw-finetune") == "krea2_raw"
+    # "raw" buried inside another word must NOT flip the arch to Raw.
+    assert detect_arch("someuser/krea2-strawberry") == "krea2_turbo"
+    assert detect_arch("someuser/krea2-draw-xL") == "krea2_turbo"
+
+
 def test_resolve_pipeline_class_matches_config() -> None:
     for model_id, (arch, _) in MODEL_REGISTRY.items():
         assert resolve_pipeline_class(model_id) == ARCH_CONFIGS[arch]["pipeline_class"]

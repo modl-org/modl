@@ -827,18 +827,18 @@ fn resolve_fast(
             supported.join(", ")
         )));
     };
-    let (variant, steps) = cfg.resolve(fast_steps);
-    let lora = model_resolve::resolve_lora(&cfg.lora_registry_id, 1.0, db)
+    let fast_mode = cfg.resolve(fast_steps);
+    let lora = model_resolve::resolve_lora(&cfg.lora_registry_id, fast_mode.strength, db)
         .map_err(|e| PlanError::Other(format!("LoRA resolution error: {e}")))?
         .ok_or_else(|| PlanError::LightningLoraNotInstalled {
             step_id: step_id.to_string(),
             lora: cfg.lora_registry_id.clone(),
-            variant: variant.to_string(),
+            variant: fast_mode.variant.to_string(),
         })?;
     Ok((
         ResolvedLightning {
-            steps,
-            guidance: cfg.guidance,
+            steps: fast_mode.steps,
+            guidance: fast_mode.guidance,
             scheduler_overrides: cfg.scheduler_overrides_json(),
         },
         lora,

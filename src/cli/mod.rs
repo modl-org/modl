@@ -735,8 +735,10 @@ pub enum Commands {
         style_type: Option<String>,
         /// Lightning LoRA for ~10x faster generation (4 or 8 steps instead of 40-50).
         /// Use --fast for 4-step (fastest) or --fast 8 for 8-step (higher quality).
+        /// krea-2-raw additionally supports a quality tier at --fast 12-15
+        /// (distill LoRA at partial strength + real CFG).
         /// Auto-applies a model-specific distillation LoRA. Cannot combine with --lora.
-        /// Supported: qwen-image, qwen-image-edit.
+        /// Supported: qwen-image, qwen-image-edit, krea-2-raw.
         #[arg(long, num_args = 0..=1, default_missing_value = "4", value_name = "STEPS")]
         fast: Option<u32>,
         /// Force one-shot mode (skip persistent worker, cold start every time)
