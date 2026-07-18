@@ -61,7 +61,11 @@ VALID_GUIDANCE_PARAMS = {
     "guidance",
 }
 
-VALID_EDITING_MODES = {"standard", "native"}
+VALID_EDITING_MODES = {"standard", "native", "krea2_reference"}
+
+# Classes namespaced with this prefix live in modl_worker.pipelines (vendored
+# third-party code), not in diffusers. See modl_worker/pipelines/__init__.py.
+VENDORED_PREFIX = "modl."
 
 
 # ---------------------------------------------------------------------------
@@ -81,9 +85,12 @@ def test_pipeline_class_is_nonempty_string(arch: str) -> None:
     cfg = ARCH_CONFIGS[arch]
     pc = cfg["pipeline_class"]
     assert isinstance(pc, str) and pc, f"{arch}.pipeline_class must be a non-empty string"
-    # Pipeline class names are CamelCase and end in "Pipeline".
-    assert pc[0].isupper(), f"{arch}.pipeline_class should be CamelCase, got {pc!r}"
-    assert pc.endswith("Pipeline"), f"{arch}.pipeline_class should end in 'Pipeline', got {pc!r}"
+    # Vendored classes carry a "modl." namespace prefix; the CamelCase rules
+    # apply to the class name itself.
+    bare = pc[len(VENDORED_PREFIX):] if pc.startswith(VENDORED_PREFIX) else pc
+    assert bare, f"{arch}.pipeline_class is only a namespace prefix, got {pc!r}"
+    assert bare[0].isupper(), f"{arch}.pipeline_class should be CamelCase, got {pc!r}"
+    assert bare.endswith("Pipeline"), f"{arch}.pipeline_class should end in 'Pipeline', got {pc!r}"
 
 
 @pytest.mark.parametrize("arch", ARCH_KEYS)
@@ -320,10 +327,56 @@ def test_pipeline_classes_exist_in_diffusers() -> None:
             name = cfg.get(key)
             if not name:
                 continue
+            if name.startswith(VENDORED_PREFIX):
+                # Vendored pipeline — must resolve in modl_worker.pipelines.
+                from modl_worker.pipelines import get_vendored_class
+
+                try:
+                    get_vendored_class(name)
+                except ImportError:
+                    missing.append((arch, key, name))
+                continue
             if not hasattr(diffusers, name):
                 missing.append((arch, key, name))
 
     assert not missing, (
-        "Pipeline classes referenced in ARCH_CONFIGS not found in installed diffusers: "
+        "Pipeline classes referenced in ARCH_CONFIGS could not be resolved: "
         + ", ".join(f"{a}.{k}={n}" for a, k, n in missing)
+    )
+
+
+def test_vendored_classes_do_not_shadow_diffusers() -> None:
+    """Importing a vendored pipeline must not replace the diffusers class.
+
+    ``Krea2Transformer2DModel`` exists in both diffusers and the vendored edit
+    module with identical state_dict keys. Upstream registers its copy into the
+    diffusers namespace (``diffusers.Krea2Transformer2DModel = ...``), which we
+    removed: it is process-global, so one edit job would silently swap the
+    transformer used by every later generation job in the same process — and
+    because the keys match, it would load cleanly and only diverge at inference.
+    """
+    diffusers = pytest.importorskip("diffusers")
+    pytest.importorskip("transformers")
+    if not hasattr(diffusers, "Krea2Transformer2DModel"):
+        pytest.skip(
+            f"installed diffusers {diffusers.__version__} predates Krea 2 — "
+            "no class to shadow"
+        )
+
+    from modl_worker.adapters.pipeline_loader import _import_class
+    from modl_worker.pipelines import get_vendored_class
+
+    before = _import_class("Krea2Transformer2DModel")
+    get_vendored_class("modl.Krea2Transformer2DModel")  # simulate an edit job
+    after = _import_class("Krea2Transformer2DModel")
+
+    assert before is after, "importing the vendored pipeline swapped the diffusers class"
+    assert after.__module__.startswith("diffusers"), (
+        f"bare Krea2Transformer2DModel resolved to {after.__module__}, expected diffusers"
+    )
+    assert diffusers.Krea2Transformer2DModel.__module__.startswith("diffusers"), (
+        "diffusers.Krea2Transformer2DModel was monkeypatched by the vendored module"
+    )
+    assert get_vendored_class("modl.Krea2Transformer2DModel") is not after, (
+        "vendored and diffusers transformer classes must be distinct"
     )

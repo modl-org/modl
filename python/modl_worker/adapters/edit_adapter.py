@@ -177,7 +177,41 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
     # Build inference kwargs — different pipelines need different params
     inf_cfg = ARCH_CONFIGS.get(arch, {}).get("inference", {})
     use_native_inpaint = False
-    if inf_cfg.get("editing_mode") == "native":
+    if inf_cfg.get("editing_mode") == "krea2_reference":
+        # Krea 2 reference edit (vendored Krea2OstrisEditPipeline).
+        #
+        # Sources are *reference* images, not a canvas: they keep their own
+        # aspect ratio, get encoded into the Qwen3-VL prompt conditioning, and
+        # are appended as clean latents at t=0. Output size is independent of
+        # them, so height/width default to the arch resolution rather than the
+        # source dimensions.
+        #
+        # guidance_scale here is Krea 2's own CFG convention
+        # (cond + scale * (cond - uncond)), enabled whenever scale > 0 — it is
+        # NOT diffusers' guidance_scale, so no true_cfg_scale/negative_prompt.
+        gen_kwargs = {
+            "image": source_images if len(source_images) > 1 else source_images[0],
+            "prompt": prompt,
+            "num_inference_steps": steps,
+            "guidance_scale": guidance,
+            "generator": generator,
+            "reference_max_pixels": inf_cfg.get("reference_max_pixels", 384 * 384),
+            "vl_image_max_pixels": inf_cfg.get("vl_image_max_pixels", 384 * 384),
+            "encode_reference_in_prompt": inf_cfg.get("encode_reference_in_prompt", True),
+            # Matched pair with training: these LoRAs are trained with kv_cache
+            # on a fully bidirectional base, so inference must cache too.
+            "kv_cache": inf_cfg.get("kv_cache", True),
+        }
+        default_res = ARCH_CONFIGS.get(arch, {}).get("default_resolution", 1024)
+        gen_kwargs["width"] = params.get("width") or default_res
+        gen_kwargs["height"] = params.get("height") or default_res
+        if mask_image is not None:
+            # No mask support in the vendored pipeline — fall back to a pixel
+            # blend after generation (handled below by the shared path).
+            emitter.info(
+                "Krea 2 edit has no native mask support; will pixel-blend the result"
+            )
+    elif inf_cfg.get("editing_mode") == "native":
         # Native editing via the `image` parameter (e.g. Klein).
         # Supports multiple input images (e.g. source + reference).
         # No guidance (distilled), no negative prompt.

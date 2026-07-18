@@ -124,6 +124,21 @@ def rebalance_pipe_placement(pipe, emitter=None) -> None:
     """
     if get_device() != "cuda":
         return
+
+    if getattr(pipe, "_modl_needs_resident", False):
+        # Pipeline cannot be offloaded at all (custom-method transformer, e.g.
+        # Krea2 edit's precompute_ref_kv — accelerate hooks only fire on
+        # forward). assemble_pipeline left it on CPU so the deferred fp8 cast
+        # could shrink it first; place it now that the footprint is final.
+        # MODL_FORCE_OFFLOAD cannot apply here — offload does not work.
+        pipe.to("cuda")
+        pipe._modl_needs_resident = False
+        if emitter:
+            emitter.info(
+                f"  → Resident: {_pipe_weight_bytes(pipe) / 1024**3:.1f}GB weights on GPU"
+            )
+        return
+
     if os.environ.get("MODL_FORCE_OFFLOAD") == "1":
         return
     if not _has_accelerate_hooks(pipe):

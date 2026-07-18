@@ -642,6 +642,79 @@ ARCH_CONFIGS: dict[str, dict] = {
         "default_resolution": 1024,
         "sample": {"sampler": "flowmatch", "steps": 20, "guidance": 3.0, "neg": ""},
     },
+    # Krea 2 reference-image editing (identity edit / reid).
+    #
+    # NOT a separate checkpoint: the edit models published by the community
+    # (conradlocke identity-edit, reid, outpaint) are LoRAs trained on Krea 2
+    # *Raw*, so the transformer weights are the same krea2_raw file and the edit
+    # behaviour comes from the LoRA the user supplies. What differs from
+    # krea2_raw is the pipeline: the vendored Krea2OstrisEditPipeline, whose
+    # transformer adds precompute_ref_kv() + kv-caching for reference tokens.
+    #
+    # Both classes are `modl.`-namespaced — Krea2Transformer2DModel exists in
+    # diffusers too, with identical keys, so the wrong one would load fine and
+    # only fail at inference. See modl_worker/pipelines/__init__.py.
+    "krea2_edit": {
+        "pipeline_class": "modl.Krea2OstrisEditPipeline",
+        "gen_components": {
+            "transformer": {
+                "model_class": "modl.Krea2Transformer2DModel",
+                "config_dir": "krea2-turbo-transformer",
+            },
+            "text_encoder": {
+                "model_id": ["krea2-qwen3-vl-4b-text-encoder-fp8", "krea2-qwen3-vl-4b-text-encoder"],
+                "model_class": "Qwen3VLModel",
+                "config_dir": "qwen3-vl-4b",
+            },
+            "tokenizer": {
+                "model_class": "AutoTokenizer",
+                "config_dir": "qwen3-vl-tokenizer",
+            },
+            "vae": {
+                "model_id": "qwen-image-vae",
+                "model_class": "AutoencoderKLQwenImage",
+                "config_dir": "qwen-image-vae",
+            },
+            "scheduler": {
+                "model_class": "FlowMatchEulerDiscreteScheduler",
+                "config_dir": "krea2-scheduler",
+            },
+        },
+        "pipeline_kwargs": {
+            "is_distilled": False,
+            "patch_size": 2,
+            "text_encoder_select_layers": [2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35],
+        },
+        # requires_resident: enable_model_cpu_offload() breaks precompute_ref_kv
+        # (accelerate hooks fire on forward only). Measured 2026-07-18.
+        # quantize: fp8 layerwise casting is mandatory, not an optimisation —
+        # 1024 + CFG peaked at 24.35 GB of a 24.56 GB card even with it.
+        "model_flags": {
+            "arch": "krea2",
+            "quantize": True,
+            "quantize_te": True,
+            "low_vram": True,
+            "requires_resident": True,
+        },
+        "inference": {
+            "editing_mode": "krea2_reference",
+            # References are downscaled before the VL tower / VAE; 384² keeps
+            # the 1024 path inside VRAM. Raising these is the first thing to
+            # OOM on a 24 GB card.
+            "reference_max_pixels": 384 * 384,
+            "vl_image_max_pixels": 384 * 384,
+            "encode_reference_in_prompt": True,
+            # Must stay true: the LoRAs are trained with kv_cache and the base
+            # model is fully bidirectional, so train/inference must match.
+            "kv_cache": True,
+        },
+        "noise_scheduler": "flowmatch",
+        "dtype": "bf16",
+        "train_text_encoder": False,
+        "resolutions": [512, 768, 1024],
+        "default_resolution": 1024,
+        "sample": {"sampler": "flowmatch", "steps": 28, "guidance": 4.5, "neg": ""},
+    },
     "qwen_image": {
         "pipeline_class": "QwenImagePipeline",
         "gen_components": {
@@ -919,6 +992,9 @@ MODEL_REGISTRY: dict[str, tuple[str, str]] = {
     "krea-2-turbo":   ("krea2_turbo",   "krea/Krea-2-Turbo"),
     "krea2-turbo":    ("krea2_turbo",   "krea/Krea-2-Turbo"),
     "krea-2-raw":     ("krea2_raw",     "krea/Krea-2-Raw"),
+    # Edit ids reuse the Raw weights — the edit behaviour comes from the LoRA.
+    "krea-2-edit":    ("krea2_edit",    "krea/Krea-2-Raw"),
+    "krea2-edit":     ("krea2_edit",    "krea/Krea-2-Raw"),
     "krea2-raw":      ("krea2_raw",     "krea/Krea-2-Raw"),
     "qwen-image":     ("qwen_image",    "Qwen/Qwen-Image-2512"),
     "qwen_image":     ("qwen_image",    "Qwen/Qwen-Image-2512"),
@@ -949,6 +1025,7 @@ TRANSFORMER_HF_SOURCES: dict[str, tuple[str, str]] = {
     "flux2_klein_base_9b": ("black-forest-labs/FLUX.2-klein-base-9b-fp8", "flux-2-klein-base-9b-fp8.safetensors"),
     "krea2_turbo":         ("Comfy-Org/Krea-2",                           "diffusion_models/krea2_turbo_fp8_scaled.safetensors"),
     "krea2_raw":           ("Comfy-Org/Krea-2",                           "diffusion_models/krea2_raw_fp8_scaled.safetensors"),
+    "krea2_edit":          ("Comfy-Org/Krea-2",                           "diffusion_models/krea2_raw_fp8_scaled.safetensors"),
 }
 
 # Text encoders / VAEs are shared across variants → keyed by registry model_id.
@@ -1005,6 +1082,10 @@ def detect_arch(base_model_id: str, arch_key: str | None = None) -> str:
     if "chroma" in bid:
         return "chroma"
     if "krea" in bid:
+        # Edit variants first — they are Raw weights driven by the vendored
+        # reference-edit pipeline, so they must not fall through to krea2_raw.
+        if "edit" in bid or "reid" in bid or "outpaint" in bid:
+            return "krea2_edit"
         # "raw" as a delimited token only — substring matching would
         # false-positive on ids like "krea2-strawberry" / "krea2-draw".
         if re.search(r"(?:^|[^a-z0-9])raw(?:[^a-z0-9]|$)", bid):
