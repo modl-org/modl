@@ -298,10 +298,21 @@ impl LocalExecutor {
 
         let sock_path = crate::core::paths::modl_root().join("worker.sock");
 
-        // Try to connect — if socket doesn't exist or daemon isn't running, return None
+        // Try to connect — if socket doesn't exist or daemon isn't running, return None.
+        // Hint once per process: without the daemon every job reloads the model from
+        // scratch, which is silent and easy to pay for indefinitely without noticing.
         let mut stream = match UnixStream::connect(&sock_path) {
             Ok(s) => s,
-            Err(_) => return Ok(None),
+            Err(_) => {
+                static HINTED: std::sync::Once = std::sync::Once::new();
+                HINTED.call_once(|| {
+                    eprintln!(
+                        "  i No persistent worker — each job reloads the model. \
+                         Start one with `modl worker start` to keep it in VRAM."
+                    );
+                });
+                return Ok(None);
+            }
         };
 
         // Build the request envelope
