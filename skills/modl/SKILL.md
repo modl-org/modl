@@ -535,7 +535,9 @@ modl run <SPEC.yaml>                    # execute
 modl run a.yaml b.yaml c.yaml           # sequential multi-spec
 modl run spec.yaml --dry-run            # validate + show plan, no execution
 modl run spec.yaml --dry-run --json     # machine-readable plan
-modl run spec.yaml --skip-existing      # resume — skip already-generated sub-jobs
+modl run spec.yaml                      # resume by default — sub-jobs whose
+                                        # (prompt, seed, model) already exist are skipped
+modl run spec.yaml --force              # regenerate everything, ignoring prior outputs
 ```
 
 **YAML format** (flat fields — `generate:` takes the prompt directly; `edit:` takes the image ref with a separate `prompt:`):
@@ -703,7 +705,7 @@ modl run batch.yaml --dry-run
 # 2. Execute — returns a run_id; the run is tracked in SQLite
 modl run batch.yaml
 
-# 3. Check later (survives disconnects; resume partial runs with --skip-existing)
+# 3. Check later (survives disconnects; re-running the spec resumes by default)
 modl status <run-id> --json
 
 # 4. Collect artifacts

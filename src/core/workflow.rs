@@ -191,6 +191,12 @@ struct RawWorkflow {
 
 #[derive(Debug, Default, Deserialize)]
 struct StepDefaults {
+    /// Any key that isn't a recognized default. Captured rather than silently
+    /// dropped so `parse` can warn — a typo'd or step-only key here (notably
+    /// `seeds:`, which is step-level and has no `defaults` equivalent) would
+    /// otherwise change nothing and produce a quietly wrong run.
+    #[serde(flatten)]
+    unknown: HashMap<String, serde_yaml::Value>,
     #[serde(default)]
     seed: Option<u64>,
     #[serde(default)]
@@ -303,6 +309,19 @@ pub fn parse_file(path: &Path) -> Result<Workflow> {
 
 pub fn parse_str(yaml: &str, base_dir: &Path) -> Result<Workflow> {
     let raw: RawWorkflow = serde_yaml::from_str(yaml).context("Failed to parse workflow YAML")?;
+
+    // Unrecognized keys under `defaults:` are inert. Warn rather than ignore:
+    // a silently dropped key produces a run that looks correct and isn't.
+    for key in raw.defaults.unknown.keys() {
+        if key == "seeds" {
+            eprintln!(
+                "  ! `seeds` is not a workflow default — it is only valid on a step, \
+                 and was ignored here. Move `seeds: [...]` onto each step."
+            );
+        } else {
+            eprintln!("  ! unknown key `{key}` under `defaults:` — ignored");
+        }
+    }
 
     if raw.name.trim().is_empty() {
         bail!("workflow `name` is required");
@@ -838,6 +857,33 @@ steps:
         assert_eq!(wf.steps[0].id, "a");
         match &wf.steps[0].kind {
             StepKind::Generate(g) => assert_eq!(g.prompt, "a cat"),
+            _ => panic!("expected generate"),
+        }
+    }
+
+    /// `seeds:` is step-level only. Under `defaults:` it is inert — serde used to
+    /// drop it silently, so a 3-seed batch quietly produced 1 image per step. The
+    /// key is now captured (and warned about at parse time) instead of vanishing.
+    #[test]
+    fn unknown_defaults_keys_are_captured_not_dropped() {
+        let yaml = r#"
+name: test
+model: flux-dev
+defaults:
+  seeds: [7, 42, 1234]
+  typo_key: 1
+steps:
+  - id: a
+    generate: "a cat"
+"#;
+        let wf = parse(yaml).unwrap();
+        // Still parses, and the step is unaffected by the inert key.
+        assert_eq!(wf.steps.len(), 1);
+        match &wf.steps[0].kind {
+            StepKind::Generate(g) => assert!(
+                g.seeds.is_none(),
+                "`seeds:` under defaults is inert — it must not reach the step"
+            ),
             _ => panic!("expected generate"),
         }
     }
