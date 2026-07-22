@@ -6,6 +6,7 @@
 #   --quick              Non-interactive: init + pull model + install service
 #   --model <id>         Model to pull (default: flux-schnell, used with --quick)
 #   --no-service         Skip service installation (used with --quick)
+#   --no-skill           Skip installing the Claude Code skill
 #   MODL_INSTALL_DIR     Override binary install path (default: /usr/local/bin)
 
 set -e
@@ -15,6 +16,7 @@ INSTALL_DIR="${MODL_INSTALL_DIR:-/usr/local/bin}"
 QUICK=0
 MODEL="flux-schnell"
 NO_SERVICE=0
+NO_SKILL=0
 
 # Parse flags
 while [ $# -gt 0 ]; do
@@ -22,6 +24,7 @@ while [ $# -gt 0 ]; do
         --quick)    QUICK=1; shift ;;
         --model)    MODEL="$2"; shift 2 ;;
         --no-service) NO_SERVICE=1; shift ;;
+        --no-skill) NO_SKILL=1; shift ;;
         *)          echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -33,6 +36,31 @@ for cmd in curl tar; do
         exit 1
     fi
 done
+
+# Install the Claude Code skill so agents can drive modl.
+# Only runs if Claude Code is present (~/.claude exists). Fetches SKILL.md from
+# the repo pinned to the installed release, falling back to main. Never clobbers
+# an existing symlink (dev setups point it at a local checkout).
+install_claude_skill() {
+    [ -d "${HOME}/.claude" ] || return 0
+
+    SKILL_DEST="${HOME}/.claude/skills/modl"
+    if [ -L "$SKILL_DEST" ]; then
+        return 0   # symlinked (dev checkout) — leave it alone
+    fi
+
+    for REF in "${LATEST}" "main"; do
+        SKILL_SRC="https://raw.githubusercontent.com/${REPO}/${REF}/skills/modl/SKILL.md"
+        mkdir -p "$SKILL_DEST"
+        if curl -fsSL "$SKILL_SRC" -o "$SKILL_DEST/SKILL.md" 2>/dev/null; then
+            echo "Installed Claude Code skill → ${SKILL_DEST}/SKILL.md"
+            echo "  Restart Claude Code, then try: /modl"
+            return 0
+        fi
+    done
+    # Non-fatal: a missing skill never blocks the install.
+    return 0
+}
 
 # Detect OS and architecture
 OS="$(uname -s)"
@@ -135,6 +163,11 @@ fi
 
 echo ""
 echo "modl ${LATEST} installed to ${INSTALL_DIR}/modl"
+
+# Install the Claude Code skill (opt out with --no-skill)
+if [ "$NO_SKILL" = "0" ]; then
+    install_claude_skill || true
+fi
 
 # Quick install mode: init + pull + service
 if [ "$QUICK" = "1" ]; then
