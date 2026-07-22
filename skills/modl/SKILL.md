@@ -1,8 +1,11 @@
 ---
 name: modl
 description: >
-  AI image generation toolkit — generate images, edit photos, train LoRAs, manage models,
-  analyze images, upscale, remove backgrounds, and more via the modl CLI.
+  Generate images, edit photos, train LoRAs, run img2img/inpaint, upscale, remove
+  backgrounds, caption/score images, and run batch workflows via the modl CLI. Use
+  whenever the user wants to create, edit, analyze, or train on images locally.
+  Triggers: generate an image, edit this photo, train a lora, img2img, inpaint,
+  upscale, remove background, describe image, batch generate, run a workflow.
 triggers:
   # Direct invocation
   - /modl
