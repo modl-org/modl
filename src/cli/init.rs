@@ -166,6 +166,7 @@ pub async fn run(defaults: bool, root_override: Option<&str>) -> Result<()> {
     let config = Config {
         storage: StorageConfig {
             root: storage_root.clone(),
+            hf_cache: None,
         },
         targets,
         gpu: gpu_override,
