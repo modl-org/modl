@@ -9,6 +9,52 @@ use crate::core::config::Config;
 use crate::core::db::Database;
 
 pub async fn run() -> Result<()> {
+    gc_store().await?;
+    // The store is only half the disk story: the Python worker's HF downloads
+    // live outside it. Reporting the size here is how a "clean" store stops
+    // hiding a cache that can be larger than the store itself.
+    report_hf_cache();
+    Ok(())
+}
+
+/// Print where the HuggingFace cache is and how big it got.
+///
+/// Deliberately read-only: those blobs belong to `huggingface_hub`, which has
+/// its own tool for pruning them. modl should not delete another tool's cache
+/// behind the user's back.
+fn report_hf_cache() {
+    let hf = crate::core::hf_cache::resolved();
+    let Some(size) = hf.size_on_disk() else {
+        return;
+    };
+
+    println!();
+    println!(
+        "{} HuggingFace cache: {} ({})",
+        style("i").cyan(),
+        hf.hub().display(),
+        HumanBytes(size)
+    );
+    println!(
+        "  {} Location from {}. Training and some adapters download base weights",
+        style("·").dim(),
+        hf.source().label()
+    );
+    println!(
+        "  {} here in HF layout, so a model can exist both here and in the store.",
+        style("·").dim()
+    );
+    println!(
+        "  {} gc leaves it alone — list with `hf cache ls`, prune with `hf cache rm <repo>`.",
+        style("·").dim()
+    );
+    println!(
+        "  {} Move it with `modl config storage.hf_cache <path>`.",
+        style("·").dim()
+    );
+}
+
+async fn gc_store() -> Result<()> {
     let config = Config::load()?;
     let db = Database::open()?;
     let models = db.list_installed(None)?;

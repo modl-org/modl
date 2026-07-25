@@ -316,6 +316,12 @@ pub struct CloudConfig {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StorageConfig {
     pub root: PathBuf,
+    /// Where the Python worker's HuggingFace downloads land (exported as
+    /// `HF_HOME`). Unset means `huggingface_hub`'s default,
+    /// `~/.cache/huggingface`. An `HF_HOME` already in the environment always
+    /// wins over this. See `core::hf_cache`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hf_cache: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -386,6 +392,7 @@ impl Default for Config {
         Self {
             storage: StorageConfig {
                 root: PathBuf::from("~/modl"),
+                hf_cache: None,
             },
             targets: vec![],
             gpu: None,
@@ -420,6 +427,7 @@ mod tests {
         let config = Config {
             storage: StorageConfig {
                 root: PathBuf::from("~/modl"),
+                hf_cache: None,
             },
             targets: vec![TargetConfig {
                 path: PathBuf::from("~/ComfyUI"),

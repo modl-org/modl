@@ -228,6 +228,14 @@ modl config storage.root /srv/disk2/modl-store
 
 Existing models are not moved automatically — set this before pulling, or move the directory and update the config.
 
+Training also downloads base weights through HuggingFace, into a **second** location that `storage.root` does not cover (`~/.cache/huggingface` by default). Put it on the same big disk:
+
+```bash
+modl config storage.hf_cache /srv/disk2/hf-cache
+```
+
+An `HF_HOME` or `HF_HUB_CACHE` already exported in your shell always wins, so an existing cache is never orphaned. `modl config` shows the resolved path and which rule picked it; `modl system gc` reports how large it has grown.
+
 ---
 
 ## Uninstall
@@ -261,7 +269,9 @@ Full CLI reference: **[modl.run/docs](https://modl.run/docs)**
 
 ## Privacy & Network Access
 
-modl sets `HF_HUB_OFFLINE=1` by default — the Python worker does not contact HuggingFace during normal use. Models are downloaded explicitly via `modl pull` and served from local storage.
+modl sets `HF_HUB_OFFLINE=1` for generation and editing — the Python worker does not contact HuggingFace during normal use. Models are downloaded explicitly via `modl pull` and served from local storage.
+
+Training is the exception: ai-toolkit needs base weights in HuggingFace's directory layout, which the content-addressed store doesn't provide, so `modl train` allows HF downloads. Those land in the HuggingFace cache (`HF_HOME`), not in the store — which means a base model can occupy disk twice: once as the HF source, once as the store copy. `modl system gc` reports the cache size so it doesn't grow unnoticed, and `modl config storage.hf_cache <path>` moves it (see [Storage Location](#storage-location)).
 
 Some vision models (Florence-2, BiRefNet) require `trust_remote_code` from HuggingFace transformers. This means model-specific Python code is downloaded from their HF repos on first use. These are well-known models from Microsoft and verified researchers, and the code is only fetched once and cached locally. Affected commands: `modl describe`, `modl vl-tag`, `modl segment`, `modl remove-bg`.
 
