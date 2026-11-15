@@ -2270,7 +2270,7 @@ fn collect_schema_commands(
         let mut flags = Vec::new();
 
         for arg in sub.get_arguments() {
-            if arg.get_id() == "help" || arg.get_id() == "version" {
+            if arg.get_id() == "help" || arg.get_id() == "version" || arg.is_hide_set() {
                 continue;
             }
 
