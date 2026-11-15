@@ -1,6 +1,6 @@
 #!/bin/sh
 # modl installer — downloads the latest release binary for your platform
-# Usage: curl -fsSL https://modl.run/install.sh | sh
+# Usage: curl -fsSL https://modl.pedroalonso.net/install.sh | sh
 #
 # Options:
 #   --quick              Non-interactive: init + pull model + install service
@@ -165,6 +165,6 @@ else
     echo "  modl init              # Configure your setup"
     echo "  modl pull flux-dev     # Install a model"
     echo ""
-    echo "Docs: https://modl.run/docs"
+    echo "Docs: https://modl.pedroalonso.net/docs"
     echo ""
 fi
