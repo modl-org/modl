@@ -7,7 +7,25 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::config::Config;
 
-pub const DEFAULT_API_BASE: &str = "https://hub.modl.run";
+/// The hosted modl cloud (hub.modl.run) was shut down in November 2026.
+/// Hub/cloud commands only work against a self-hosted modl-cloud configured
+/// via `cloud.api_base` in ~/.modl/config.yaml (or `MODL_API_BASE`).
+pub const CLOUD_DISCONTINUED: &str = "The hosted modl cloud was shut down (Nov 2026). \
+Run jobs locally, or on your own GPU with `modl pod up` / `--pod`. \
+To use a self-hosted modl-cloud, set cloud.api_base in ~/.modl/config.yaml or MODL_API_BASE.";
+
+/// Resolve the hub/cloud API base. There is no default anymore.
+pub fn resolve_api_base(configured: Option<&str>) -> Result<String> {
+    let base = std::env::var("MODL_API_BASE")
+        .ok()
+        .or_else(|| configured.map(String::from))
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty() && !s.contains("modl.run"));
+    match base {
+        Some(b) => Ok(b),
+        None => bail!(CLOUD_DISCONTINUED),
+    }
+}
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
@@ -157,13 +175,7 @@ pub struct HubClient {
 impl HubClient {
     pub fn from_config(require_auth: bool) -> Result<Self> {
         let config = Config::load().context("Failed to load config")?;
-        let api_base = config
-            .cloud
-            .as_ref()
-            .and_then(|c| c.api_base.as_deref())
-            .unwrap_or(DEFAULT_API_BASE)
-            .trim_end_matches('/')
-            .to_string();
+        let api_base = resolve_api_base(config.cloud.as_ref().and_then(|c| c.api_base.as_deref()))?;
         let api_key = config.cloud.and_then(|c| c.api_key);
 
         if require_auth && api_key.as_deref().is_none_or(|k| k.trim().is_empty()) {
@@ -460,4 +472,22 @@ pub async fn upload_file_presigned(
         bail!("Upload failed: HTTP {} {}", status.as_u16(), text);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod cloud_gate_tests {
+    use super::resolve_api_base;
+
+    #[test]
+    fn hosted_hub_is_rejected_and_self_hosted_allowed() {
+        if std::env::var("MODL_API_BASE").is_ok() {
+            return;
+        }
+        assert!(resolve_api_base(None).is_err());
+        assert!(resolve_api_base(Some("https://hub.modl.run")).is_err());
+        assert_eq!(
+            resolve_api_base(Some("https://cloud.example.com/")).unwrap(),
+            "https://cloud.example.com"
+        );
+    }
 }

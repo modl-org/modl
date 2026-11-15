@@ -290,7 +290,7 @@ pub struct Config {
 /// Cloud provider credentials and default settings
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CloudConfig {
-    /// Hub/cloud API base URL (default: https://hub.modl.run)
+    /// Self-hosted modl-cloud API base URL (the hosted hub.modl.run was shut down Nov 2026)
     #[serde(default)]
     pub api_base: Option<String>,
     /// Hub/cloud API key (Bearer modl_...)
