@@ -163,10 +163,7 @@ async fn run_list(
             {
                 return false;
             }
-            if favorites_only && !all_favorites.contains(&a.path) {
-                return false;
-            }
-            true
+            !favorites_only || all_favorites.contains(&a.path)
         })
         .take(limit)
         .collect();

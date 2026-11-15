@@ -515,11 +515,14 @@ pub enum SystemCommands {
 
 #[derive(Subcommand)]
 pub enum AuthCommands {
-    /// Login to modl hub
+    /// Login to modl hub (hosted hub discontinued)
+    #[command(hide = true)]
     Login,
     /// Logout from modl hub
+    #[command(hide = true)]
     Logout,
     /// Show hub account info
+    #[command(hide = true)]
     Whoami,
     /// Configure source credentials (HuggingFace, CivitAI) for gated model downloads
     Add {
@@ -956,7 +959,7 @@ pub enum Commands {
     },
 
     // ── Model Management ─────────────────────────────────────────────
-    /// Download models from registry, HuggingFace (hf:), CivitAI (civitai:), or hub (user/slug)
+    /// Download models from registry, HuggingFace (hf:), or CivitAI (civitai:)
     #[command(after_help = MODEL_PULL_EXAMPLES, alias = "install")]
     Pull {
         /// Registry ID (e.g. flux-dev) or HuggingFace repo (hf:owner/model)
@@ -980,6 +983,7 @@ pub enum Commands {
     ///
     /// Use --checkpoints to upload all intermediate checkpoint files (useful if
     /// you want others to download and test specific training steps).
+    #[command(hide = true)]
     Push {
         /// Asset kind: lora or dataset
         #[arg(value_parser = ["lora", "dataset"])]
@@ -1128,7 +1132,7 @@ pub enum Commands {
     },
 
     // ── Auth ──────────────────────────────────────────────────────────
-    /// Authentication: hub login/logout and source credentials (HuggingFace, CivitAI)
+    /// Source credentials (HuggingFace, CivitAI)
     Auth {
         #[command(subcommand)]
         command: AuthCommands,

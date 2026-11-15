@@ -5,7 +5,7 @@ use std::sync::mpsc;
 
 use crate::core::config::Config;
 use crate::core::executor::{Executor, JobHandle, parse_worker_event};
-use crate::core::hub::DEFAULT_API_BASE;
+use crate::core::hub::resolve_api_base;
 use crate::core::job::{EditJobSpec, EventPayload, GenerateJobSpec, JobEvent, TrainJobSpec};
 
 // ---------------------------------------------------------------------------
@@ -120,11 +120,7 @@ impl CloudExecutor {
         let config = Config::load().ok();
         let cloud = config.as_ref().and_then(|c| c.cloud.as_ref());
 
-        let api_base = cloud
-            .and_then(|c| c.api_base.as_deref())
-            .unwrap_or(DEFAULT_API_BASE)
-            .trim_end_matches('/')
-            .to_string();
+        let api_base = resolve_api_base(cloud.and_then(|c| c.api_base.as_deref()))?;
 
         let api_key = cloud
             .and_then(|c| c.api_key.as_deref())

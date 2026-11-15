@@ -867,7 +867,7 @@ async fn execute_training(
                     && let Some(href) = data.get("hub_ref").and_then(|v| v.as_str())
                 {
                     pb.println(format!(
-                        "  {} Published to hub.modl.run/{}",
+                        "  {} Published to hub as {}",
                         style("✓").green(),
                         href
                     ));
