@@ -5,12 +5,12 @@
 ![Two modl commands — train a LoRA from a folder of photos, then generate with it — above four images produced by modl: a portrait, a product shot, a steampunk owl, and a dog in space](docs/assets/hero.webp)
 
 ```bash
-curl -fsSL https://modl.run/install.sh | sh
+curl -fsSL https://modl.pedroalonso.net/install.sh | sh
 modl pull z-image-turbo
 modl generate "a cat on mars"
 ```
 
-**[Website](https://modl.run)** · **[Docs](https://modl.run/docs)** · **[Guides](https://modl.run/guides)** · **[Model Registry](https://github.com/modl-org/modl-registry)** · **[Changelog](CHANGELOG.md)**
+**[Website](https://modl.pedroalonso.net)** · **[Docs](https://modl.pedroalonso.net/docs)** · **[Guides](https://modl.pedroalonso.net/guides)** · **[Model Registry](https://github.com/modl-org/modl-registry)** · **[Changelog](CHANGELOG.md)**
 
 ---
 
@@ -30,7 +30,7 @@ modl generate "a cat on mars"
 
 ```bash
 # Install
-curl -fsSL https://modl.run/install.sh | sh
+curl -fsSL https://modl.pedroalonso.net/install.sh | sh
 
 # Pull a model (auto-selects variant for your GPU)
 modl pull z-image-turbo
@@ -42,7 +42,7 @@ modl generate "a photo of a mountain lake at sunset"
 Or do everything at once:
 
 ```bash
-curl -fsSL https://modl.run/install.sh | sh -s -- --quick
+curl -fsSL https://modl.pedroalonso.net/install.sh | sh -s -- --quick
 ```
 
 This installs modl, pulls a starter model, and launches the web UI.
@@ -74,7 +74,7 @@ modl serve
 
 Generate, train, browse outputs, and manage models from the browser at `http://localhost:3939`. Same engine as the CLI.
 
-![modl web UI — generate tab](https://modl.run/ui-generate-lora.webp)
+![modl web UI — generate tab](https://modl.pedroalonso.net/ui-generate-lora.webp)
 
 Install as a system service (starts on boot):
 
@@ -141,7 +141,7 @@ Not yet supported on pods: controlnet/style-ref, inpainting masks.
 
 ## Supported Models
 
-16 models across 6 families. See the full comparison at **[modl.run/guides/model-comparison](https://modl.run/guides/model-comparison)**.
+16 models across 6 families. See the full comparison at **[modl.pedroalonso.net/guides/model-comparison](https://modl.pedroalonso.net/guides/model-comparison)**.
 
 | Family | Models | Best for |
 |--------|--------|----------|
@@ -152,7 +152,7 @@ Not yet supported on pods: controlnet/style-ref, inpainting masks.
 | **Qwen Image** | Image, Image Edit | Text rendering (Chinese/English), instruction editing |
 | **Legacy SD** | SDXL, SD 1.5 | Low VRAM, massive LoRA library |
 
-Plus 70+ ControlNets, IP-Adapters, VAEs, text encoders, upscalers, and segmentation models. Browse all at **[modl.run/models](https://modl.run/models)**.
+Plus 70+ ControlNets, IP-Adapters, VAEs, text encoders, upscalers, and segmentation models. Browse all at **[modl.pedroalonso.net/models](https://modl.pedroalonso.net/models)**.
 
 ```bash
 modl pull flux2-klein-4b    # fast, 4-step generation + editing
@@ -255,7 +255,7 @@ Set `MODEL=flux-schnell` to auto-pull a model on first boot. Models persist on t
 
 Single Rust binary for speed and distribution. Managed Python runtime for GPU compute. No external dependencies to install.
 
-Full CLI reference: **[modl.run/docs](https://modl.run/docs)**
+Full CLI reference: **[modl.pedroalonso.net/docs](https://modl.pedroalonso.net/docs)**
 
 ---
 
