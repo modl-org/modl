@@ -1,8 +1,8 @@
 """Qwen-Image-2.1 glue: Comfy gate/up split, RGBA finalisation, embed cache."""
 
-import numpy as np
 import pytest
 
+np = pytest.importorskip("numpy")
 torch = pytest.importorskip("torch")
 PIL = pytest.importorskip("PIL")
 from PIL import Image
