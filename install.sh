@@ -61,7 +61,8 @@ esac
 
 # Get latest release tag
 echo "Detecting latest version..."
-LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+# The API may return minified JSON (one line), so match the field, not the line.
+LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | tr ',' '\n' | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
 
 if [ -z "$LATEST" ]; then
     echo "Could not determine latest version."
