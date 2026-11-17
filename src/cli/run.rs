@@ -28,8 +28,24 @@ use crate::core::job::{
 };
 use crate::core::outputs::{SidecarMetadata, write_sidecar_yaml};
 
-/// Key used for the skip-existing completion index: (prompt, seed, base_model_id).
-type CompletionKey = (String, u64, String);
+/// Key used for the skip-existing completion index:
+/// (prompt, seed, base_model_id, steps, quantized_guidance).
+///
+/// `steps` and `guidance` are part of the key so that re-running the same
+/// prompt/seed at different sampler settings regenerates the image instead of
+/// returning the stale artifact from the earlier settings. Without them a
+/// guidance/steps sweep silently reports success while handing back the old
+/// images (see `quantize_guidance` for why guidance is stored as an integer).
+type CompletionKey = (String, u64, String, u32, i64);
+
+/// Quantize a guidance/CFG value into a stable integer so it can live in a
+/// hashable completion key — `f32` implements neither `Eq` nor `Hash`. Three
+/// decimal places is finer than any preset or UI step, so distinct settings
+/// never collide and equal settings always match, regardless of float
+/// formatting when the value round-trips through the YAML sidecar.
+fn quantize_guidance(g: f32) -> i64 {
+    (g as f64 * 1000.0).round() as i64
+}
 use crate::core::workflow::{
     EditMask, EditStep, GenerateStep, ImageRef, StepKind, Workflow, parse_file,
 };
@@ -904,7 +920,9 @@ pub async fn execute_plan(
     println!("  Run ID: {}\n", plan.run_id);
 
     // Build the completion index once before any GPU work so we can skip
-    // sub-jobs whose (prompt, seed, model) triple was already generated.
+    // sub-jobs whose (prompt, seed, model, steps, guidance) tuple was already
+    // generated. Steps + guidance are part of the key so a settings sweep
+    // regenerates rather than returning stale artifacts.
     let completion_index: HashMap<CompletionKey, PathBuf> = if skip_existing {
         let outputs_root = paths::modl_root().join("outputs");
         let index = build_completion_index(&outputs_root);
@@ -981,9 +999,30 @@ pub async fn execute_plan(
                     model_family::default_resolution(effective_model_key),
                 );
                 for (sub_idx, (seed, count)) in sub_jobs.iter().enumerate() {
+                    // Build the spec first (pure, no GPU) so the skip check can
+                    // key on the resolved steps + guidance, not just prompt/seed.
+                    let spec = build_generate_spec(
+                        effective_model_key,
+                        &resolved_model.id,
+                        Some(resolved_model.base_path.clone()),
+                        resolved_model.arch_key.clone(),
+                        resolved_lora.clone(),
+                        planned.lightning.as_ref(),
+                        g,
+                        &gen_inputs,
+                        *seed,
+                        *count,
+                        &plan.output_dir,
+                        step_labels.clone(),
+                    );
+
                     // Skip sub-jobs already in the completion index (default behaviour).
-                    // Random-seed sub-jobs (seed == None) are never skipped.
+                    // Random-seed sub-jobs (seed == None) are never skipped. The key
+                    // includes steps + guidance, so the same prompt/seed at different
+                    // settings regenerates instead of returning the stale image.
                     if skip_existing && let Some(s) = seed {
+                        let steps = spec.params.steps;
+                        let guidance_q = quantize_guidance(spec.params.guidance);
                         // A skipped sub-job must still contribute its images to
                         // `step_outputs` — later steps may reference them via
                         // `$step.outputs[N]`.
@@ -994,6 +1033,8 @@ pub async fn execute_plan(
                                         g.prompt.clone(),
                                         s + i as u64,
                                         resolved_model.id.clone(),
+                                        steps,
+                                        guidance_q,
                                     ))
                                     .cloned()
                             })
@@ -1024,20 +1065,6 @@ pub async fn execute_plan(
                                 .unwrap_or_else(|| "?".to_string()),
                         );
                     }
-                    let spec = build_generate_spec(
-                        effective_model_key,
-                        &resolved_model.id,
-                        Some(resolved_model.base_path.clone()),
-                        resolved_model.arch_key.clone(),
-                        resolved_lora.clone(),
-                        planned.lightning.as_ref(),
-                        g,
-                        &gen_inputs,
-                        *seed,
-                        *count,
-                        &plan.output_dir,
-                        step_labels.clone(),
-                    );
                     let (job_id, artifacts) =
                         execute_generate_step(&mut executor, &spec, &step.id, &plan.run_id, db)?;
                     for (i, artifact) in artifacts.iter().enumerate() {
@@ -1280,7 +1307,16 @@ fn build_completion_index(outputs_root: &Path) -> HashMap<CompletionKey, PathBuf
             else {
                 continue;
             };
-            index.insert((meta.prompt, seed, meta.base_model), image);
+            index.insert(
+                (
+                    meta.prompt,
+                    seed,
+                    meta.base_model,
+                    meta.steps,
+                    quantize_guidance(meta.guidance),
+                ),
+                image,
+            );
         }
     }
     index
@@ -2266,6 +2302,79 @@ mod tests {
     fn capability_check_skips_unknown_model() {
         check_capability("s", "totally-made-up-model", &gen_kind()).unwrap();
         check_capability("s", "totally-made-up-model", &edit_kind()).unwrap();
+    }
+
+    #[test]
+    fn quantize_guidance_is_stable_and_distinct() {
+        // Equal values quantize equal; values that differ by a real UI step differ.
+        assert_eq!(quantize_guidance(3.0), quantize_guidance(3.0));
+        assert_ne!(quantize_guidance(3.0), quantize_guidance(2.5));
+        assert_eq!(quantize_guidance(2.5), 2500);
+    }
+
+    /// Regression: the completion key must include steps + guidance so that
+    /// re-running the same prompt/seed at different sampler settings is a cache
+    /// miss (regenerates), not a stale hit. Guards against the resume bug where
+    /// a guidance sweep silently returned the old images.
+    #[test]
+    fn completion_index_keys_on_steps_and_guidance() {
+        use std::io::Write;
+
+        let outputs = tempfile::TempDir::new().unwrap();
+        let date_dir = outputs.path().join("2026-07-20");
+        std::fs::create_dir_all(&date_dir).unwrap();
+
+        let write_pair = |stem: &str, steps: u32, guidance: f32| {
+            std::fs::File::create(date_dir.join(format!("{stem}.png")))
+                .unwrap()
+                .write_all(b"fake-png")
+                .unwrap();
+            let meta = SidecarMetadata {
+                prompt: "a red apple".into(),
+                base_model: "krea-2-raw".into(),
+                seed: Some(7),
+                steps,
+                guidance,
+                size: "832x1216".into(),
+                lora: None,
+                lora_strength: None,
+                created_at: "2026-07-20T00:00:00Z".into(),
+                source: "workflow".into(),
+            };
+            std::fs::write(
+                date_dir.join(format!("{stem}.yaml")),
+                serde_yaml::to_string(&meta).unwrap(),
+            )
+            .unwrap();
+        };
+
+        // Same prompt/seed/model, one at guidance 3.0 and one at 2.5.
+        write_pair("img-g30", 20, 3.0);
+        write_pair("img-g25", 20, 2.5);
+
+        let index = build_completion_index(outputs.path());
+
+        let key = |g: f32| {
+            (
+                "a red apple".to_string(),
+                7u64,
+                "krea-2-raw".to_string(),
+                20u32,
+                quantize_guidance(g),
+            )
+        };
+        // Both settings are indexed under distinct keys (no collision)...
+        assert!(index.contains_key(&key(3.0)));
+        assert!(index.contains_key(&key(2.5)));
+        // ...and a setting that was never generated is a miss.
+        assert!(!index.contains_key(&key(4.5)));
+        assert!(!index.contains_key(&(
+            "a red apple".to_string(),
+            7,
+            "krea-2-raw".to_string(),
+            28, // different step count
+            quantize_guidance(3.0),
+        )));
     }
 
     fn fake_resolved(id: &str) -> ResolvedModel {
