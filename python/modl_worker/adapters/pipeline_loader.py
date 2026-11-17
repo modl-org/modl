@@ -2,6 +2,7 @@
 
 import json
 import os
+import weakref
 from pathlib import Path
 
 from modl_worker.protocol import EventEmitter
@@ -370,6 +371,43 @@ def _convert_krea2_checkpoint_to_diffusers(checkpoint, **kwargs):
     return converted
 
 
+def _check_transformer_coverage(model, load_result, filename: str) -> None:
+    """Fail loudly when a converted checkpoint leaves most weights unloaded.
+
+    ``load_state_dict(strict=False)`` reports missing keys instead of raising,
+    and the model then runs on meta→random weights (the Qwen VAE ghost-output
+    bug). A converter mismatch must be an error, not a silent garbage image.
+    Buffers computed at init (RoPE tables) are legitimately absent.
+    """
+    params = {name for name, _ in model.named_parameters()}
+    missing = [k for k in load_result.missing_keys if k in params]
+    if len(missing) > 0.1 * max(len(params), 1):
+        raise RuntimeError(
+            f"{filename}: {len(missing)}/{len(params)} transformer weights missing "
+            f"after key conversion (e.g. {missing[:3]}). Wrong converter or file?"
+        )
+
+
+def _convert_moss_checkpoint(checkpoint: dict) -> dict:
+    """Comfy-Org MOSS-Image single file → upstream MOSSImageTransformer keys.
+
+    Identical layout except the main DiT blocks: Comfy fuses the attention
+    projections into ``layers.N.proj.qkv`` (3*dim rows, q|k|v order), while
+    the upstream module keeps ``proj.q`` / ``proj.k`` / ``proj.v``. The text
+    refiner blocks (``text_embedder.blocks.N.qkv``) are fused upstream too
+    and pass through unchanged. Also strips a ComfyUI prefix, if any.
+    """
+    out = {}
+    for key, value in _strip_comfy_prefix(checkpoint).items():
+        if key.startswith("layers.") and ".proj.qkv." in key:
+            q, k, v = value.chunk(3, dim=0)
+            for name, part in (("q", q), ("k", k), ("v", v)):
+                out[key.replace(".proj.qkv.", f".proj.{name}.")] = part.contiguous()
+        else:
+            out[key] = value
+    return out
+
+
 def _get_checkpoint_converter(model_class_name: str):
     """Get the right ComfyUI→diffusers key converter for a transformer class.
 
@@ -386,6 +424,7 @@ def _get_checkpoint_converter(model_class_name: str):
 
     _LOCAL_CONVERTER_MAP = {
         "Krea2Transformer2DModel": _convert_krea2_checkpoint_to_diffusers,
+        "MOSSImageTransformer": _convert_moss_checkpoint,
     }
     local = _LOCAL_CONVERTER_MAP.get(model_class_name)
     if local is not None:
@@ -656,6 +695,11 @@ def _detect_weight_dtype(filepath: str) -> str:
         return "unknown"
 
 
+# Components shared between cached pipelines, keyed by (weights file, class).
+# Weak values: the entry goes away with the last pipeline that holds it.
+_SHARED_COMPONENTS: "weakref.WeakValueDictionary" = weakref.WeakValueDictionary()
+
+
 def assemble_pipeline(
     base_model_id: str,
     base_model_path: str | None,
@@ -699,6 +743,14 @@ def assemble_pipeline(
 
     PipelineClass = _get_pipeline(cls_name)
     components = {}
+    early_flags = ARCH_CONFIGS.get(detect_arch(base_model_id), {}).get("model_flags", {})
+
+    def share_component(param_name: str) -> bool:
+        # Only parked text encoders are shared: they live on the CPU and every
+        # owner moves them on demand, so sharing can't strand one on a device
+        # another pipeline doesn't expect. Resident/offloaded ones stay private.
+        return param_name == "text_encoder" and bool(early_flags.get("park_text_encoder"))
+
     # Track loaded model files for metadata/visibility
     loaded_files: dict[str, dict] = {}
 
@@ -843,8 +895,9 @@ def assemble_pipeline(
                         model = ModelClass.from_config(config_dict)
                     converted = convert_fn(checkpoint)
                     del checkpoint
-                    model.load_state_dict(converted, strict=False, assign=True)
+                    result = model.load_state_dict(converted, strict=False, assign=True)
                     del converted
+                    _check_transformer_coverage(model, result, filename)
                     _materialize_meta_tensors(model)
                     dtype = get_inference_dtype()
                     model = model.to(dtype)
@@ -876,6 +929,20 @@ def assemble_pipeline(
             components[param_name] = ModelClass.from_pretrained(str(config_dir))
 
         elif resolved_path:
+            share_key = (resolved_path, model_class_name)
+            shared = _SHARED_COMPONENTS.get(share_key) if share_component(param_name) else None
+            if shared is not None:
+                # Same file already loaded by another cached pipeline (MOSS
+                # Base + SFT share the 16GB text encoder) — reuse it.
+                emitter.info(f"Reusing {param_name}: {Path(resolved_path).name} (shared)")
+                components[param_name] = shared
+                loaded_files[param_name] = {
+                    "file": Path(resolved_path).name,
+                    "path": resolved_path,
+                    "weight_dtype": _detect_weight_dtype(resolved_path),
+                    "class": model_class_name,
+                }
+                continue
             weight_dtype = _detect_weight_dtype(resolved_path)
             filename = Path(resolved_path).name
             emitter.info(
@@ -956,6 +1023,8 @@ def assemble_pipeline(
                     # stability. Unscaled fp8 embeddings are unreliable.
                     model = model.to(get_inference_dtype())
                 components[param_name] = model
+            if share_component(param_name) and param_name in components:
+                _SHARED_COMPONENTS[share_key] = components[param_name]
         else:
             emitter.info(f"Skipping {param_name} (no weights found)")
 
@@ -965,6 +1034,17 @@ def assemble_pipeline(
     arch_cfg = ARCH_CONFIGS.get(arch_name, {})
     pipeline_kwargs = arch_cfg.get("pipeline_kwargs", {})
     pipe = PipelineClass(**components, **pipeline_kwargs)
+    model_flags = arch_cfg.get("model_flags", {})
+    if model_flags.get("vae_fp32") and getattr(pipe, "vae", None) is not None:
+        # Upstream decodes in fp32 (MOSS: bf16 decode bands fine gradients).
+        pipe.vae.to(torch.float32)
+    if model_flags.get("park_text_encoder"):
+        # Placement is decided in rebalance_pipe_placement once LoRA state is
+        # final; see device.place_with_parked_text_encoder.
+        pipe._modl_park_te = True
+    if model_flags.get("arch") == "moss_image":
+        from modl_worker.adapters.moss_support import prepare_moss_pipeline
+        prepare_moss_pipeline(pipe)
     if not no_offload:
         if arch_cfg.get("model_flags", {}).get("requires_resident"):
             # This pipeline drives the transformer through custom methods

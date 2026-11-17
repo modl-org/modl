@@ -741,7 +741,7 @@ pub enum Commands {
         /// krea-2-raw additionally supports a quality tier at --fast 12-15
         /// (distill LoRA at partial strength + real CFG).
         /// Auto-applies a model-specific distillation LoRA. Cannot combine with --lora.
-        /// Supported: qwen-image, qwen-image-edit, krea-2-raw.
+        /// Supported: qwen-image, qwen-image-edit, krea-2-raw, moss-image-base.
         #[arg(long, num_args = 0..=1, default_missing_value = "4", value_name = "STEPS")]
         fast: Option<u32>,
         /// Force one-shot mode (skip persistent worker, cold start every time)

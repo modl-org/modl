@@ -336,6 +336,13 @@ def load_lora_with_conversion(
     if _is_diff_patch(lora_path):
         return apply_diff_patch(pipeline, lora_path, lora_weight, emitter)
 
+    # MOSS-Image's vendored pipeline has no PEFT/LoraLoaderMixin support;
+    # its LoRAs are applied as unmerged fp32 branches instead.
+    from modl_worker.adapters.moss_support import apply_moss_lora, is_moss_pipeline
+
+    if is_moss_pipeline(pipeline):
+        return apply_moss_lora(pipeline, lora_path, lora_weight, emitter)
+
     # Krea 2 LoRAs use original krea module names (wq/wk/wv/wo, txtfusion.*,
     # last.modulation.lin). Diffusers' native converter RAISES on the
     # unmappable modulation residual, so pre-convert to diffusers keys here

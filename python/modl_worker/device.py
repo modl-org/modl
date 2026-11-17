@@ -10,6 +10,7 @@ Usage:
 """
 
 import os
+import weakref
 from functools import lru_cache
 
 import torch
@@ -151,6 +152,9 @@ def rebalance_pipe_placement(pipe, emitter=None) -> None:
         int(weight_bytes * _RESIDENT_RESERVE_WEIGHT_FRACTION),
     )
     needed = weight_bytes + reserve
+    if needed > int(free_bytes * 0.95) and getattr(pipe, "_modl_park_te", False):
+        place_with_parked_text_encoder(pipe, emitter)
+        return
     if needed > int(free_bytes * 0.95):
         if emitter:
             emitter.info(
@@ -162,6 +166,7 @@ def rebalance_pipe_placement(pipe, emitter=None) -> None:
     try:
         pipe.remove_all_hooks()
         pipe.to("cuda")
+        _RESIDENT.add(pipe)
         if emitter:
             emitter.info(
                 f"  → Pipeline fits VRAM ({weight_bytes / 1024**3:.1f}GB weights) — "
@@ -172,6 +177,217 @@ def rebalance_pipe_placement(pipe, emitter=None) -> None:
         pipe.enable_model_cpu_offload()
         if emitter:
             emitter.info("  → Resident placement OOMed, reverting to cpu offload")
+
+
+def _module_bytes(module) -> int:
+    return sum(p.numel() * p.element_size() for p in module.parameters()) + sum(
+        b.numel() * b.element_size() for b in module.buffers()
+    )
+
+
+def _remove_park_hooks(pipe) -> None:
+    _PARKED.discard(pipe)
+    for handle in getattr(pipe, "_modl_park_handles", ()):
+        handle.remove()
+    pipe._modl_park_handles = []
+    original = getattr(pipe, "_modl_unparked_class", None)
+    if original is not None:
+        pipe.__class__ = original
+        del pipe._modl_unparked_class
+
+
+def _pin_execution_device(pipe) -> None:
+    """Make ``pipe._execution_device`` report cuda while the TE is parked.
+
+    Without accelerate hooks diffusers answers ``_execution_device`` with
+    ``pipe.device`` — the device of the first module in *alphabetical*
+    component order, which is the parked (CPU) ``text_encoder``. Prompt
+    tokens and latents would then be created on the CPU. Swap in a
+    same-named subclass that pins the property; undone by _remove_park_hooks.
+    """
+    if getattr(pipe, "_modl_unparked_class", None) is not None:
+        return
+    original = type(pipe)
+    pipe.__class__ = type(
+        original.__name__,
+        (original,),
+        {"_execution_device": property(lambda self: torch.device("cuda"))},
+    )
+    pipe._modl_unparked_class = original
+
+
+# Pipelines placed by place_with_parked_text_encoder. Their GPU residency is
+# arbitrated here: two cached MOSS pipelines (Base + SFT) cannot both keep a
+# 10GB DiT on a 24GB card *and* swap a 16GB text encoder in, so whoever needs
+# VRAM next evicts the others' modules to CPU first.
+_PARKED: "weakref.WeakSet" = weakref.WeakSet()
+# Ordinary pipelines promoted to full residency by rebalance_pipe_placement.
+# A parked pipeline that still lacks room demotes these to cpu offload.
+_RESIDENT: "weakref.WeakSet" = weakref.WeakSet()
+
+# Activation headroom kept free when bringing a module up. The DiT peak at
+# 1024² is ~2.5GB over weights (MOSS, measured 12.7GiB total).
+_PARK_DENOISE_HEADROOM = 4 * 1024**3
+_PARK_ENCODE_HEADROOM = 2 * 1024**3
+
+
+def _park_move(module, device: str) -> None:
+    """Move a parked-pipeline module, keeping a persistent CPU copy of params.
+
+    ``module.to("cpu")`` allocates fresh pageable memory and copies — 8s for
+    the 16GB MOSS text encoder, 3.5s for the DiT, on every prompt change.
+    These weights never change after load (MOSS LoRAs are unmerged wrappers
+    with their own params), so the first upload remembers each parameter's
+    CPU tensor and moving back is just re-pointing ``param.data``. Buffers are
+    small and may be reassigned by the model (RoPE tables), so they move
+    normally. Costs no extra RAM while the module is on the CPU; while it is
+    on the GPU the CPU copy is kept (that's the point).
+    """
+    with torch.no_grad():
+        for param in module.parameters():
+            if device == "cuda":
+                if param.device.type != "cuda":
+                    param._modl_cpu = param.data
+                    param.data = param.data.to("cuda", non_blocking=True)
+            else:
+                cpu = getattr(param, "_modl_cpu", None)
+                if param.device.type == "cuda":
+                    param.data = cpu if cpu is not None else param.data.to("cpu")
+        for mod in module.modules():
+            for name, buf in mod._buffers.items():
+                if buf is not None and buf.device.type != device:
+                    mod._buffers[name] = buf.to(device)
+    if device == "cuda":
+        torch.cuda.synchronize()
+
+
+def _on_cuda(module) -> bool:
+    p = next(module.parameters(), None)
+    return p is not None and p.device.type == "cuda"
+
+
+def _make_room(needed: int, keep: tuple = ()) -> None:
+    """Move parked pipelines' modules to CPU until ``needed`` bytes are free.
+
+    Text encoders go first (they are re-uploaded per encode anyway), then
+    other pipelines' denoisers, then this pipeline's own (``keep`` is never
+    moved).
+    """
+    free, _ = torch.cuda.mem_get_info()
+    if free >= needed:
+        return
+    candidates = []
+    for p in list(_PARKED):
+        for rank, name in ((0, "text_encoder"), (1, "transformer"), (2, "vae")):
+            comp = getattr(p, name, None)
+            if comp is not None and comp not in keep and _on_cuda(comp):
+                candidates.append((rank, id(comp), comp))
+    for _rank, _id, comp in sorted(candidates, key=lambda c: c[0]):
+        _park_move(comp, "cpu")
+        torch.cuda.empty_cache()
+        free, _ = torch.cuda.mem_get_info()
+        if free >= needed:
+            return
+    # Last resort: another cached model sits fully resident. Demote it to
+    # cpu offload — it keeps working, just with per-job transfers.
+    for p in list(_RESIDENT):
+        _RESIDENT.discard(p)
+        p.enable_model_cpu_offload()
+        torch.cuda.empty_cache()
+        free, _ = torch.cuda.mem_get_info()
+        if free >= needed:
+            return
+
+
+def yield_parked_gpu(pipe) -> None:
+    """Before a job on ``pipe``, move *other* parked pipelines off the GPU.
+
+    A parked pipeline's DiT stays resident between jobs; an ordinary
+    (offloaded or resident) pipeline knows nothing about it and would OOM —
+    e.g. a MOSS → Klein edit workflow in one worker. Thanks to the persistent
+    CPU copies in ``_park_move`` this is a pointer swap, and the parked
+    pipeline's own pre-hooks bring everything back on its next job.
+    """
+    if get_device() != "cuda":
+        return
+    moved = False
+    for p in list(_PARKED):
+        if p is pipe:
+            continue
+        for name in ("text_encoder", "transformer", "vae"):
+            comp = getattr(p, name, None)
+            if comp is not None and comp is not getattr(pipe, name, None) and _on_cuda(comp):
+                _park_move(comp, "cpu")
+                moved = True
+    if moved:
+        torch.cuda.empty_cache()
+
+
+def place_with_parked_text_encoder(pipe, emitter=None) -> None:
+    """Keep the denoiser resident and swap only the text encoder in to encode.
+
+    For stacks whose text encoder is the big half (MOSS-Image: 16GB Qwen3.5-9B
+    vs a 10GB DiT), ``enable_model_cpu_offload`` re-uploads *both* every job.
+    Here the transformer + VAE live on the GPU and the text encoder on the
+    CPU; a forward pre-hook moves it up to encode. If the two don't fit
+    together, the transformer steps out for the encode and its own pre-hook
+    brings it back (parking the text encoder again) on the first denoise
+    step. Plain torch hooks, not accelerate ones; ``_execution_device`` is
+    pinned to cuda because diffusers would otherwise report the parked text
+    encoder's device.
+    """
+    te = getattr(pipe, "text_encoder", None)
+    transformer = getattr(pipe, "transformer", None)
+    if te is None or transformer is None:
+        return
+
+    pipe.remove_all_hooks()
+    _remove_park_hooks(pipe)
+    if _on_cuda(te):
+        _park_move(te, "cpu")
+    torch.cuda.empty_cache()
+    vae = getattr(pipe, "vae", None)
+    denoiser = [m for m in (transformer, vae) if m is not None]
+    denoiser_bytes = sum(_module_bytes(m) for m in denoiser)
+    _PARKED.add(pipe)
+
+    def bring_up_denoiser():
+        missing = [m for m in denoiser if not _on_cuda(m)]
+        if not missing:
+            return
+        _make_room(
+            sum(_module_bytes(m) for m in missing) + _PARK_DENOISE_HEADROOM,
+            keep=tuple(denoiser),
+        )
+        for m in missing:
+            _park_move(m, "cuda")
+
+    te_bytes = _module_bytes(te)
+
+    def te_pre_hook(module, args, kwargs):
+        # The text encoder may be shared by several cached pipelines (Base and
+        # SFT load the same file); every pipeline's hook is idempotent.
+        if not _on_cuda(module):
+            _make_room(te_bytes + _PARK_ENCODE_HEADROOM, keep=(module,))
+            _park_move(module, "cuda")
+
+    def transformer_pre_hook(module, args, kwargs):
+        if _on_cuda(te):
+            _park_move(te, "cpu")
+            torch.cuda.empty_cache()
+        bring_up_denoiser()
+
+    bring_up_denoiser()
+    _pin_execution_device(pipe)
+    pipe._modl_park_handles = [
+        te.register_forward_pre_hook(te_pre_hook, with_kwargs=True),
+        transformer.register_forward_pre_hook(transformer_pre_hook, with_kwargs=True),
+    ]
+    if emitter:
+        emitter.info(
+            f"  → Denoiser resident ({denoiser_bytes / 1024**3:.1f}GB), text encoder "
+            f"parked on CPU ({te_bytes / 1024**3:.1f}GB, swapped in to encode)"
+        )
 
 
 def demote_pipe_to_offload(pipe, exc, emitter=None) -> bool:
@@ -191,6 +407,7 @@ def demote_pipe_to_offload(pipe, exc, emitter=None) -> bool:
     if _has_accelerate_hooks(pipe):
         return False  # already offloaded — a retry would just OOM again
 
+    _remove_park_hooks(pipe)
     torch.cuda.empty_cache()
     pipe.enable_model_cpu_offload()
     torch.cuda.empty_cache()

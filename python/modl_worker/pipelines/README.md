@@ -8,6 +8,7 @@ Self-contained third-party pipeline code for Krea 2 reference-editing (K6).
 |------|--------|---------|
 | `krea2_ostris_edit.py` | `yijunwang2/krea2-outpaint` `pipeline.py` (pins `ostris/Krea2OstrisEdit`) | Apache-2.0 |
 | `krea2_outpaint_placement.py` | `yijunwang2/krea2-outpaint` `outpaint.py` | Apache-2.0 |
+| `moss_image.py` | `OpenMOSS-Team/MOSS-Image-Base` `pipeline_moss_image.py` @ `85975793` | Apache-2.0 |
 | `PIPELINE_LICENSE.apache-2.0` | upstream `PIPELINE_LICENSE` | — |
 | `NOTICE.krea2-ostris-edit` | upstream `NOTICE` | — |
 
@@ -101,3 +102,19 @@ Wired 2026-07-18. Arch key **`krea2_edit`** in `arch_config.py`:
   place the pipeline resident instead.
 - fp8 layerwise casting is **mandatory**: 1024 + CFG peaked at 24.35 GB of a
   24.56 GB card. 24 GB is the floor for 1024; smaller cards need 512–768.
+
+## MOSS-Image (`moss_image.py`)
+
+Upstream ships MOSS-Image only as a diffusers `custom_pipeline`
+(`trust_remote_code=True`); there is no MOSS class in diffusers. The file is
+vendored verbatim except for one marked change (`modl:`): `__call__` accepts
+`callback_on_step_end` so the worker can emit per-step progress.
+
+It contains `MOSSImageTransformer` (5B DiT), `MOSSImageScheduler` (flow-match
+Euler, shift 5) and `MOSSImagePipeline` (Qwen3.5-9B text encoder, FLUX.2 small
+decoder VAE). The upstream docstring asks for torch>=2.9, but the code only uses
+plain SDPA and runs on modl's torch 2.7 runtime (verified on a 4090, 2026-11-17).
+
+The weights are pulled from Comfy-Org/MOSS-Image single files, where `q`/`k`/`v`
+are fused into `proj.qkv`. `pipeline_loader._convert_moss_checkpoint` splits them
+back.

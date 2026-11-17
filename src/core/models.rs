@@ -762,6 +762,17 @@ mod tests {
     }
 
     #[test]
+    fn lightning_moss_base_dmd_has_no_scheduler_overrides() {
+        // The vendored MOSS pipeline takes no `sigmas` kwarg: any override
+        // would make gen_adapter inject Lightning sigmas and crash the call.
+        let cfg = lightning_config("moss-image-base").expect("moss-image-base has lightning");
+        assert!(cfg.scheduler_overrides.is_empty());
+        let r8 = cfg.resolve(8);
+        assert_eq!((r8.steps, r8.strength, r8.guidance), (8, 1.0, 1.0));
+        assert!(lightning_config("moss-image").is_none());
+    }
+
+    #[test]
     fn lightning_resolve_krea_quality_tier() {
         let cfg = lightning_config("krea-2-raw").expect("krea-2-raw has lightning");
         // fast 8 → full-strength distill LoRA ≈ Turbo

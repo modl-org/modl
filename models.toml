@@ -390,6 +390,74 @@ guidance = 0.0
 scheduler_overrides = { base_shift = "1.15", max_shift = "1.15" }
 quality = { strength = 0.6, guidance = 1.5 }
 
+# ─── MOSS-Image ──────────────────────────────────────────────────────
+
+[families.moss]
+name = "MOSS-Image"
+vendor = "OpenMOSS"
+year = 2026
+
+[families.moss.models.moss-image]
+name = "MOSS-Image"
+arch_key = "moss_image"
+description = "5B DiT on a Qwen3.5-9B encoder (SFT) — polished look, excellent text, Apache-2.0"
+transformer_b = 5.0
+text_encoder = "Qwen3.5 9B"
+text_encoder_b = 9.0
+total_b = 14.0
+# Weights are bf16 only. The text encoder (19GB) is swapped in just for the
+# prompt encode while the 10GB DiT stays resident — the encode is the peak.
+vram_bf16 = 20
+vram_fp8 = 20
+capabilities = ["txt2img", "lora"]
+quality = 5
+speed = 2
+text_rendering = true
+defaults = { steps = 50, guidance = 3.0, resolution = 1024 }
+prompt_guide = """
+SFT (aesthetic-tuned) checkpoint: clean, polished, "catalog" look; very
+strong prompt adherence and text rendering (quote the exact text). Defaults
+are upstream's: 50 steps, CFG 3, DiT block 22 skipped in the negative branch.
+Write long, descriptive prose; describe how the photo was taken ("a 1980s
+35mm snapshot", "phone photo, overcast afternoon") instead of quality words
+like "masterpiece" or "8k". Short prompts make it very seed-sensitive.
+Dimensions must be multiples of 16. For a less polished, more documentary
+look use moss-image-base."""
+
+[families.moss.models.moss-image-base]
+name = "MOSS-Image Base"
+arch_key = "moss_image_base"
+description = "Base 5B DiT — more natural/documentary realism, high seed variety, `--fast 8` via DMD LoRA"
+transformer_b = 5.0
+text_encoder = "Qwen3.5 9B"
+text_encoder_b = 9.0
+total_b = 14.0
+vram_bf16 = 20
+vram_fp8 = 20
+capabilities = ["txt2img", "lora"]
+quality = 5
+speed = 2
+text_rendering = true
+defaults = { steps = 50, guidance = 3.0, resolution = 1024 }
+prompt_guide = """
+Base (pre-SFT) checkpoint: less polished and more photographic than SFT, with
+much higher seed-to-seed variety. CFG 3 with DiT blocks 22 and 24 skipped in
+the negative branch (community setting for realism; upstream skips 22 only).
+Same prompting advice as moss-image: long descriptive prose, describe the
+capture context, avoid quality words, dimensions in multiples of 16.
+`--fast 8` applies lodestones' DMD distillation LoRA (unmerged, CFG 1, 8 steps);
+4 steps is noticeably soft. Community LoRAs are trained against Base."""
+
+[families.moss.models.moss-image-base.lightning]
+lora_registry_id = "moss-image-base-dmd-lora"
+variant_4step = "rank128"
+variant_8step = "rank128"
+# DMD is CFG-distilled: guidance 1 disables the uncond branch entirely.
+guidance = 1.0
+# The vendored pipeline uses its own scheduler (shift 5) and takes no
+# `sigmas` — must stay empty, or gen_adapter would inject Lightning sigmas.
+scheduler_overrides = {}
+
 # ─── Qwen Image (generation) ─────────────────────────────────────────
 
 [families.qwen_image]

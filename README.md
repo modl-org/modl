@@ -141,7 +141,7 @@ Not yet supported on pods: controlnet/style-ref, inpainting masks.
 
 ## Supported Models
 
-16 models across 6 families. See the full comparison at **[modl.pedroalonso.net/guides/model-comparison](https://modl.pedroalonso.net/guides/model-comparison)**.
+29 models across 10 families. See the full comparison at **[modl.pedroalonso.net/guides/model-comparison](https://modl.pedroalonso.net/guides/model-comparison)**.
 
 | Family | Models | Best for |
 |--------|--------|----------|
@@ -150,6 +150,7 @@ Not yet supported on pods: controlnet/style-ref, inpainting masks.
 | **Chroma** | Chroma | Apache 2.0, negative prompts, 8.9B Flux fork |
 | **Z-Image** | Base, Turbo | Strong quality/size, fast turbo, great ControlNet |
 | **Qwen Image** | Image, Image Edit | Text rendering (Chinese/English), instruction editing |
+| **MOSS-Image** | SFT, Base | Apache 2.0, excellent text rendering, natural realism (Base), `--fast 8` |
 | **Legacy SD** | SDXL, SD 1.5 | Low VRAM, massive LoRA library |
 
 Plus 70+ ControlNets, IP-Adapters, VAEs, text encoders, upscalers, and segmentation models. Browse all at **[modl.pedroalonso.net/models](https://modl.pedroalonso.net/models)**.
