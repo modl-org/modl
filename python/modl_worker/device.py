@@ -229,6 +229,22 @@ _RESIDENT: "weakref.WeakSet" = weakref.WeakSet()
 # 1024² is ~2.5GB over weights (MOSS, measured 12.7GiB total).
 _PARK_DENOISE_HEADROOM = 4 * 1024**3
 _PARK_ENCODE_HEADROOM = 2 * 1024**3
+# VAE encode of edit references (Qwen-Image-2.1: up to 10 images at ~1MP).
+_PARK_VAE_HEADROOM = 3 * 1024**3
+# Decode working memory per output megapixel (Qwen-Image-2.1 VAE at 1024²
+# measured ~5.6GB over weights).
+_PARK_DECODE_BYTES_PER_MP = 6 * 1024**3
+
+
+def _vae_spatial_factor(vae) -> int:
+    """Pixels per latent cell along one side: 16 for Qwen-Image-2.1, 8 for
+    the classic KL VAEs (2 ** (levels - 1))."""
+    cfg = getattr(vae, "config", None)
+    factor = getattr(cfg, "scale_factor_spatial", None)
+    if factor:
+        return int(factor)
+    blocks = getattr(cfg, "block_out_channels", None)
+    return 2 ** (len(blocks) - 1) if blocks else 8
 
 
 def _park_move(module, device: str) -> None:
@@ -323,6 +339,49 @@ def yield_parked_gpu(pipe) -> None:
         torch.cuda.empty_cache()
 
 
+def _guard_parked_vae(vae, te) -> None:
+    """Make ``vae.encode()`` / ``vae.decode()`` safe under parked placement.
+
+    ``encode`` and ``decode`` are not ``forward``, so the park pre-hooks
+    don't fire for them:
+    - encode: the denoiser (transformer + VAE) steps out while the text
+      encoder encodes and only returns on the first transformer forward, but
+      edit pipelines encode their reference images in between (Qwen-Image-2.1).
+      The VAE is small, so it comes up next to the text encoder.
+    - decode: an edit's reference KV cache is still allocated when the pipeline
+      decodes, so with the DiT resident a 1024px decode can OOM. Make room
+      first; that parks the DiT only when memory is short (a pointer swap
+      thanks to the persistent CPU copies), and its pre-hook brings it back
+      on the next job.
+    Installed once per (possibly shared) VAE; a no-op under accelerate
+    offload, whose own hooks place it.
+    """
+    if getattr(vae, "_modl_park_guard", False) or not hasattr(vae, "encode"):
+        return
+    original_encode, original_decode = vae.encode, vae.decode
+
+    def _parked() -> bool:
+        return getattr(vae, "_hf_hook", None) is None
+
+    def encode(*args, **kwargs):
+        if _parked() and not _on_cuda(vae):
+            _make_room(_module_bytes(vae) + _PARK_VAE_HEADROOM, keep=(vae, te))
+            _park_move(vae, "cuda")
+        return original_encode(*args, **kwargs)
+
+    def decode(z, *args, **kwargs):
+        if _parked():
+            if not _on_cuda(vae):
+                _make_room(_module_bytes(vae), keep=(vae,))
+                _park_move(vae, "cuda")
+            megapixels = z.shape[-1] * z.shape[-2] * _vae_spatial_factor(vae) ** 2 / 1e6
+            _make_room(int(max(megapixels, 0.25) * _PARK_DECODE_BYTES_PER_MP), keep=(vae,))
+        return original_decode(z, *args, **kwargs)
+
+    vae.encode, vae.decode = encode, decode
+    vae._modl_park_guard = True
+
+
 def place_with_parked_text_encoder(pipe, emitter=None) -> None:
     """Keep the denoiser resident and swap only the text encoder in to encode.
 
@@ -377,6 +436,8 @@ def place_with_parked_text_encoder(pipe, emitter=None) -> None:
             torch.cuda.empty_cache()
         bring_up_denoiser()
 
+    if vae is not None:
+        _guard_parked_vae(vae, te)
     bring_up_denoiser()
     _pin_execution_device(pipe)
     pipe._modl_park_handles = [

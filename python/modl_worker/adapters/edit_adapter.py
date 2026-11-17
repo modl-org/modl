@@ -170,7 +170,11 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
     os.makedirs(output_dir, exist_ok=True)
 
     from modl_worker.device import get_generator_device
-    generator = torch.Generator(device=get_generator_device())
+    # Per-arch override: some pipelines need CPU-generated (float32) noise.
+    generator = torch.Generator(
+        device=ARCH_CONFIGS.get(arch, {}).get("inference", {}).get("generator_device")
+        or get_generator_device()
+    )
     if seed is not None:
         generator.manual_seed(seed)
 
@@ -223,7 +227,7 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
         # are capped at ~1M px — a patch-count mismatch that produces blurry output.
 
         # Latent-space blend: swap to Flux2KleinInpaintPipeline if available
-        if mask_image is not None and blend_mode == "latent":
+        if mask_image is not None and blend_mode == "latent" and inf_cfg.get("latent_inpaint", True):
             try:
                 from diffusers import Flux2KleinInpaintPipeline
                 pipeline = Flux2KleinInpaintPipeline.from_pipe(pipeline)
@@ -283,6 +287,9 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
         try:
             result = pipeline(**gen_kwargs)
             image = result.images[0]
+            # Qwen-Image-2.1 decodes RGBA; keep alpha only for real cut-outs.
+            from modl_worker.adapters.qwen21_support import finalize_rgba
+            image = finalize_rgba(image)
         except Exception as exc:
             emitter.error(
                 "EDIT_FAILED",

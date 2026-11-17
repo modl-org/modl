@@ -267,7 +267,11 @@ def run_generate_with_pipeline(
     os.makedirs(output_dir, exist_ok=True)
 
     from modl_worker.device import get_generator_device
-    generator = torch.Generator(device=get_generator_device())
+    # Per-arch override: some pipelines need CPU-generated (float32) noise.
+    generator = torch.Generator(
+        device=ARCH_CONFIGS.get(arch, {}).get("inference", {}).get("generator_device")
+        or get_generator_device()
+    )
     if seed is None:
         seed = generator.seed()  # capture the random seed for reproducibility
     generator.manual_seed(seed)
@@ -300,6 +304,11 @@ def run_generate_with_pipeline(
             gen_kwargs["negative_prompt"] = default_neg
         elif neg:
             gen_kwargs["negative_prompt"] = neg
+
+    # Pipelines whose CFG only runs with true_cfg_scale > 1 warn on every call
+    # when handed a negative they won't use.
+    if inf_cfg.get("negative_only_with_cfg") and guidance <= 1:
+        gen_kwargs.pop("negative_prompt", None)
 
     extra_call = inf_cfg.get("extra_call_kwargs", {})
     gen_kwargs.update(extra_call)
@@ -435,6 +444,10 @@ def run_generate_with_pipeline(
                 continue
 
         elapsed = time.time() - t0
+
+        # Qwen-Image-2.1 decodes RGBA; keep alpha only for real cut-outs.
+        from modl_worker.adapters.qwen21_support import finalize_rgba
+        image = finalize_rgba(image)
 
         # Advance seed for next image in batch
         if seed is not None:
