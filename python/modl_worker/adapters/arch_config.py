@@ -1031,6 +1031,8 @@ def _moss_image_arch(skip_layers: list[int]) -> dict:
 
 ARCH_CONFIGS["moss_image"] = _moss_image_arch([22])
 ARCH_CONFIGS["moss_image_base"] = _moss_image_arch([22, 24])
+# lodestones' Base fine-tune; upstream card samples with block 22 skipped.
+ARCH_CONFIGS["kromoss"] = _moss_image_arch([22])
 
 
 # Turbo's recommended 8-step schedule, shipped as `sample_sigmas` in the
@@ -1157,6 +1159,7 @@ MODEL_REGISTRY: dict[str, tuple[str, str]] = {
     "sd-1.5":         ("sd15",          "stable-diffusion-v1-5/stable-diffusion-v1-5"),
     "moss-image":      ("moss_image",      "OpenMOSS-Team/MOSS-Image-SFT"),
     "moss-image-base": ("moss_image_base", "OpenMOSS-Team/MOSS-Image-Base"),
+    "kromoss":         ("kromoss",         "lodestones/Kromoss"),
     "qwen-image-2-1":       ("qwen_image_21",       "Qwen/Qwen-Image-2.1"),
     "qwen-image-2-1-turbo": ("qwen_image_21_turbo", "Qwen/Qwen-Image-2.1-Turbo"),
 }
@@ -1179,6 +1182,7 @@ TRANSFORMER_HF_SOURCES: dict[str, tuple[str, str]] = {
     "krea2_edit":          ("Comfy-Org/Krea-2",                           "diffusion_models/krea2_raw_fp8_scaled.safetensors"),
     "moss_image":          ("Comfy-Org/MOSS-Image",                       "diffusion_models/moss_image_sft_bf16.safetensors"),
     "moss_image_base":     ("Comfy-Org/MOSS-Image",                       "diffusion_models/moss_image_base_bf16.safetensors"),
+    "kromoss":             ("lodestones/Kromoss",                         "diffusion_models/kromoss_bf16.safetensors"),
     "qwen_image_21":       ("Comfy-Org/Qwen-Image-2.1",                   "diffusion_models/qwen_image_2.1_bf16.safetensors"),
     "qwen_image_21_turbo": ("Comfy-Org/Qwen-Image-2.1",                   "diffusion_models/qwen_image_2.1_turbo_bf16.safetensors"),
 }
@@ -1244,6 +1248,8 @@ def detect_arch(base_model_id: str, arch_key: str | None = None) -> str:
         return "zimage"
     if "chroma" in bid:
         return "chroma"
+    if "kromoss" in bid:
+        return "kromoss"
     if "moss" in bid:
         return "moss_image_base" if "base" in bid else "moss_image"
     if "krea" in bid:

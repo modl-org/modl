@@ -458,6 +458,38 @@ guidance = 1.0
 # `sigmas` — must stay empty, or gen_adapter would inject Lightning sigmas.
 scheduler_overrides = {}
 
+[families.moss.models.kromoss]
+name = "Kromoss"
+arch_key = "kromoss"
+description = "lodestones' full fine-tune of MOSS-Image Base — same stack, `--fast 8` via DMD2 LoRA, Apache-2.0"
+transformer_b = 5.0
+text_encoder = "Qwen3.5 9B"
+text_encoder_b = 9.0
+total_b = 14.0
+vram_bf16 = 20
+vram_fp8 = 20
+capabilities = ["txt2img", "lora"]
+quality = 5
+speed = 2
+text_rendering = true
+defaults = { steps = 50, guidance = 3.0, resolution = 1024 }
+prompt_guide = """
+Full fine-tune of MOSS-Image Base at 1024px by lodestones (704k images).
+Upstream settings: 50 steps, CFG 3, DiT block 22 skipped in the negative
+branch. Shares the text encoder and VAE with moss-image / moss-image-base,
+so installing it next to them only adds the 10GB transformer. Same prompting
+advice: long descriptive prose, describe the capture context, avoid quality
+words, dimensions in multiples of 16. `--fast 8` applies lodestones' DMD2
+LoRA (unmerged, CFG 1, 8 steps)."""
+
+[families.moss.models.kromoss.lightning]
+lora_registry_id = "moss-image-dmd2-lora"
+variant_4step = "rank128"
+variant_8step = "rank128"
+guidance = 1.0
+# Vendored MOSS pipeline: own scheduler, no `sigmas` (see moss-image-base).
+scheduler_overrides = {}
+
 # ─── Qwen Image (generation) ─────────────────────────────────────────
 
 [families.qwen_image]

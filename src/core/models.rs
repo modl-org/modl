@@ -770,6 +770,9 @@ mod tests {
         let r8 = cfg.resolve(8);
         assert_eq!((r8.steps, r8.strength, r8.guidance), (8, 1.0, 1.0));
         assert!(lightning_config("moss-image").is_none());
+        let k = lightning_config("kromoss").expect("kromoss has lightning");
+        assert_eq!(k.lora_registry_id, "moss-image-dmd2-lora");
+        assert!(k.scheduler_overrides.is_empty());
     }
 
     #[test]

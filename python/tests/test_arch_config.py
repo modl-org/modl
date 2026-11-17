@@ -380,3 +380,9 @@ def test_vendored_classes_do_not_shadow_diffusers() -> None:
     assert get_vendored_class("modl.Krea2Transformer2DModel") is not after, (
         "vendored and diffusers transformer classes must be distinct"
     )
+
+
+def test_detect_arch_kromoss_before_generic_moss() -> None:
+    # "kromoss" contains "moss" — it must not fall through to moss_image.
+    assert detect_arch("kromoss") == "kromoss"
+    assert ARCH_CONFIGS["kromoss"]["inference"]["extra_call_kwargs"]["uncond_skip_layers"] == [22]
