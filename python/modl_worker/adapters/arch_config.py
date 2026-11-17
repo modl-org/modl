@@ -1101,10 +1101,14 @@ def _qwen_image_21_arch(turbo: bool) -> dict:
             "editing_mode": "native",
             # Flux2KleinInpaintPipeline.from_pipe() only fits Klein.
             "latent_inpaint": False,
-            # Noise drawn by a CUDA generator directly in bf16 turns 8-step
-            # edits grainy and over-sharpened; a CPU generator (upstream's own
-            # examples use one) gives clean results. Same seed, same quality.
+            # Upstream's examples seed a CPU generator; match them so a modl
+            # seed reproduces the official diffusers output.
             "generator_device": "cpu",
+            # Edits *output* at the pipeline's 1024 default come out grainy
+            # and over-sharpened (Base and Turbo, official pipeline too); at
+            # ~1536² output they are clean. Only the output grows: references
+            # stay at 1024, which also keeps 2-ref edits under 24GB.
+            "edit_output_resolution": 1536,
         },
     }
     if turbo:

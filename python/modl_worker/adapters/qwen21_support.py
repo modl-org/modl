@@ -4,6 +4,7 @@ The pipeline itself is diffusers' native ``QwenImage21Pipeline``; this module
 only adds what modl needs around it.
 """
 
+import math
 from collections import OrderedDict
 
 _EMBED_CACHE_SIZE = 8
@@ -75,6 +76,15 @@ def finalize_rgba(image):
     background = Image.new("RGBA", image.size, (255, 255, 255, 255))
     background.alpha_composite(image)
     return background.convert("RGB")
+
+
+def edit_output_size(resolution: int, source_size: tuple[int, int]) -> tuple[int, int]:
+    """Output (width, height) of about ``resolution``² pixels in the source's
+    aspect ratio, in multiples of 32 (the pipeline's own rounding)."""
+    width, height = source_size
+    ratio = width / height
+    out_w = math.sqrt(resolution * resolution * ratio)
+    return round(out_w / 32) * 32, round(out_w / ratio / 32) * 32
 
 
 def is_qwen21_pipeline(pipeline) -> bool:

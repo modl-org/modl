@@ -347,7 +347,8 @@ def _guard_parked_vae(vae, te) -> None:
     - encode: the denoiser (transformer + VAE) steps out while the text
       encoder encodes and only returns on the first transformer forward, but
       edit pipelines encode their reference images in between (Qwen-Image-2.1).
-      The VAE is small, so it comes up next to the text encoder.
+      ``encode_prompt`` has finished by then, so the text encoder may be
+      parked to make room (a 1536px reference needs several GB).
     - decode: an edit's reference KV cache is still allocated when the pipeline
       decodes, so with the DiT resident a 1024px decode can OOM. Make room
       first; that parks the DiT only when memory is short (a pointer swap
@@ -363,11 +364,15 @@ def _guard_parked_vae(vae, te) -> None:
     def _parked() -> bool:
         return getattr(vae, "_hf_hook", None) is None
 
-    def encode(*args, **kwargs):
-        if _parked() and not _on_cuda(vae):
-            _make_room(_module_bytes(vae) + _PARK_VAE_HEADROOM, keep=(vae, te))
-            _park_move(vae, "cuda")
-        return original_encode(*args, **kwargs)
+    def encode(x, *args, **kwargs):
+        if _parked():
+            missing = 0 if _on_cuda(vae) else _module_bytes(vae)
+            megapixels = x.shape[-1] * x.shape[-2] / 1e6
+            working = max(_PARK_VAE_HEADROOM, int(megapixels * _PARK_DECODE_BYTES_PER_MP))
+            _make_room(missing + working, keep=(vae,))
+            if missing:
+                _park_move(vae, "cuda")
+        return original_encode(x, *args, **kwargs)
 
     def decode(z, *args, **kwargs):
         if _parked():
@@ -375,8 +380,29 @@ def _guard_parked_vae(vae, te) -> None:
                 _make_room(_module_bytes(vae), keep=(vae,))
                 _park_move(vae, "cuda")
             megapixels = z.shape[-1] * z.shape[-2] * _vae_spatial_factor(vae) ** 2 / 1e6
-            _make_room(int(max(megapixels, 0.25) * _PARK_DECODE_BYTES_PER_MP), keep=(vae,))
+            needed = int(max(megapixels, 0.25) * _PARK_DECODE_BYTES_PER_MP)
+            _make_room(needed, keep=(vae,))
+            # Large outputs (2048² ≈ 25GB of decode activations) can't fit even
+            # with everything else parked: decode in tiles for this call only.
+            can_tile = hasattr(vae, "enable_tiling") and not getattr(vae, "use_tiling", False)
+            if can_tile and torch.cuda.mem_get_info()[0] < needed:
+                return _tiled(z, *args, **kwargs)
+            try:
+                return original_decode(z, *args, **kwargs)
+            except torch.cuda.OutOfMemoryError:
+                # The estimate missed (fragmentation, a large edit KV cache).
+                if not can_tile:
+                    raise
+                torch.cuda.empty_cache()
+                return _tiled(z, *args, **kwargs)
         return original_decode(z, *args, **kwargs)
+
+    def _tiled(z, *args, **kwargs):
+        vae.enable_tiling()
+        try:
+            return original_decode(z, *args, **kwargs)
+        finally:
+            vae.disable_tiling()
 
     vae.encode, vae.decode = encode, decode
     vae._modl_park_guard = True
@@ -451,6 +477,22 @@ def place_with_parked_text_encoder(pipe, emitter=None) -> None:
         )
 
 
+def settle_parked_after_error(pipe) -> None:
+    """After a failed job, put a parked pipeline back in its idle state.
+
+    An exception mid-pipeline (typically an OOM) can leave the text encoder
+    on the GPU next to whatever else was up, so every following job OOMs too.
+    Park the text encoder and free the cache; the pre-hooks bring the rest
+    back on the next job. No-op for other pipelines.
+    """
+    if pipe not in _PARKED:
+        return
+    te = getattr(pipe, "text_encoder", None)
+    if te is not None and _on_cuda(te):
+        _park_move(te, "cpu")
+    torch.cuda.empty_cache()
+
+
 def demote_pipe_to_offload(pipe, exc, emitter=None) -> bool:
     """Demote a resident pipeline back to cpu offload after a CUDA OOM.
 
@@ -467,6 +509,12 @@ def demote_pipe_to_offload(pipe, exc, emitter=None) -> bool:
         return False
     if _has_accelerate_hooks(pipe):
         return False  # already offloaded — a retry would just OOM again
+    if pipe in _PARKED:
+        # Parking already is the low-memory placement; layering accelerate
+        # offload on top leaves half-parked modules and breaks the *next* job
+        # with a cpu/cuda mismatch. Fail just this image.
+        settle_parked_after_error(pipe)
+        return False
 
     _remove_park_hooks(pipe)
     torch.cuda.empty_cache()

@@ -9,7 +9,11 @@ from PIL import Image
 
 from modl_worker.adapters.arch_config import ARCH_CONFIGS, detect_arch
 from modl_worker.adapters.pipeline_loader import _convert_qwen_image_21_checkpoint
-from modl_worker.adapters.qwen21_support import finalize_rgba, prepare_qwen21_pipeline
+from modl_worker.adapters.qwen21_support import (
+    edit_output_size,
+    finalize_rgba,
+    prepare_qwen21_pipeline,
+)
 
 
 def test_convert_splits_fused_gate_up_in_gate_then_up_order():
@@ -80,3 +84,11 @@ def test_arch_detection_and_turbo_schedule():
     turbo = ARCH_CONFIGS["qwen_image_21_turbo"]
     assert len(turbo["pipeline_kwargs"]["sample_sigmas"]) == 8
     assert "pipeline_kwargs" not in ARCH_CONFIGS["qwen_image_21"]
+
+
+def test_edit_output_size_keeps_aspect_and_area():
+    assert edit_output_size(1536, (1024, 1024)) == (1536, 1536)
+    w, h = edit_output_size(1536, (768, 1024))
+    assert w % 32 == 0 and h % 32 == 0
+    assert abs(w / h - 0.75) < 0.02
+    assert abs(w * h / 1536**2 - 1) < 0.03
