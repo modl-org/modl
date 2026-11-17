@@ -3,6 +3,12 @@ import os
 import sys
 from pathlib import Path
 
+# Parked placement swaps 10-18GB modules on and off the GPU every job; without
+# expandable segments the freed blocks fragment and a 1536px Qwen-Image-2.1
+# edit OOMs with ~2GB "reserved but unallocated". Must be set before torch
+# initialises CUDA (adapters import it lazily). An explicit user value wins.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 from modl_worker.adapters.registry import get_adapters
 from modl_worker.protocol import EventEmitter, fatal
 

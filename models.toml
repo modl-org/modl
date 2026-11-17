@@ -532,6 +532,56 @@ default_strength = 0.8
 default_end = 1.0
 min_steps = 25
 
+[families.qwen_image.models.qwen-image-2-1]
+name = "Qwen Image 2.1"
+arch_key = "qwen_image_21"
+description = "7B DiT: generate + edit (10 refs) + transparent RGBA in one model; Qwen Research License"
+transformer_b = 7.0
+text_encoder = "Qwen3-VL 8B"
+text_encoder_b = 8.0
+total_b = 15.0
+# The 17.5GB text encoder is swapped in only to encode; the 14GB DiT stays resident.
+vram_bf16 = 22
+vram_fp8 = 22
+capabilities = ["txt2img", "edit"]
+max_edit_images = 10
+quality = 5
+speed = 2
+text_rendering = true
+defaults = { steps = 40, guidance = 1.0, resolution = 1024 }
+prompt_guide = """
+One checkpoint for text-to-image and editing (pass up to 10 reference images
+with `modl edit`). Strong typography: quote the exact text. Upstream samples
+at CFG 1 (no negative); `--guidance` > 1 enables true CFG with a blank
+negative. Native resolution goes up to 2048 (2048x2048, 2528x1696, 2752x1536).
+Transparent output: start the prompt with "This is an RGBA image with
+transparency." and end with "The image has alpha channel and the background
+is transparent." modl keeps the alpha only when the result is actually
+transparent. Non-commercial (Qwen Research License)."""
+
+[families.qwen_image.models.qwen-image-2-1-turbo]
+name = "Qwen Image 2.1 Turbo"
+arch_key = "qwen_image_21_turbo"
+description = "Official 8-step Qwen Image 2.1: same generate/edit/RGBA, ~5x faster"
+transformer_b = 7.0
+text_encoder = "Qwen3-VL 8B"
+text_encoder_b = 8.0
+total_b = 15.0
+vram_bf16 = 22
+vram_fp8 = 22
+capabilities = ["txt2img", "edit"]
+max_edit_images = 10
+quality = 5
+speed = 4
+text_rendering = true
+defaults = { steps = 8, guidance = 1.0, resolution = 1024 }
+prompt_guide = """
+Official 8-step checkpoint of Qwen Image 2.1 (same text encoder and VAE).
+The 8-step schedule ships with the checkpoint and is applied automatically;
+keep CFG at 1. Same prompting as qwen-image-2-1: quote exact text, the RGBA
+phrasing for transparent output, up to 10 reference images for edits.
+Non-commercial (Qwen Research License)."""
+
 # ─── Qwen Image Edit (editing) ──────────────────────────────────────
 
 [families.qwen_image_edit]

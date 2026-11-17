@@ -408,6 +408,25 @@ def _convert_moss_checkpoint(checkpoint: dict) -> dict:
     return out
 
 
+def _convert_qwen_image_21_checkpoint(checkpoint: dict) -> dict:
+    """Comfy-Org Qwen-Image-2.1 single file → diffusers QwenImage21Transformer2DModel.
+
+    Identical key layout except each block's SwiGLU input projections: Comfy
+    fuses ``img_mlp.gate_layer`` and ``img_mlp.proj`` into ``img_mlp.gate_up``
+    (2*mlp rows, gate|up order — checked against the official checkpoint),
+    diffusers keeps them separate. Also strips a ComfyUI prefix, if any.
+    """
+    out = {}
+    for key, value in _strip_comfy_prefix(checkpoint).items():
+        if ".img_mlp.gate_up." in key:
+            gate, up = value.chunk(2, dim=0)
+            out[key.replace(".gate_up.", ".gate_layer.")] = gate.contiguous()
+            out[key.replace(".gate_up.", ".proj.")] = up.contiguous()
+        else:
+            out[key] = value
+    return out
+
+
 def _get_checkpoint_converter(model_class_name: str):
     """Get the right ComfyUI→diffusers key converter for a transformer class.
 
@@ -425,6 +444,7 @@ def _get_checkpoint_converter(model_class_name: str):
     _LOCAL_CONVERTER_MAP = {
         "Krea2Transformer2DModel": _convert_krea2_checkpoint_to_diffusers,
         "MOSSImageTransformer": _convert_moss_checkpoint,
+        "QwenImage21Transformer2DModel": _convert_qwen_image_21_checkpoint,
     }
     local = _LOCAL_CONVERTER_MAP.get(model_class_name)
     if local is not None:
@@ -1045,6 +1065,9 @@ def assemble_pipeline(
     if model_flags.get("arch") == "moss_image":
         from modl_worker.adapters.moss_support import prepare_moss_pipeline
         prepare_moss_pipeline(pipe)
+    if model_flags.get("arch") == "qwen_image_21":
+        from modl_worker.adapters.qwen21_support import prepare_qwen21_pipeline
+        prepare_qwen21_pipeline(pipe)
     if not no_offload:
         if arch_cfg.get("model_flags", {}).get("requires_resident"):
             # This pipeline drives the transformer through custom methods

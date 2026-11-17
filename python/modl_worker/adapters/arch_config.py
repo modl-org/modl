@@ -1034,6 +1034,93 @@ ARCH_CONFIGS["moss_image_base"] = _moss_image_arch([22, 24])
 # lodestones' Base fine-tune; upstream card samples with block 22 skipped.
 ARCH_CONFIGS["kromoss"] = _moss_image_arch([22])
 
+
+# Turbo's recommended 8-step schedule, shipped as `sample_sigmas` in the
+# official checkpoint's model_index.json (Qwen/Qwen-Image-2.1-Turbo).
+_QWEN_IMAGE_21_TURBO_SIGMAS = [
+    1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568,
+]
+
+
+def _qwen_image_21_arch(turbo: bool) -> dict:
+    """Qwen-Image-2.1 (Qwen Research License): 7B single-stream DiT on a
+    Qwen3-VL-8B text encoder. One checkpoint generates, edits (up to 10
+    reference images through ``image=``) and produces RGBA. Base and Turbo
+    share the text encoder and VAE; Turbo is an 8-step, CFG-1 checkpoint whose
+    schedule is a pipeline config value (``sample_sigmas``).
+
+    Native diffusers pipeline (``QwenImage21Pipeline``, diffusers >= 0.43).
+    The transformer is 14GB bf16 and the text encoder 17.5GB, so like MOSS the
+    text encoder is parked on the CPU and swapped in only to encode.
+    """
+    arch = {
+        "pipeline_class": "QwenImage21Pipeline",
+        "gen_components": {
+            "transformer": {
+                "model_class": "QwenImage21Transformer2DModel",
+                "config_dir": "qwen-image-21-transformer",
+            },
+            "text_encoder": {
+                "model_id": "qwen-image-21-text-encoder",
+                "model_class": "Qwen3VLForConditionalGeneration",
+                "config_dir": "qwen-image-21-text-encoder",
+            },
+            "processor": {
+                "model_class": "Qwen3VLProcessor",
+                "config_dir": "qwen-image-21-processor",
+            },
+            "vae": {
+                "model_id": "qwen-image-21-vae",
+                "model_class": "AutoencoderKLQwenImage21",
+                "config_dir": "qwen-image-21-vae",
+            },
+            "scheduler": {
+                "model_class": "FlowMatchEulerDiscreteScheduler",
+                "config_dir": "qwen-image-21-turbo-scheduler" if turbo else "qwen-image-21-scheduler",
+            },
+        },
+        "model_flags": {
+            "arch": "qwen_image_21",
+            "park_text_encoder": True,
+            # Output is always RGBA; flatten near-opaque images (see qwen21_support).
+            "rgba_output": True,
+        },
+        "noise_scheduler": "flowmatch",
+        "dtype": "bf16",
+        "train_text_encoder": False,
+        "resolutions": [512, 768, 1024, 1536, 2048],
+        "default_resolution": 1024,
+        "sample": {"sampler": "flowmatch", "steps": 8 if turbo else 40, "guidance": 1.0, "neg": ""},
+        "inference": {
+            # CFG only when true_cfg_scale > 1 AND a negative prompt is given;
+            # the upstream default is 1.0 (no CFG) for both checkpoints.
+            "guidance_param": "true_cfg_scale",
+            "supports_negative_prompt": True,
+            # A blank negative makes --guidance > 1 actually enable CFG; it is
+            # dropped at guidance <= 1, where the pipeline would only warn.
+            "force_negative_prompt": " ",
+            "negative_only_with_cfg": True,
+            "editing_mode": "native",
+            # Flux2KleinInpaintPipeline.from_pipe() only fits Klein.
+            "latent_inpaint": False,
+            # Upstream's examples seed a CPU generator; match them so a modl
+            # seed reproduces the official diffusers output.
+            "generator_device": "cpu",
+            # Edits *output* at the pipeline's 1024 default come out grainy
+            # and over-sharpened (Base and Turbo, official pipeline too); at
+            # ~1536² output they are clean. Only the output grows: references
+            # stay at 1024, which also keeps 2-ref edits under 24GB.
+            "edit_output_resolution": 1536,
+        },
+    }
+    if turbo:
+        arch["pipeline_kwargs"] = {"sample_sigmas": list(_QWEN_IMAGE_21_TURBO_SIGMAS)}
+    return arch
+
+
+ARCH_CONFIGS["qwen_image_21"] = _qwen_image_21_arch(turbo=False)
+ARCH_CONFIGS["qwen_image_21_turbo"] = _qwen_image_21_arch(turbo=True)
+
 # -----------------------------------------------------------------------
 # Model registry: modl model IDs → (arch_key, HuggingFace hub ID)
 # -----------------------------------------------------------------------
@@ -1073,6 +1160,8 @@ MODEL_REGISTRY: dict[str, tuple[str, str]] = {
     "moss-image":      ("moss_image",      "OpenMOSS-Team/MOSS-Image-SFT"),
     "moss-image-base": ("moss_image_base", "OpenMOSS-Team/MOSS-Image-Base"),
     "kromoss":         ("kromoss",         "lodestones/Kromoss"),
+    "qwen-image-2-1":       ("qwen_image_21",       "Qwen/Qwen-Image-2.1"),
+    "qwen-image-2-1-turbo": ("qwen_image_21_turbo", "Qwen/Qwen-Image-2.1-Turbo"),
 }
 
 
@@ -1094,6 +1183,8 @@ TRANSFORMER_HF_SOURCES: dict[str, tuple[str, str]] = {
     "moss_image":          ("Comfy-Org/MOSS-Image",                       "diffusion_models/moss_image_sft_bf16.safetensors"),
     "moss_image_base":     ("Comfy-Org/MOSS-Image",                       "diffusion_models/moss_image_base_bf16.safetensors"),
     "kromoss":             ("lodestones/Kromoss",                         "diffusion_models/kromoss_bf16.safetensors"),
+    "qwen_image_21":       ("Comfy-Org/Qwen-Image-2.1",                   "diffusion_models/qwen_image_2.1_bf16.safetensors"),
+    "qwen_image_21_turbo": ("Comfy-Org/Qwen-Image-2.1",                   "diffusion_models/qwen_image_2.1_turbo_bf16.safetensors"),
 }
 
 # Text encoders / VAEs are shared across variants → keyed by registry model_id.
@@ -1110,6 +1201,8 @@ COMPONENT_HF_SOURCES: dict[str, tuple[str, str]] = {
     # generic strip_model transform in _normalize_te_state_dict handles it.
     "moss-qwen3.5-9b-text-encoder": ("Comfy-Org/MOSS-Image",                          "text_encoders/qwen3.5_9b_bf16.safetensors"),
     "flux2-vae-small":             ("Comfy-Org/MOSS-Image",                           "vae/flux2-vae_small.safetensors"),
+    "qwen-image-21-text-encoder":  ("Qwen/Qwen-Image-2.1-Turbo",                      "text_encoder/model.safetensors"),
+    "qwen-image-21-vae":           ("Qwen/Qwen-Image-2.1-Turbo",                      "vae/diffusion_pytorch_model.safetensors"),
 }
 
 
@@ -1145,6 +1238,8 @@ def detect_arch(base_model_id: str, arch_key: str | None = None) -> str:
         if "turbo" in bid:
             return "ernie_image_turbo"
         return "ernie_image"
+    if re.search(r"qwen[-_]?image[-_]?2[-._]?1", bid):
+        return "qwen_image_21_turbo" if "turbo" in bid else "qwen_image_21"
     if "qwen-image" in bid or "qwen_image" in bid:
         return "qwen_image"
     if "z-image-turbo" in bid or "z_image_turbo" in bid:
