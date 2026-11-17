@@ -64,6 +64,18 @@ cargo build --release
 # Binary at target/release/modl
 ```
 
+### Claude Code skill
+
+modl ships a [Claude Code](https://claude.com/claude-code) skill so an agent can drive it — generate, edit, train, and run workflows straight from your prompts. `install.sh` installs it automatically when Claude Code is present (opt out with `--no-skill`).
+
+Installing from a clone instead? Symlink it (updates on every `git pull`):
+
+```bash
+ln -s "$(pwd)/skills/modl" ~/.claude/skills/modl
+```
+
+Restart Claude Code, then try `/modl` or just ask it to "generate an image of…".
+
 ---
 
 ## Web UI
