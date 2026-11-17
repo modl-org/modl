@@ -314,7 +314,6 @@ class ModelCache:
     def evict_all(self, emitter: EventEmitter | None = None) -> None:
         """Evict all cached models (diffusion + utility) and free VRAM."""
         import gc
-        import torch
         with self._lock:
             for key in list(self._cache.keys()):
                 if emitter:
@@ -326,7 +325,8 @@ class ModelCache:
                 self._utility_cache.clear()
                 self._utility_order.clear()
             gc.collect()
-            torch.cuda.empty_cache()
+            from modl_worker.device import empty_cache
+            empty_cache()
 
     def _must_reload_for_lora(self, cached: CachedPipeline, spec: dict) -> bool:
         """True if the cached pipeline was irreversibly fused (krea2) and the
@@ -341,7 +341,6 @@ class ModelCache:
     def _drop(self, key: "CacheKey", emitter: EventEmitter) -> None:
         """Evict a single cache entry and free its VRAM."""
         import gc
-        import torch
 
         cached = self._cache.pop(key, None)
         if cached is None:
@@ -351,7 +350,8 @@ class ModelCache:
         except Exception:
             pass
         gc.collect()
-        torch.cuda.empty_cache()
+        from modl_worker.device import empty_cache
+        empty_cache()
 
     def _reconcile_lora(self, cached: CachedPipeline, spec: dict, emitter: EventEmitter) -> None:
         """Hot-swap LoRA if the base model matches but LoRA changed."""
@@ -397,7 +397,6 @@ class ModelCache:
     def _evict_lru(self, emitter: EventEmitter) -> None:
         """Remove the least-recently-used model from the cache."""
         import gc
-        import torch
         if not self._cache:
             return
 
@@ -405,13 +404,17 @@ class ModelCache:
         emitter.info(f"Evicting LRU model: {lru_key.model_id}")
         del self._cache[lru_key]
         gc.collect()
-        torch.cuda.empty_cache()
+        from modl_worker.device import empty_cache
+        empty_cache()
 
     @staticmethod
     def _estimate_vram(pipeline: Any) -> int:
         """Rough VRAM estimate in MB for a loaded pipeline."""
         try:
             import torch
+            from modl_worker.device import get_device
+            if get_device() == "mps":
+                return int(torch.mps.current_allocated_memory() / (1024 * 1024))
             mem = torch.cuda.memory_allocated() / (1024 * 1024)
             return int(mem)
         except Exception:

@@ -191,6 +191,15 @@ class _RoPE(nn.Module):
         return torch.cat((phase.sin(), phase.cos()), -2).flatten(-2).unsqueeze(0)
 
 
+def _timestep_sinusoid(times, half):
+    """float64 sinusoid -> float32, as in training. modl: MPS has no float64, so
+    there the tiny tensor is computed on the CPU (same numbers) and moved back."""
+    sin_device = torch.device("cpu") if times.device.type == "mps" else times.device
+    freq = 10000 ** (-torch.arange(half, device=sin_device, dtype=torch.float64) / half)
+    phase = times.to(sin_device).double()[:, None] * freq
+    return torch.cat((phase.cos(), phase.sin()), -1).float().to(times.device)
+
+
 class MOSSImageTransformer(ModelMixin, ConfigMixin):
     """MOSSImage DiT with training-compatible state-dict names and SDPA attention.
 
@@ -238,9 +247,7 @@ class MOSSImageTransformer(ModelMixin, ConfigMixin):
         times = times.expand(batch)
         # Training computes the sinusoid in float64 and feeds float32 into its MLP.
         half = self.config.freq_dim // 2
-        freq = 10000 ** (-torch.arange(half, device=times.device, dtype=torch.float64) / half)
-        phase = times.double()[:, None] * freq
-        embedding = torch.cat((phase.cos(), phase.sin()), -1).float()
+        embedding = _timestep_sinusoid(times, half)
         time = self.time_embedding(embedding.to(self.time_embedding[0].weight.dtype)).float()
         mod = self.shared_block_modulation(time.to(self.shared_block_modulation.weight.dtype)).view(batch, 6, -1)
         head = self.video_head_modulation(time.to(self.video_head_modulation.weight.dtype)).view(batch, 2, -1)

@@ -107,8 +107,10 @@ Wired 2026-07-18. Arch key **`krea2_edit`** in `arch_config.py`:
 
 Upstream ships MOSS-Image only as a diffusers `custom_pipeline`
 (`trust_remote_code=True`); there is no MOSS class in diffusers. The file is
-vendored verbatim except for one marked change (`modl:`): `__call__` accepts
-`callback_on_step_end` so the worker can emit per-step progress.
+vendored verbatim except for two marked changes (`modl:`):
+- `__call__` accepts `callback_on_step_end` so the worker can emit per-step progress.
+- The timestep sinusoid (`_timestep_sinusoid`) is computed on the CPU when running on
+  MPS, which has no float64. On CUDA it is unchanged and the output is bit-identical.
 
 It contains `MOSSImageTransformer` (5B DiT), `MOSSImageScheduler` (flow-match
 Euler, shift 5) and `MOSSImagePipeline` (Qwen3.5-9B text encoder, FLUX.2 small
