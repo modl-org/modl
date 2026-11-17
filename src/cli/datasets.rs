@@ -491,6 +491,7 @@ async fn spawn_dataset_worker(
         .arg("--job-id")
         .arg(&job_id)
         .env("PYTHONPATH", py_path)
+        .env("HF_HOME", crate::core::hf_cache::resolved().home())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()

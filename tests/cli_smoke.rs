@@ -105,6 +105,93 @@ fn generate_rejects_invalid_provider() {
 }
 
 // ---------------------------------------------------------------------------
+// HuggingFace cache location (see src/core/hf_cache.rs)
+// ---------------------------------------------------------------------------
+
+// Unix only: on Windows `dirs::home_dir()` asks the Win32 profile API and
+// ignores $HOME, so a child process cannot be given a throwaway home. Running
+// these there would read — and `config set` would *write* — the real
+// config.yaml, and the parallel test threads would leak state into each other.
+// The precedence rules themselves are covered cross-platform by the unit tests
+// in `core::hf_cache`, which take the environment as arguments.
+#[cfg(unix)]
+mod hf_cache {
+    use super::*;
+
+    /// An isolated HOME so these never read or write the developer's real config.
+    fn isolated_home() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
+    }
+
+    #[test]
+    fn config_reports_hf_cache_default() {
+        let home = isolated_home();
+        modl_cmd()
+            .env("HOME", home.path())
+            .env_remove("HF_HOME")
+            .env_remove("HF_HUB_CACHE")
+            .args(["config", "storage.hf_cache"])
+            .assert()
+            .success()
+            .stdout(contains(".cache/huggingface"));
+    }
+
+    #[test]
+    fn config_reports_hf_cache_from_env() {
+        let home = isolated_home();
+        modl_cmd()
+            .env("HOME", home.path())
+            .env("HF_HOME", "/mnt/elsewhere/hf")
+            .args(["config", "storage.hf_cache"])
+            .assert()
+            .success()
+            .stdout(contains("/mnt/elsewhere/hf"));
+    }
+
+    #[test]
+    fn config_set_hf_cache_persists_and_is_read_back() {
+        let home = isolated_home();
+        modl_cmd()
+            .env("HOME", home.path())
+            .env_remove("HF_HOME")
+            .env_remove("HF_HUB_CACHE")
+            .args(["config", "storage.hf_cache", "/srv/disk2/hf"])
+            .assert()
+            .success()
+            .stdout(contains("/srv/disk2/hf"));
+
+        // A fresh process must resolve the same path from config.yaml alone.
+        modl_cmd()
+            .env("HOME", home.path())
+            .env_remove("HF_HOME")
+            .env_remove("HF_HUB_CACHE")
+            .args(["config", "storage.hf_cache"])
+            .assert()
+            .success()
+            .stdout(contains("/srv/disk2/hf"));
+    }
+
+    #[test]
+    fn env_hf_home_beats_configured_hf_cache() {
+        let home = isolated_home();
+        modl_cmd()
+            .env("HOME", home.path())
+            .env_remove("HF_HOME")
+            .args(["config", "storage.hf_cache", "/srv/disk2/hf"])
+            .assert()
+            .success();
+
+        modl_cmd()
+            .env("HOME", home.path())
+            .env("HF_HOME", "/mnt/preexisting/hf")
+            .args(["config", "storage.hf_cache"])
+            .assert()
+            .success()
+            .stdout(contains("/mnt/preexisting/hf"));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Aliases
 // ---------------------------------------------------------------------------
 

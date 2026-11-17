@@ -169,7 +169,8 @@ pub async fn start(timeout: u32) -> Result<()> {
         .arg("--timeout")
         .arg(timeout.to_string())
         .env("PYTHONPATH", py_path)
-        .env("HF_HUB_OFFLINE", "1");
+        .env("HF_HUB_OFFLINE", "1")
+        .env("HF_HOME", crate::core::hf_cache::resolved().home());
 
     // Pass through MODL_MAX_MODELS if set (default: 2)
     if let Ok(max_models) = std::env::var("MODL_MAX_MODELS") {

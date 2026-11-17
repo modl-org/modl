@@ -12,6 +12,7 @@ pub mod enhance;
 pub mod executor;
 pub mod gpu;
 pub mod gpu_session;
+pub mod hf_cache;
 pub mod hub;
 pub mod huggingface;
 pub mod install;

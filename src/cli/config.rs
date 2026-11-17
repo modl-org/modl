@@ -25,6 +25,15 @@ fn show_config() -> Result<()> {
     println!("{}", style("storage.root").cyan());
     println!("  {}", config.store_root().display());
 
+    println!();
+    println!("{}", style("storage.hf_cache").cyan());
+    let hf = crate::core::hf_cache::resolved();
+    println!(
+        "  {} ({})",
+        hf.home().display(),
+        style(hf.source().label()).dim()
+    );
+
     if !config.targets.is_empty() {
         println!();
         println!("{}", style("targets").cyan());
@@ -52,12 +61,15 @@ fn show_key(key: &str) -> Result<()> {
     let config = Config::load()?;
     match key {
         "storage.root" => println!("{}", config.store_root().display()),
+        "storage.hf_cache" => {
+            println!("{}", crate::core::hf_cache::resolved().home().display())
+        }
         "gpu.vram_mb" => match config.gpu {
             Some(ref gpu) => println!("{}", gpu.vram_mb),
             None => println!("(auto-detected)"),
         },
         _ => anyhow::bail!(
-            "Unknown config key: {}. Available: storage.root, gpu.vram_mb",
+            "Unknown config key: {}. Available: storage.root, storage.hf_cache, gpu.vram_mb",
             key
         ),
     }
@@ -97,6 +109,35 @@ fn set_config(key: &str, value: &str) -> Result<()> {
                 new_root.display()
             );
         }
+        "storage.hf_cache" => {
+            // Existing downloads are not moved: HF re-populates the new cache on
+            // demand, and moving a partially-written cache under a running
+            // worker is worse than re-fetching. Say so instead of guessing.
+            let new_cache = PathBuf::from(shellexpand::tilde(value).to_string());
+            config.storage.hf_cache = Some(PathBuf::from(value));
+            config.save()?;
+
+            println!(
+                "{} HuggingFace cache set to {}",
+                style("✓").green().bold(),
+                new_cache.display()
+            );
+            println!(
+                "  {} Weights already in the old cache stay there — HF re-downloads into",
+                style("i").dim()
+            );
+            println!(
+                "  {} the new location on demand. Inspect the old one with `hf cache ls`.",
+                style(" ").dim()
+            );
+            if std::env::var_os("HF_HOME").is_some() || std::env::var_os("HF_HUB_CACHE").is_some() {
+                println!(
+                    "  {} HF_HOME/HF_HUB_CACHE is set in your environment and takes precedence \
+                     over this setting.",
+                    style("!").yellow()
+                );
+            }
+        }
         "gpu.vram_mb" => {
             let vram: u64 = value
                 .parse()
@@ -110,7 +151,7 @@ fn set_config(key: &str, value: &str) -> Result<()> {
             );
         }
         _ => anyhow::bail!(
-            "Unknown config key: {}. Available: storage.root, gpu.vram_mb",
+            "Unknown config key: {}. Available: storage.root, storage.hf_cache, gpu.vram_mb",
             key
         ),
     }
