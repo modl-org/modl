@@ -1,4 +1,4 @@
-"""Vendored third-party edit pipelines. See README.md for sources + licenses.
+"""Vendored third-party pipelines (Krea 2 edit, MOSS-Image). See README.md for sources + licenses.
 
 Classes here are addressed with an explicit ``modl.`` prefix in arch_config
 (e.g. ``"modl.Krea2OstrisEditPipeline"``) and resolved by
@@ -19,6 +19,11 @@ VENDORED_PREFIX = "modl."
 _VENDORED_CLASSES = {
     "Krea2OstrisEditPipeline": ("modl_worker.pipelines.krea2_ostris_edit", "Krea2OstrisEditPipeline"),
     "Krea2Transformer2DModel": ("modl_worker.pipelines.krea2_ostris_edit", "Krea2Transformer2DModel"),
+    # MOSS-Image has no diffusers class at all — the upstream release ships
+    # this file as a `custom_pipeline`; vendored so nothing runs remote code.
+    "MOSSImagePipeline": ("modl_worker.pipelines.moss_image", "MOSSImagePipeline"),
+    "MOSSImageTransformer": ("modl_worker.pipelines.moss_image", "MOSSImageTransformer"),
+    "MOSSImageScheduler": ("modl_worker.pipelines.moss_image", "MOSSImageScheduler"),
 }
 
 

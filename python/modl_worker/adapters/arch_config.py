@@ -972,6 +972,66 @@ ARCH_CONFIGS: dict[str, dict] = {
     },
 }
 
+def _moss_image_arch(skip_layers: list[int]) -> dict:
+    """MOSS-Image (OpenMOSS, Apache-2.0): 5B single-stream DiT conditioned on
+    the final hidden state of Qwen3.5-9B, decoded by the FLUX.2 small-decoder
+    VAE. SFT and Base share everything except the transformer weights.
+
+    No diffusers class exists — everything comes from the vendored upstream
+    pipeline (``modl.`` prefix). The transformer is 10GB bf16 and the text
+    encoder 19GB, which together don't fit 24GB: ``park_text_encoder`` keeps
+    the transformer + VAE resident and swaps only the text encoder in for the
+    prompt encode (see device.place_with_parked_text_encoder).
+    """
+    return {
+        "pipeline_class": "modl.MOSSImagePipeline",
+        "gen_components": {
+            "transformer": {
+                "model_class": "modl.MOSSImageTransformer",
+                "config_dir": "moss-image-transformer",
+            },
+            "text_encoder": {
+                "model_id": "moss-qwen3.5-9b-text-encoder",
+                "model_class": "Qwen3_5Model",
+                "config_dir": "moss-qwen3.5-9b",
+            },
+            "tokenizer": {
+                "model_class": "AutoTokenizer",
+                "config_dir": "moss-qwen3.5-tokenizer",
+            },
+            "vae": {
+                "model_id": "flux2-vae-small",
+                "model_class": "AutoencoderKLFlux2",
+                "config_dir": "flux2-vae-small",
+            },
+            "scheduler": {
+                "model_class": "modl.MOSSImageScheduler",
+                "config_dir": "moss-image-scheduler",
+            },
+        },
+        "model_flags": {"arch": "moss_image", "park_text_encoder": True, "vae_fp32": True},
+        "noise_scheduler": "flowmatch",
+        "dtype": "bf16",
+        "train_text_encoder": False,
+        "resolutions": [512, 768, 1024],
+        "default_resolution": 1024,
+        "sample": {"sampler": "flowmatch", "steps": 50, "guidance": 3.0, "neg": ""},
+        "inference": {
+            "supports_negative_prompt": True,
+            # Upstream default skips DiT block 22 in the negative (uncond)
+            # branch. Base users on r/StableDiffusion report [22, 24] gives
+            # cleaner realism; kept per-arch so it's one place to tune.
+            # With CFG 1 (the DMD fast LoRA) the pipeline runs no uncond
+            # branch, so the skip layers are simply unused there.
+            "extra_call_kwargs": {"uncond_skip_layers": skip_layers},
+        },
+    }
+
+
+
+ARCH_CONFIGS["moss_image"] = _moss_image_arch([22])
+ARCH_CONFIGS["moss_image_base"] = _moss_image_arch([22, 24])
+
 # -----------------------------------------------------------------------
 # Model registry: modl model IDs → (arch_key, HuggingFace hub ID)
 # -----------------------------------------------------------------------
@@ -1008,6 +1068,8 @@ MODEL_REGISTRY: dict[str, tuple[str, str]] = {
     "sdxl-base-1.0":  ("sdxl",          "stabilityai/stable-diffusion-xl-base-1.0"),
     "sdxl-turbo":     ("sdxl",          "stabilityai/sdxl-turbo"),
     "sd-1.5":         ("sd15",          "stable-diffusion-v1-5/stable-diffusion-v1-5"),
+    "moss-image":      ("moss_image",      "OpenMOSS-Team/MOSS-Image-SFT"),
+    "moss-image-base": ("moss_image_base", "OpenMOSS-Team/MOSS-Image-Base"),
 }
 
 
@@ -1026,6 +1088,8 @@ TRANSFORMER_HF_SOURCES: dict[str, tuple[str, str]] = {
     "krea2_turbo":         ("Comfy-Org/Krea-2",                           "diffusion_models/krea2_turbo_fp8_scaled.safetensors"),
     "krea2_raw":           ("Comfy-Org/Krea-2",                           "diffusion_models/krea2_raw_fp8_scaled.safetensors"),
     "krea2_edit":          ("Comfy-Org/Krea-2",                           "diffusion_models/krea2_raw_fp8_scaled.safetensors"),
+    "moss_image":          ("Comfy-Org/MOSS-Image",                       "diffusion_models/moss_image_sft_bf16.safetensors"),
+    "moss_image_base":     ("Comfy-Org/MOSS-Image",                       "diffusion_models/moss_image_base_bf16.safetensors"),
 }
 
 # Text encoders / VAEs are shared across variants → keyed by registry model_id.
@@ -1038,6 +1102,10 @@ COMPONENT_HF_SOURCES: dict[str, tuple[str, str]] = {
     # "model."-prefixed keys, which would silently zero-overlap on load).
     "krea2-qwen3-vl-4b-text-encoder": ("krea/Krea-2-Turbo",                           "text_encoder/model.safetensors"),
     "qwen-image-vae":              ("Comfy-Org/Qwen-Image_ComfyUI",                   "split_files/vae/qwen_image_vae.safetensors"),
+    # Comfy file has "model."-prefixed keys + lm_head/mtp extras; the
+    # generic strip_model transform in _normalize_te_state_dict handles it.
+    "moss-qwen3.5-9b-text-encoder": ("Comfy-Org/MOSS-Image",                          "text_encoders/qwen3.5_9b_bf16.safetensors"),
+    "flux2-vae-small":             ("Comfy-Org/MOSS-Image",                           "vae/flux2-vae_small.safetensors"),
 }
 
 
@@ -1081,6 +1149,8 @@ def detect_arch(base_model_id: str, arch_key: str | None = None) -> str:
         return "zimage"
     if "chroma" in bid:
         return "chroma"
+    if "moss" in bid:
+        return "moss_image_base" if "base" in bid else "moss_image"
     if "krea" in bid:
         # Edit variants first — they are Raw weights driven by the vendored
         # reference-edit pipeline, so they must not fall through to krea2_raw.

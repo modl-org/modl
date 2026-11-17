@@ -118,6 +118,18 @@ class ModelCache:
         return "txt2img"
 
     def get_or_load(self, spec: dict, emitter: EventEmitter) -> tuple[Any, str]:
+        """Return (pipeline, cls_name), with other parked pipelines off the GPU.
+
+        See ``_get_or_load`` for caching; ``device.yield_parked_gpu`` keeps a
+        resident MOSS DiT from starving the next model's job.
+        """
+        from modl_worker.device import yield_parked_gpu
+
+        pipeline, cls_name = self._get_or_load(spec, emitter)
+        yield_parked_gpu(pipeline)
+        return pipeline, cls_name
+
+    def _get_or_load(self, spec: dict, emitter: EventEmitter) -> tuple[Any, str]:
         """Return (pipeline, cls_name) — cached or freshly loaded.
 
         Also handles LoRA reconciliation (hot-swap if base model matches
@@ -355,8 +367,11 @@ class ModelCache:
         # original weights instead.
         if cached.lora_id:
             from modl_worker.adapters.lora_utils import revert_diff_patch
+            from modl_worker.adapters.moss_support import revert_moss_lora
 
-            if revert_diff_patch(cached.pipeline, emitter):
+            if revert_moss_lora(cached.pipeline, emitter):
+                emitter.info(f"Unloaded LoRA: {cached.lora_id}")
+            elif revert_diff_patch(cached.pipeline, emitter):
                 emitter.info(f"Unloaded diff patch: {cached.lora_id}")
             else:
                 try:
