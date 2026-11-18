@@ -5,6 +5,7 @@ ai-toolkit's ``run.py`` expects.  All architecture-specific logic is driven
 by the tables in ``arch_config.py`` rather than ad-hoc conditionals.
 """
 
+import copy
 import sys
 from pathlib import Path
 
@@ -270,8 +271,8 @@ def build_sample_block(
         "neg": sample_cfg["neg"],
         "seed": params.get("seed") or 42,
         "walk_seed": True,
-        "guidance_scale": sample_cfg["guidance"],
-        "sample_steps": sample_cfg["steps"],
+        "guidance_scale": arch.get("training", {}).get("sample_guidance", sample_cfg["guidance"]),
+        "sample_steps": arch.get("training", {}).get("sample_steps", sample_cfg["steps"]),
     }
 
 
@@ -300,10 +301,12 @@ def spec_to_aitoolkit_config(spec: dict, train_overrides: dict | None = None) ->
     # Detect model architecture.
     # Klein: remap to base (undistilled) arch for training.
     # Krea 2: always train against Raw (LoRAs transfer to Turbo).
+    # Qwen-Image 2.1 Turbo: train against the non-distilled 2.1.
     _klein_arch_remap = {
         "flux2_klein": "flux2_klein_base",
         "flux2_klein_9b": "flux2_klein_base_9b",
         "krea2_turbo": "krea2_raw",
+        "qwen_image_21_turbo": "qwen_image_21",
     }
     arch_key = detect_arch(base_model_id)
     arch_key = _klein_arch_remap.get(arch_key, arch_key)
@@ -337,7 +340,16 @@ def spec_to_aitoolkit_config(spec: dict, train_overrides: dict | None = None) ->
 
     # -- Model config from the arch table --
     model_config = {"name_or_path": model_path}
-    model_config.update(arch["model_flags"])
+    train_cfg = arch.get("training", {})
+    if "model" in train_cfg:
+        # The trainer's arch name/flags differ from modl's inference ones
+        # (MOSS-Image, Qwen-Image 2.1): use the training block verbatim, and
+        # the repo ai-toolkit knows how to read rather than the store layout.
+        model_config.update(copy.deepcopy(train_cfg["model"]))
+        if train_cfg.get("name_or_path"):
+            model_config["name_or_path"] = train_cfg["name_or_path"]
+    else:
+        model_config.update(arch["model_flags"])
 
     # Z-Image quantization: only quantize on <24GB VRAM (per Ostris)
     # "if you have 24 gigs or more, set this to none. It'll be way faster."
@@ -386,6 +398,8 @@ def spec_to_aitoolkit_config(spec: dict, train_overrides: dict | None = None) ->
         "linear": rank,
         "linear_alpha": alpha,
     }
+    if train_cfg.get("network_kwargs"):
+        network_config["network_kwargs"] = copy.deepcopy(train_cfg["network_kwargs"])
 
     # Resume from checkpoint
     resume_from = params.get("resume_from")

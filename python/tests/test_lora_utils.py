@@ -65,3 +65,48 @@ def test_converts_krea2_module_names_to_diffusers():
     # every survivor is transformer-prefixed diffusers format
     assert all(k.startswith("transformer.") for k in conv)
     assert not any("modulation" in k for k in conv)
+
+
+class _Rows:
+    """Stand-in for a tensor: a list of output rows with ``chunk``."""
+
+    def __init__(self, rows):
+        self.rows = list(rows)
+
+    def chunk(self, n, dim=0):
+        assert dim == 0
+        size = len(self.rows) // n
+        return tuple(_Rows(self.rows[i * size : (i + 1) * size]) for i in range(n))
+
+    def contiguous(self):
+        return self
+
+
+def test_qwen21_gate_up_is_split_into_gate_layer_and_proj():
+    pre = "diffusion_model.transformer_blocks.4.img_mlp"
+    shared_a = _Rows(["a"])
+    sd = {
+        f"{pre}.gate_up.lora_A.weight": shared_a,
+        f"{pre}.gate_up.lora_B.weight": _Rows(["g0", "g1", "u0", "u1"]),
+        f"{pre}.gate_up.alpha": 32,
+        f"{pre}.out.lora_A.weight": "untouched",
+        "diffusion_model.transformer_blocks.4.attn.to_q.lora_B.weight": "untouched",
+    }
+    conv, split = lora_utils.split_qwen21_gate_up(sd)
+    assert split == 1
+    assert not any(".gate_up." in k for k in conv)
+    # lora_A (the shared input projection) goes to both halves unchanged
+    assert conv[f"{pre}.gate_layer.lora_A.weight"] is shared_a
+    assert conv[f"{pre}.proj.lora_A.weight"] is shared_a
+    # lora_B rows: gate first, up second — the checkpoint converter's order
+    assert conv[f"{pre}.gate_layer.lora_B.weight"].rows == ["g0", "g1"]
+    assert conv[f"{pre}.proj.lora_B.weight"].rows == ["u0", "u1"]
+    assert conv[f"{pre}.gate_layer.alpha"] == conv[f"{pre}.proj.alpha"] == 32
+    assert conv[f"{pre}.out.lora_A.weight"] == "untouched"
+    assert len(conv) == 8
+
+
+def test_qwen21_split_leaves_other_loras_alone():
+    sd = {"transformer.transformer_blocks.0.attn.to_q.lora_A.weight": 1}
+    conv, split = lora_utils.split_qwen21_gate_up(sd)
+    assert conv == sd and split == 0

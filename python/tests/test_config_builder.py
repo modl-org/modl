@@ -68,6 +68,10 @@ TRAINABLE_MODELS = [
     "z-image",
     "z-image-turbo",
     "qwen-image",
+    "moss-image",
+    "moss-image-base",
+    "qwen-image-2-1",
+    "qwen-image-2-1-turbo",
     "sdxl",
     "sd-1.5",
 ]
@@ -104,3 +108,55 @@ def test_hf_fallback_when_no_store_path():
     name_or_path = config["config"]["process"][0]["model"]["name_or_path"]
     assert "/" in name_or_path
     assert not name_or_path.startswith("/")
+
+
+def _process(model_id: str, lora_type: str = "character") -> dict:
+    return spec_to_aitoolkit_config(_spec(model_id, lora_type))["config"]["process"][0]
+
+
+def test_moss_uses_the_trainer_arch_not_the_inference_flags():
+    base = _process("moss-image-base")
+    assert base["model"]["arch"] == "moss_image:base"
+    assert base["model"]["name_or_path"] == "OpenMOSS-Team/MOSS-Image-Base"
+    assert base["model"]["qtype"] == "convrot8" and base["model"]["low_vram"] is True
+    # modl-only inference flags must not leak into ai-toolkit's model block
+    assert "park_text_encoder" not in base["model"]
+    assert "vae_fp32" not in base["model"]
+    # block 22 is skipped in the uncond branch, so the LoRA leaves it alone
+    assert base["network"]["network_kwargs"] == {"ignore_if_contains": ["layers.22."]}
+    assert base["train"]["timestep_type"] == "shift"
+    assert base["datasets"][0]["cache_text_embeddings"] is True
+    assert base["sample"]["sample_steps"] == 30 and base["sample"]["guidance_scale"] == 3.0
+
+    sft = _process("moss-image")
+    assert sft["model"]["arch"] == "moss_image"
+    assert sft["model"]["name_or_path"] == "OpenMOSS-Team/MOSS-Image-SFT"
+
+
+def test_qwen21_trains_on_base_through_qwen_image_2():
+    for model_id in ("qwen-image-2-1", "qwen-image-2-1-turbo"):
+        process = _process(model_id)
+        assert process["model"]["arch"] == "qwen_image_2", model_id
+        assert process["model"]["name_or_path"] == "Comfy-Org/Qwen-Image-2.1", model_id
+        assert process["model"]["model_kwargs"] == {"rgba": False}
+        assert "rgba_output" not in process["model"]
+        assert "network_kwargs" not in process["network"]
+        # previews use CFG, unlike the CFG-1 inference default
+        assert process["sample"]["guidance_scale"] == 3.0
+        assert process["sample"]["sample_steps"] == 30
+
+
+def test_training_model_block_is_not_shared_between_builds():
+    first = _process("moss-image-base")
+    first["model"]["model_kwargs"]["uncond_skip_layers"].append(99)
+    first["network"]["network_kwargs"]["ignore_if_contains"].append("x")
+    second = _process("moss-image-base")
+    assert second["model"]["model_kwargs"]["uncond_skip_layers"] == [22]
+    assert second["network"]["network_kwargs"]["ignore_if_contains"] == ["layers.22."]
+
+
+def test_store_path_does_not_override_the_training_repo():
+    spec = _spec("moss-image-base")
+    spec["model"]["base_model_path"] = "/tmp"  # a directory, as a store dir would be
+    process = spec_to_aitoolkit_config(spec)["config"]["process"][0]
+    assert process["model"]["name_or_path"] == "OpenMOSS-Team/MOSS-Image-Base"

@@ -37,8 +37,10 @@ pub(crate) const TRAINER_TORCHAUDIO_VERSION: &str = "2.11.0";
 const GENERATOR_TORCH_VERSION: &str = "2.11.0";
 const GENERATOR_TORCHVISION_VERSION: &str = "0.26.0";
 pub(crate) const AITOOLKIT_REPO_URL: &str = "https://github.com/ostris/ai-toolkit.git";
-// f1bc650: first pin with the krea2 arch (Krea 2 Raw + edit-LoRA training).
-pub(crate) const AITOOLKIT_PIN_SHA: &str = "f1bc6508ad63369ea2ac684a8ba929a9ab685c1e";
+// 7a5fe1a (2026-11-16): adds the moss_image and qwen_image_2 archs (LoRA
+// training for MOSS-Image and Qwen-Image 2.1). requirements.txt is unchanged
+// from the previous pin (f1bc650, first with krea2).
+pub(crate) const AITOOLKIT_PIN_SHA: &str = "7a5fe1a8ca72276e1376ce6577f853b480c45576";
 const AITOOLKIT_CLONE_DIR: &str = "ai-toolkit";
 const DIFFUSERS_VERSION: &str = "0.43.0";
 const DEFAULT_PYTHON_ARTIFACT_URL: &str = "https://github.com/indygreg/python-build-standalone/releases/download/20250409/cpython-3.11.12+20250409-x86_64-unknown-linux-gnu-install_only.tar.gz";

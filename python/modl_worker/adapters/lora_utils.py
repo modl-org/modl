@@ -134,6 +134,68 @@ def _maybe_convert_krea2_lora(lora_path: str, emitter=None) -> str | None:
         return None
 
 
+_QWEN21_GATE_UP = ".img_mlp.gate_up."
+
+
+def split_qwen21_gate_up(state_dict: dict) -> tuple[dict, int]:
+    """Split fused ``img_mlp.gate_up`` LoRA modules for the diffusers model.
+
+    ai-toolkit trains Qwen-Image 2.1 against the Comfy-Org layout, where each
+    block's SwiGLU input is one fused ``img_mlp.gate_up`` Linear. Diffusers
+    keeps ``img_mlp.gate_layer`` and ``img_mlp.proj`` separate (see
+    ``_convert_qwen_image_21_checkpoint``), so those LoRA modules match
+    nothing and would be dropped — a sixth of the LoRA, silently. Both halves
+    read the same input: ``lora_A`` is shared and ``lora_B`` is cut in two
+    along its output rows (gate|up order, same as the checkpoint converter).
+
+    Returns ``(converted, split)`` with *split* the number of modules split.
+    """
+    out: dict = {}
+    split = 0
+    for key, value in state_dict.items():
+        if _QWEN21_GATE_UP not in key:
+            out[key] = value
+            continue
+        gate_key = key.replace(_QWEN21_GATE_UP, ".img_mlp.gate_layer.")
+        up_key = key.replace(_QWEN21_GATE_UP, ".img_mlp.proj.")
+        if re.search(r"\.(lora_B|lora_up)\.weight$", key):
+            gate, up = value.chunk(2, dim=0)
+            out[gate_key], out[up_key] = gate.contiguous(), up.contiguous()
+            split += 1
+        else:  # lora_A / lora_down / alpha: shared by both halves
+            out[gate_key] = value
+            out[up_key] = value
+    return out, split
+
+
+def _maybe_convert_qwen21_lora(lora_path: str, emitter=None) -> str | None:
+    """If *lora_path* has fused Qwen-Image 2.1 ``gate_up`` modules, write a
+    split copy to a temp file and return its path; otherwise return None.
+    The caller owns the temp file. Detection is header-only.
+    """
+    try:
+        from safetensors import safe_open
+
+        with safe_open(lora_path, framework="pt") as f:
+            if not any(_QWEN21_GATE_UP in k for k in f.keys()):
+                return None
+            metadata = f.metadata()
+
+        from safetensors.torch import load_file, save_file
+
+        converted, split = split_qwen21_gate_up(load_file(lora_path))
+        with tempfile.NamedTemporaryFile(suffix=".safetensors", delete=False) as tmp:
+            tmp_path = tmp.name
+        save_file(converted, tmp_path, metadata=metadata)
+        if emitter:
+            emitter.info(f"  → Split {split} fused gate_up LoRA modules for Qwen-Image 2.1")
+        return tmp_path
+    except Exception as exc:
+        if emitter:
+            emitter.info(f"  Qwen-Image 2.1 LoRA conversion skipped: {exc}")
+        return None
+
+
 def convert_lora_keys_if_needed(lora_path: str) -> tuple[str | None, str | None]:
     """Convert LoRA state dict keys from diffusion_model.* to transformer.*.
 
@@ -390,6 +452,23 @@ def load_lora_with_conversion(
             except OSError:
                 pass
 
+    # ai-toolkit Qwen-Image 2.1 LoRAs carry fused gate_up modules that the
+    # diffusers transformer does not have; load a split copy instead.
+    qwen21_tmp = _maybe_convert_qwen21_lora(lora_path, emitter)
+    if qwen21_tmp is not None:
+        try:
+            return _load_unfused_lora(pipeline, qwen21_tmp, lora_weight, emitter)
+        finally:
+            try:
+                os.unlink(qwen21_tmp)
+            except OSError:
+                pass
+    return _load_unfused_lora(pipeline, lora_path, lora_weight, emitter)
+
+
+def _load_unfused_lora(pipeline, lora_path: str, lora_weight: float, emitter) -> bool:
+    """Load a LoRA as an unfused PEFT adapter, retrying with the
+    ``diffusion_model.`` → ``transformer.`` prefix conversion on failure."""
     lora_dir = os.path.dirname(lora_path)
     lora_file = os.path.basename(lora_path)
 
