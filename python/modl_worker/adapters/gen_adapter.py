@@ -101,17 +101,20 @@ def run_generate(config_path: Path, emitter: EventEmitter) -> int:
     # -------------------------------------------------------------------
 
     # Warn about known-broken model/device combos
-    from modl_worker.device import is_mps
+    import torch
+    from modl_worker.device import get_inference_dtype, is_mps
     from modl_worker.adapters.arch_config import detect_arch
     arch = detect_arch(base_model_id, arch_key=model_info.get("arch_key"))
-    _MPS_UNSUPPORTED_ARCHS = {
+    # Flux 2's Qwen3 text encoder overflows fp16 into NaN (blank images). It
+    # needs bf16, which MPS now gets whenever the OS/torch stack supports it.
+    _FP16_UNSAFE_ARCHS = {
         "flux2", "flux2_klein", "flux2_klein_base", "flux2_klein_9b", "flux2_klein_base_9b",
     }
-    if is_mps() and arch in _MPS_UNSUPPORTED_ARCHS:
+    if is_mps() and arch in _FP16_UNSAFE_ARCHS and get_inference_dtype() == torch.float16:
         emitter.error(
             "MPS_UNSUPPORTED",
-            f"{base_model_id} does not yet work on Apple Silicon (MPS). "
-            f"Flux 2 pipelines produce blank images on non-CUDA devices. "
+            f"{base_model_id} needs bfloat16 on Apple Silicon, which this "
+            f"macOS/PyTorch stack doesn't support (macOS 14+ required). "
             f"Use a Flux 1 model (flux-dev, flux-schnell) or SDXL instead.",
             recoverable=False,
         )

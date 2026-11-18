@@ -42,13 +42,37 @@ def get_generator_device() -> str:
     return dev
 
 
-def get_inference_dtype():
-    """Return the best inference dtype for the active device.
+_DTYPE_NAMES = {
+    "bf16": torch.bfloat16, "bfloat16": torch.bfloat16,
+    "fp16": torch.float16, "float16": torch.float16,
+    "fp32": torch.float32, "float32": torch.float32,
+}
 
-    MPS has limited bfloat16 support — use float16 for reliability.
-    CUDA uses bfloat16 for best quality.
+
+def _mps_supports_bf16() -> bool:
+    """bf16 matmul works on MPS from macOS 14 with a recent torch."""
+    try:
+        a = torch.ones(8, 8, dtype=torch.bfloat16, device="mps")
+        return bool(torch.isfinite((a @ a).float()).all())
+    except (RuntimeError, TypeError, AttributeError):
+        return False
+
+
+@lru_cache(maxsize=1)
+def get_inference_dtype():
+    """Return the inference dtype for the active device.
+
+    bfloat16 everywhere it works. MPS used to get float16, but the current
+    models (Qwen-family text encoders, Flux 2, Z-Image, MOSS) were trained in
+    bf16 and overflow fp16 activations into NaN, i.e. black images (#102). It
+    also clashed with the places that hard-code bf16. float16 is now only the
+    fallback for an MPS stack without bf16. ``MODL_DTYPE`` (bf16/fp16/fp32)
+    overrides.
     """
-    if get_device() == "mps":
+    override = os.environ.get("MODL_DTYPE", "").lower()
+    if override in _DTYPE_NAMES:
+        return _DTYPE_NAMES[override]
+    if get_device() == "mps" and not _mps_supports_bf16():
         return torch.float16
     return torch.bfloat16
 
@@ -68,8 +92,42 @@ def move_pipe_to_device(pipe):
     dev = get_device()
     if dev == "cuda":
         pipe.enable_model_cpu_offload()
+    elif dev == "mps":
+        place_on_mps(pipe)
     else:
         pipe.to(dev)
+
+
+# Share of Metal's recommended working set the weights may take before we
+# offload instead: activations, the VAE decode and the rest of macOS need room.
+_MPS_RESIDENT_FRACTION = 0.70
+
+
+def place_on_mps(pipe, emitter=None) -> None:
+    """Fully resident on Apple Silicon when it fits, model offload otherwise.
+
+    Unified memory means "VRAM" is RAM, but Metal caps how much one process may
+    keep on the GPU (``recommended_max_memory``, ~75% of RAM). A pipeline over
+    that cap thrashes or aborts, so big stacks (MOSS: ~26GB of weights on a
+    48GB Mac) run with diffusers' model offload targeted at MPS. Only the
+    active component then counts against the cap.
+    """
+    weight_bytes = _pipe_weight_bytes(pipe)
+    try:
+        cap = int(torch.mps.recommended_max_memory())
+    except (RuntimeError, AttributeError):
+        cap = 0
+    if os.environ.get("MODL_FORCE_OFFLOAD") == "1" or (
+        cap and weight_bytes > cap * _MPS_RESIDENT_FRACTION
+    ):
+        pipe.enable_model_cpu_offload(device="mps")
+        if emitter:
+            emitter.info(
+                f"  → MPS offload: {weight_bytes / 1024**3:.1f}GB weights, "
+                f"Metal working set {cap / 1024**3:.1f}GB"
+            )
+        return
+    pipe.to("mps")
 
 
 def _pipe_weight_bytes(pipe) -> int:
