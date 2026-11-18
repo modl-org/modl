@@ -1,0 +1,98 @@
+{
+  "_class_name": "MiniMaxH3ImageModularPipeline",
+  "_diffusers_version": "0.42.0.dev0",
+  "_blocks_class_name": "MiniMaxH3ImageBlocks",
+  "sample_sigmas": [
+    1.0,
+    0.9675236940383911,
+    0.8875485062599182,
+    0.75,
+    0.5327739119529724,
+    0.23200887441635132,
+    0.0
+  ],
+  "text_encoder": [
+    "transformers",
+    "Qwen3VLForConditionalGeneration",
+    {
+      "type_hint": [
+        "transformers",
+        "Qwen3VLForConditionalGeneration"
+      ],
+      "pretrained_model_name_or_path": "MiniMaxAI/MiniMax-H3-Image",
+      "subfolder": "text_encoder",
+      "variant": null,
+      "revision": null
+    }
+  ],
+  "tokenizer": [
+    "transformers",
+    "Qwen2TokenizerFast",
+    {
+      "type_hint": [
+        "transformers",
+        "Qwen2TokenizerFast"
+      ],
+      "pretrained_model_name_or_path": "MiniMaxAI/MiniMax-H3-Image",
+      "subfolder": "tokenizer",
+      "variant": null,
+      "revision": null
+    }
+  ],
+  "processor": [
+    "transformers",
+    "Qwen3VLProcessor",
+    {
+      "type_hint": [
+        "transformers",
+        "Qwen3VLProcessor"
+      ],
+      "pretrained_model_name_or_path": "MiniMaxAI/MiniMax-H3-Image",
+      "subfolder": "processor",
+      "variant": null,
+      "revision": null
+    }
+  ],
+  "vae": [
+    "diffusers",
+    "AutoencoderKLMiniMaxH3Image",
+    {
+      "type_hint": [
+        "diffusers",
+        "AutoencoderKLMiniMaxH3Image"
+      ],
+      "pretrained_model_name_or_path": "MiniMaxAI/MiniMax-H3-Image",
+      "subfolder": "vae_diffusers",
+      "variant": null,
+      "revision": null
+    }
+  ],
+  "transformer": [
+    "diffusers",
+    "MiniMaxH3ImageTransformer2DModel",
+    {
+      "type_hint": [
+        "diffusers",
+        "MiniMaxH3ImageTransformer2DModel"
+      ],
+      "pretrained_model_name_or_path": "MiniMaxAI/MiniMax-H3-Image",
+      "subfolder": "transformer_diffusers",
+      "variant": null,
+      "revision": null
+    }
+  ],
+  "scheduler": [
+    "diffusers",
+    "MiniMaxH3Scheduler",
+    {
+      "type_hint": [
+        "diffusers",
+        "MiniMaxH3Scheduler"
+      ],
+      "pretrained_model_name_or_path": "MiniMaxAI/MiniMax-H3-Image",
+      "subfolder": "scheduler",
+      "variant": null,
+      "revision": null
+    }
+  ]
+}

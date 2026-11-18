@@ -1121,6 +1121,44 @@ def _qwen_image_21_arch(turbo: bool) -> dict:
 ARCH_CONFIGS["qwen_image_21"] = _qwen_image_21_arch(turbo=False)
 ARCH_CONFIGS["qwen_image_21_turbo"] = _qwen_image_21_arch(turbo=True)
 
+# MiniMax-H3-Image (MiniMax-H3-Image Community License — excludes some
+# territories): 6-step, guidance-distilled text-to-image + multi-reference
+# editing. ~20B INT8 ConvRot DiT on a 50-layer INT8 Qwen3-VL-32B encoder.
+# The vendored pipeline loads and places everything itself (DiT + VAE
+# resident, text encoder streamed from pinned RAM); see
+# pipelines/minimax_h3_image.py. gen_components only resolves file paths.
+ARCH_CONFIGS["minimax_h3_image"] = {
+    "pipeline_class": "modl.MiniMaxH3ImagePipeline",
+    "config_dir": "minimax-h3-image",
+    "gen_components": {
+        "transformer": {"model_class": "MiniMaxH3ImageTransformer2DModel", "config_dir": "minimax-h3-image"},
+        "text_encoder": {
+            "model_id": "minimax-h3-text-encoder-int8",
+            "model_class": "Qwen3VLForConditionalGeneration",
+            "config_dir": "minimax-h3-image",
+        },
+        "vae": {
+            "model_id": "minimax-h3-image-vae",
+            "model_class": "AutoencoderKLMiniMaxH3Image",
+            "config_dir": "minimax-h3-image",
+        },
+    },
+    "model_flags": {"arch": "minimax_h3_image"},
+    "noise_scheduler": "flowmatch",
+    "dtype": "bf16",
+    # Training is ai-toolkit's MiniMax-H3-Image arch, not wired into modl yet.
+    "train_text_encoder": False,
+    "resolutions": [1024, 1536, 2048],
+    "default_resolution": 2048,
+    "sample": {"sampler": "flowmatch", "steps": 6, "guidance": 1.0, "neg": ""},
+    "inference": {
+        "editing_mode": "native",
+        "latent_inpaint": False,
+        # Matches the upstream examples (CPU generator), so seeds reproduce.
+        "generator_device": "cpu",
+    },
+}
+
 # -----------------------------------------------------------------------
 # Model registry: modl model IDs → (arch_key, HuggingFace hub ID)
 # -----------------------------------------------------------------------
@@ -1162,6 +1200,7 @@ MODEL_REGISTRY: dict[str, tuple[str, str]] = {
     "kromoss":         ("kromoss",         "lodestones/Kromoss"),
     "qwen-image-2-1":       ("qwen_image_21",       "Qwen/Qwen-Image-2.1"),
     "qwen-image-2-1-turbo": ("qwen_image_21_turbo", "Qwen/Qwen-Image-2.1-Turbo"),
+    "minimax-h3-image":     ("minimax_h3_image",    "MiniMaxAI/MiniMax-H3-Image"),
 }
 
 
@@ -1185,6 +1224,7 @@ TRANSFORMER_HF_SOURCES: dict[str, tuple[str, str]] = {
     "kromoss":             ("lodestones/Kromoss",                         "diffusion_models/kromoss_bf16.safetensors"),
     "qwen_image_21":       ("Comfy-Org/Qwen-Image-2.1",                   "diffusion_models/qwen_image_2.1_bf16.safetensors"),
     "qwen_image_21_turbo": ("Comfy-Org/Qwen-Image-2.1",                   "diffusion_models/qwen_image_2.1_turbo_bf16.safetensors"),
+    "minimax_h3_image":    ("unsloth/MiniMax-H3-Image-FP8",               "MiniMax-H3-Image-INT8-ConvRot.safetensors"),
 }
 
 # Text encoders / VAEs are shared across variants → keyed by registry model_id.
@@ -1201,6 +1241,8 @@ COMPONENT_HF_SOURCES: dict[str, tuple[str, str]] = {
     # generic strip_model transform in _normalize_te_state_dict handles it.
     "moss-qwen3.5-9b-text-encoder": ("Comfy-Org/MOSS-Image",                          "text_encoders/qwen3.5_9b_bf16.safetensors"),
     "flux2-vae-small":             ("Comfy-Org/MOSS-Image",                           "vae/flux2-vae_small.safetensors"),
+    "minimax-h3-text-encoder-int8": ("Comfy-Org/MiniMax-H3-Image",                    "text_encoders/qwen3vl_32b_minimax_h3_int8_convrot.safetensors"),
+    "minimax-h3-image-vae":        ("MiniMaxAI/MiniMax-H3-Image",                     "vae_diffusers/diffusion_pytorch_model.safetensors"),
     "qwen-image-21-text-encoder":  ("Qwen/Qwen-Image-2.1-Turbo",                      "text_encoder/model.safetensors"),
     "qwen-image-21-vae":           ("Qwen/Qwen-Image-2.1-Turbo",                      "vae/diffusion_pytorch_model.safetensors"),
 }
