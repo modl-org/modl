@@ -396,6 +396,10 @@ pub struct EditParams {
     pub mask_path: Option<String>,
     #[serde(default, skip_serializing_if = "BlendMode::is_pixel")]
     pub blend_mode: BlendMode,
+    /// Source hold strength: pull the edit back toward the source wherever the
+    /// prompt does not change it (stops drift over chained edits). None = off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold: Option<f32>,
     /// Scheduler overrides for Lightning mode
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub scheduler_overrides: std::collections::HashMap<String, serde_json::Value>,

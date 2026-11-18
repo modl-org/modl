@@ -1904,6 +1904,7 @@ fn build_edit_spec(
             height: step.height,
             mask_path,
             blend_mode: step.blend.unwrap_or_default(),
+            hold: step.hold,
             scheduler_overrides: lightning
                 .map(|l| l.scheduler_overrides.clone())
                 .unwrap_or_default(),
@@ -2213,6 +2214,7 @@ mod tests {
             prompt: "x".into(),
             mask: None,
             blend: None,
+            hold: None,
             model: None,
             lora: None,
             fast: None,

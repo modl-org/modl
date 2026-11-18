@@ -1576,6 +1576,7 @@ dependencies = [
  "futures-util",
  "image",
  "include_dir",
+ "indexmap",
  "indicatif",
  "libc",
  "llama-cpp-2",
