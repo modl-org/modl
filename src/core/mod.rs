@@ -21,6 +21,7 @@ pub mod manifest;
 pub mod model_family;
 pub mod model_resolve;
 pub mod models;
+pub mod moss_layout;
 pub mod outputs;
 pub mod paths;
 pub mod pod;

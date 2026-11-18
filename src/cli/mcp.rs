@@ -138,9 +138,12 @@ fn tool_definitions() -> Value {
                     "fast": {
                         "type": "boolean",
                         "description": "Use Lightning LoRA for faster generation (fewer steps)"
+                    },
+                    "layout": {
+                        "type": "object",
+                        "description": "MOSS-Image layout (base moss-image, moss-image-base or kromoss): place text, objects and characters with pixel boxes. Replaces prompt; size comes from width/height. Draft form: {\"width\":1024,\"height\":1024,\"bbox_coord_space\":\"abs\",\"bbox_format\":\"xyxy\",\"summary\":{\"caption\":\"whole image\",\"meta\":[\"poster\"]},\"items\":[{\"label\":\"text\",\"caption\":\"style of the lettering\",\"text\":\"EXACT WORDS\",\"bbox\":[x1,y1,x2,y2]},{\"label\":\"object\",\"caption\":\"...\",\"bbox\":[x1,y1,x2,y2]}]}. Boxes are top-left pixel coords on the width x height canvas (multiples of 16); labels: text, object, character."
                     }
-                },
-                "required": ["prompt"]
+                }
             }
         },
         {
@@ -180,6 +183,10 @@ fn tool_definitions() -> Value {
                     "fast": {
                         "type": "boolean",
                         "description": "Use Lightning LoRA for faster generation (fewer steps)"
+                    },
+                    "hold": {
+                        "type": "number",
+                        "description": "Source hold: keep what the prompt doesn't change (no shifting, darkening or re-texturing; use it for chains of edits). 0.7 is a good default; lower = freer edit. Klein, Qwen Image Edit, Qwen Image 2.1"
                     }
                 },
                 "required": ["prompt", "image"]
@@ -547,12 +554,34 @@ fn run_modl(args: &[&str]) -> Result<(String, String, bool), String> {
 }
 
 fn tool_generate(args: &Value) -> Result<Value, (i32, String)> {
-    let prompt = args
-        .get("prompt")
-        .and_then(|v| v.as_str())
-        .ok_or((-32602, "Missing required parameter: prompt".to_string()))?;
+    let layout = args.get("layout").filter(|v| v.is_object());
+    let prompt = args.get("prompt").and_then(|v| v.as_str());
+    if prompt.is_none() && layout.is_none() {
+        return Err((
+            -32602,
+            "Missing required parameter: prompt (or layout)".to_string(),
+        ));
+    }
 
-    let mut cmd_args: Vec<String> = vec!["generate".into(), "--json".into(), prompt.into()];
+    let mut cmd_args: Vec<String> = vec!["generate".into(), "--json".into()];
+    // Keep the temp file alive until the command has run.
+    let _layout_file = match layout {
+        Some(l) => {
+            let mut f = tempfile::Builder::new()
+                .prefix("modl-layout-")
+                .suffix(".json")
+                .tempfile()
+                .map_err(|e| (-32603, format!("layout temp file: {e}")))?;
+            std::io::Write::write_all(&mut f, l.to_string().as_bytes())
+                .map_err(|e| (-32603, format!("layout temp file: {e}")))?;
+            cmd_args.extend(["--layout".into(), f.path().to_string_lossy().to_string()]);
+            Some(f)
+        }
+        None => {
+            cmd_args.push(prompt.unwrap_or_default().into());
+            None
+        }
+    };
 
     // Map JSON params to CLI flags
     if let Some(v) = args.get("base").and_then(|v| v.as_str()) {
@@ -672,6 +701,9 @@ fn tool_edit(args: &Value) -> Result<Value, (i32, String)> {
     }
     if args.get("fast").and_then(|v| v.as_bool()).unwrap_or(false) {
         cmd_args.push("--fast".into());
+    }
+    if let Some(v) = args.get("hold").and_then(|v| v.as_f64()) {
+        cmd_args.extend(["--hold".into(), v.to_string()]);
     }
 
     let args_ref: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();

@@ -23,6 +23,7 @@ pub struct EditArgs<'a> {
     pub images: &'a [String],
     pub mask: Option<&'a str>,
     pub blend: BlendMode,
+    pub hold: Option<f32>,
     pub lora: Option<&'a str>,
     pub lora_strength: f32,
     pub base: Option<&'a str>,
@@ -45,7 +46,11 @@ pub struct EditArgs<'a> {
 /// URIs in a one-step workflow (client paths don't exist on the pod) and hand
 /// it to the remote modl (`core::pod_run`).
 async fn run_on_pod(args: &EditArgs<'_>) -> Result<()> {
-    for (flag, set) in [("--cloud", args.cloud), ("--attach-gpu", args.attach_gpu)] {
+    for (flag, set) in [
+        ("--cloud", args.cloud),
+        ("--attach-gpu", args.attach_gpu),
+        ("--hold", args.hold.is_some()),
+    ] {
         if set {
             anyhow::bail!("{flag} isn't supported with --pod yet — run locally or drop the flag.");
         }
@@ -223,6 +228,7 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
         images,
         mask,
         blend,
+        hold,
         lora,
         lora_strength,
         base,
@@ -246,6 +252,11 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
     // -------------------------------------------------------------------
     if images.is_empty() {
         anyhow::bail!("At least one --image is required for editing");
+    }
+    if let Some(h) = hold
+        && !(0.0..=10.0).contains(&h)
+    {
+        anyhow::bail!("--hold must be between 0 and 10 (default 0.7)");
     }
 
     // -------------------------------------------------------------------
@@ -403,6 +414,7 @@ pub async fn run(args: EditArgs<'_>) -> Result<()> {
             height: output_size.map(|(_, h)| h),
             mask_path: resolved_mask.clone(),
             blend_mode: blend,
+            hold,
             scheduler_overrides,
         },
         runtime: RuntimeRef {

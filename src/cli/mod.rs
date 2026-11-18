@@ -671,8 +671,15 @@ pub enum Commands {
     /// Use --lora to apply a trained LoRA. Use --controlnet for structural guidance.
     #[command(verbatim_doc_comment, after_help = GENERATE_EXAMPLES)]
     Generate {
-        /// Text prompt for image generation
-        prompt: String,
+        /// Text prompt for image generation (optional with --layout)
+        #[arg(required_unless_present = "layout")]
+        prompt: Option<String>,
+        /// MOSS-Image layout JSON file: place text, objects and characters
+        /// with pixel boxes. Takes a draft (width/height + top-left xyxy boxes,
+        /// compiled for you) or an already-compiled layout. Sets --size from
+        /// the draft. MOSS models only (moss-image, moss-image-base, kromoss).
+        #[arg(long, value_name = "FILE")]
+        layout: Option<String>,
         /// Base model to use (default: flux-schnell)
         #[arg(long)]
         base: Option<String>,
@@ -790,6 +797,13 @@ pub enum Commands {
         /// Blend mode for masked edits (default: pixel)
         #[arg(long, default_value = "pixel")]
         blend: BlendMode,
+        /// Hold the parts the prompt doesn't change to the source, so they
+        /// don't shift, darken or re-texture (useful for chains of edits).
+        /// Optional strength for the edit area: lower = freer edit,
+        /// higher = steadier picture [default: 0.7]. With --mask, everything
+        /// outside the mask is held firmly. Klein, Qwen Image Edit, Qwen 2.1.
+        #[arg(long, num_args = 0..=1, default_missing_value = "0.7", value_name = "STRENGTH")]
+        hold: Option<f32>,
         /// LoRA name or path to apply (combine with reference images for multi-character scenes)
         #[arg(long)]
         lora: Option<String>,
@@ -1378,6 +1392,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         // ── Primary Actions ──────────────────────────────────────────
         Commands::Generate {
             prompt,
+            layout,
             base,
             lora,
             lora_strength,
@@ -1406,6 +1421,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             pod,
             json,
         } => {
+            let (prompt, size) =
+                generate::resolve_layout(prompt, layout.as_deref(), size, base.as_deref())?;
             generate::run(generate::GenerateArgs {
                 prompt: &prompt,
                 base: base.as_deref(),
@@ -1443,6 +1460,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             image,
             mask,
             blend,
+            hold,
             lora,
             lora_strength,
             base,
@@ -1465,6 +1483,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 images: &image,
                 mask: mask.as_deref(),
                 blend,
+                hold,
                 lora: lora.as_deref(),
                 lora_strength,
                 base: base.as_deref(),

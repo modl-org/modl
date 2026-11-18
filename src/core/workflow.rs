@@ -106,6 +106,26 @@ pub enum EditMask {
     Image(ImageRef),
 }
 
+/// `hold:` accepts `true`/`false` or a strength.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum HoldValue {
+    Flag(bool),
+    Strength(f32),
+}
+
+impl HoldValue {
+    pub const DEFAULT_STRENGTH: f32 = 0.7;
+
+    pub fn strength(&self) -> Option<f32> {
+        match self {
+            Self::Flag(true) => Some(Self::DEFAULT_STRENGTH),
+            Self::Flag(false) => None,
+            Self::Strength(s) => Some(*s),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EditStep {
     /// Source images (1 or more). Multi-image edits feed every image to the
@@ -116,6 +136,8 @@ pub struct EditStep {
     pub mask: Option<EditMask>,
     /// Blend mode for masked edits (`pixel` default, `latent` = native inpaint).
     pub blend: Option<crate::core::job::BlendMode>,
+    /// Source hold strength (see `modl edit --hold`). None = off.
+    pub hold: Option<f32>,
     /// Per-step model override. See `GenerateStep::model`.
     pub model: Option<String>,
     /// Per-step LoRA override. See `GenerateStep::lora`.
@@ -267,6 +289,13 @@ struct RawStep {
     strength: Option<f32>,
     #[serde(default)]
     blend: Option<crate::core::job::BlendMode>,
+    /// Generate steps: MOSS-Image layout, a path (relative to the YAML) or an
+    /// inline mapping. Replaces the `generate:` prompt.
+    #[serde(default)]
+    layout: Option<serde_yaml::Value>,
+    /// Edit steps: source hold. `hold: true` = default strength 0.7, or a number.
+    #[serde(default)]
+    hold: Option<HoldValue>,
     #[serde(default)]
     controlnet: Option<Vec<RawControlNet>>,
     #[serde(default)]
@@ -358,8 +387,21 @@ pub fn parse_str(yaml: &str, base_dir: &Path) -> Result<Workflow> {
             );
         }
 
+        // --- `layout:` (MOSS-Image boxes) is a generate step whose prompt is
+        // compiled from the layout; `generate:` may then be omitted.
+        let gen_prompt = raw_step
+            .generate
+            .clone()
+            .or_else(|| raw_step.layout.as_ref().map(|_| String::new()));
+        if raw_step.layout.is_some() && raw_step.edit.is_some() {
+            bail!(
+                "step `{}`: `layout` is only valid on generate steps",
+                raw_step.id
+            );
+        }
+
         // --- kind validation: exactly one of generate/edit
-        let kind_count = raw_step.generate.is_some() as u8 + raw_step.edit.is_some() as u8;
+        let kind_count = gen_prompt.is_some() as u8 + raw_step.edit.is_some() as u8;
         if kind_count == 0 {
             bail!(
                 "step `{}`: must have exactly one of `generate:` or `edit:`",
@@ -401,7 +443,10 @@ pub fn parse_str(yaml: &str, base_dir: &Path) -> Result<Workflow> {
         }
 
         // --- image-input fields are kind-specific
-        if raw_step.generate.is_some() {
+        if gen_prompt.is_some() {
+            if raw_step.hold.is_some() {
+                bail!("step `{}`: `hold` is only valid on edit steps", raw_step.id);
+            }
             if raw_step.blend.is_some() {
                 bail!(
                     "step `{}`: `blend` is only valid on edit steps",
@@ -441,7 +486,60 @@ pub fn parse_str(yaml: &str, base_dir: &Path) -> Result<Workflow> {
             raw.defaults.guidance
         };
 
-        let kind = if let Some(prompt) = &raw_step.generate {
+        let kind = if let Some(prompt) = &gen_prompt {
+            let (prompt, layout_size) = match &raw_step.layout {
+                None => (prompt.clone(), None),
+                Some(layout) => {
+                    let model = raw_step.model.as_deref().unwrap_or(&raw.model);
+                    if !crate::core::moss_layout::model_supports_layout(model) {
+                        bail!(
+                            "step `{}`: `layout` needs a MOSS model (moss-image, moss-image-base, kromoss), got `{model}`",
+                            raw_step.id
+                        );
+                    }
+                    if !prompt.trim().is_empty() {
+                        bail!(
+                            "step `{}`: `layout` replaces the prompt — put the scene description in summary.caption and drop `generate:`",
+                            raw_step.id
+                        );
+                    }
+                    let text = match layout {
+                        serde_yaml::Value::String(path) => {
+                            let p = base_dir.join(path);
+                            std::fs::read_to_string(&p).map_err(|e| {
+                                anyhow!(
+                                    "step `{}`: reading layout {}: {e}",
+                                    raw_step.id,
+                                    p.display()
+                                )
+                            })?
+                        }
+                        other => serde_json::to_string(other).map_err(|e| {
+                            anyhow!("step `{}`: layout is not valid JSON data: {e}", raw_step.id)
+                        })?,
+                    };
+                    let c = crate::core::moss_layout::compile(&text)
+                        .map_err(|e| anyhow!("step `{}`: layout: {e}", raw_step.id))?;
+                    (c.prompt, c.size)
+                }
+            };
+            let prompt = &prompt;
+            let width = raw_step.width.or(raw.defaults.width);
+            let height = raw_step.height.or(raw.defaults.height);
+            let (width, height) = match layout_size {
+                None => (width, height),
+                Some((lw, lh)) => {
+                    if raw_step.width.is_some_and(|w| w != lw)
+                        || raw_step.height.is_some_and(|h| h != lh)
+                    {
+                        bail!(
+                            "step `{}`: width/height differ from the layout canvas {lw}x{lh}",
+                            raw_step.id
+                        );
+                    }
+                    (Some(lw), Some(lh))
+                }
+            };
             // img2img / inpaint inputs
             let init_image = raw_step
                 .init_image
@@ -545,8 +643,8 @@ pub fn parse_str(yaml: &str, base_dir: &Path) -> Result<Workflow> {
                 fast: raw_step.fast,
                 seed: raw_step.seed.or(raw.defaults.seed),
                 seeds: raw_step.seeds.clone(),
-                width: raw_step.width.or(raw.defaults.width),
-                height: raw_step.height.or(raw.defaults.height),
+                width,
+                height,
                 steps: raw_step.steps.or(default_steps),
                 guidance: raw_step.guidance.or(default_guidance),
                 count: raw_step.count.or(raw.defaults.count),
@@ -610,6 +708,7 @@ pub fn parse_str(yaml: &str, base_dir: &Path) -> Result<Workflow> {
                 prompt: edit_prompt.clone(),
                 mask,
                 blend: raw_step.blend,
+                hold: raw_step.hold.as_ref().and_then(HoldValue::strength),
                 model: raw_step.model.clone(),
                 lora: raw_step.lora.clone(),
                 fast: raw_step.fast,
@@ -839,6 +938,96 @@ mod tests {
 
     fn parse(yaml: &str) -> Result<Workflow> {
         parse_str(yaml, Path::new("."))
+    }
+
+    #[test]
+    fn layout_inline_compiles_prompt_and_size() {
+        let yaml = r#"
+name: poster
+model: kromoss
+steps:
+  - id: a
+    layout:
+      width: 1024
+      height: 768
+      bbox_coord_space: abs
+      bbox_format: xyxy
+      summary:
+        caption: "A cream travel poster."
+      items:
+        - label: text
+          caption: "Large blue title."
+          text: "KYOTO"
+          bbox: [512, 0, 1024, 256]
+"#;
+        let wf = parse(yaml).unwrap();
+        match &wf.steps[0].kind {
+            StepKind::Generate(g) => {
+                assert_eq!(
+                    g.prompt,
+                    r#"{"summary":{"caption":"A cream travel poster."},"items":[{"label":"text","caption":"Large blue title.","text":"KYOTO","bbox":[-384,0,-128,512]}],"bbox_coord_space":"abs_centralized","bbox_format":"yxyx"}"#
+                );
+                assert_eq!((g.width, g.height), (Some(1024), Some(768)));
+            }
+            _ => panic!("expected generate"),
+        }
+    }
+
+    #[test]
+    fn layout_from_file_and_model_checks() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("l.json"),
+            r#"{"caption": "Just a caption draft."}"#,
+        )
+        .unwrap();
+        let ok = "name: t\nmodel: moss-image\nsteps:\n  - id: a\n    layout: l.json\n";
+        let wf = parse_str(ok, dir.path()).unwrap();
+        match &wf.steps[0].kind {
+            StepKind::Generate(g) => assert_eq!(g.prompt, "Just a caption draft."),
+            _ => panic!("expected generate"),
+        }
+        let wrong_model = ok.replace("moss-image", "flux-dev");
+        let err = parse_str(&wrong_model, dir.path()).unwrap_err().to_string();
+        assert!(err.contains("needs a MOSS model"), "{err}");
+        let with_prompt = ok.replace("layout: l.json", "layout: l.json\n    generate: \"x\"");
+        assert!(parse_str(&with_prompt, dir.path()).is_err());
+    }
+
+    #[test]
+    fn hold_on_edit_steps() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.png"), b"x").unwrap();
+        let yaml = r#"
+name: t
+model: flux2-klein-9b
+steps:
+  - id: a
+    edit: "a.png"
+    prompt: "make it red"
+    hold: true
+  - id: b
+    edit: "a.png"
+    prompt: "make it blue"
+    hold: 1.2
+  - id: c
+    edit: "a.png"
+    prompt: "make it green"
+    hold: false
+"#;
+        let wf = parse_str(yaml, dir.path()).unwrap();
+        let holds: Vec<_> = wf
+            .steps
+            .iter()
+            .map(|s| match &s.kind {
+                StepKind::Edit(e) => e.hold,
+                _ => panic!("expected edit"),
+            })
+            .collect();
+        assert_eq!(holds, vec![Some(0.7), Some(1.2), None]);
+        let on_generate =
+            "name: t\nmodel: flux-dev\nsteps:\n  - id: a\n    generate: x\n    hold: true\n";
+        assert!(parse(on_generate).is_err());
     }
 
     #[test]

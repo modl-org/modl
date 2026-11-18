@@ -159,6 +159,7 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
             emitter.error("IMAGE_LOAD_FAILED", f"Failed to load {p}: {exc}", recoverable=False)
             return 1
 
+    hold_strength = params.get("hold")
     # Load or derive mask image (white=edit, black=preserve)
     mask_image = None
     if mask_path:
@@ -247,7 +248,12 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
         if params.get("width"):
             gen_kwargs["width"] = params["width"]
         edit_res = inf_cfg.get("edit_output_resolution")
-        if edit_res and not (params.get("height") or params.get("width")):
+        explicit_size = bool(params.get("height") or params.get("width"))
+        if edit_res and hold_strength and len(source_images) == 1 and not explicit_size:
+            # The hold needs the source encoded at the output size; on 2.1
+            # output_resolution sets both (one 1536 reference fits 24GB).
+            gen_kwargs["output_resolution"] = edit_res
+        elif edit_res and not explicit_size:
             # Output area only, in the last source's aspect ratio (what the
             # pipeline does with output_resolution). References stay at the
             # pipeline's own size, so multi-ref edits still fit 24GB.
@@ -294,7 +300,17 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
         t0 = time.time()
 
         try:
-            result = pipeline(**gen_kwargs)
+            from contextlib import nullcontext
+            from .source_hold import SourceHold
+            hold = nullcontext()
+            if hold_strength is not None:
+                hold = SourceHold(pipeline, hold_strength, mask_image, emitter)
+                if not hold.supported:
+                    if i == 0:
+                        emitter.info(f"--hold is not supported for {type(pipeline).__name__}; ignoring it")
+                    hold = nullcontext()
+            with hold:
+                result = pipeline(**gen_kwargs)
             image = result.images[0]
             # Qwen-Image-2.1 decodes RGBA; keep alpha only for real cut-outs.
             from modl_worker.adapters.qwen21_support import finalize_rgba
@@ -311,6 +327,8 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
 
         # Masked blend: preserve source pixels outside the mask region.
         # Skip if the inpaint pipeline already handled blending natively.
+        # With --hold the inside of the mask is drawn consistent with the held
+        # surroundings, so the paste below keeps the outside exact without a seam.
         if mask_image is not None and not use_native_inpaint:
             if blend_mode == "latent":
                 emitter.info("Latent blend not available for this pipeline, falling back to pixel blend")
@@ -339,6 +357,7 @@ def run_edit_with_pipeline(spec: dict, emitter: EventEmitter, pipeline: object) 
             "count": count,
             "mask": mask_path,
             "blend_mode": blend_mode if mask_path else None,
+            "hold": hold_strength,
         }
 
         filepath = save_and_emit_artifact(

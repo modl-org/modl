@@ -87,6 +87,43 @@ pub struct GenerateArgs<'a> {
     pub json: bool,
 }
 
+/// Turn `--layout` into the prompt string MOSS-Image reads, and the canvas
+/// size its boxes were drawn on. Without a layout, the prompt passes through.
+pub fn resolve_layout(
+    prompt: Option<String>,
+    layout: Option<&str>,
+    size: Option<String>,
+    base: Option<&str>,
+) -> Result<(String, Option<String>)> {
+    let Some(path) = layout else {
+        return Ok((prompt.unwrap_or_default(), size));
+    };
+    if let Some(p) = prompt.as_deref()
+        && !p.trim().is_empty()
+    {
+        anyhow::bail!(
+            "--layout replaces the prompt (the scene description goes in summary.caption); drop the prompt argument"
+        );
+    }
+    match base {
+        Some(b) if crate::core::moss_layout::model_supports_layout(b) => {}
+        _ => anyhow::bail!(
+            "--layout needs a MOSS model: add --base moss-image (or moss-image-base, kromoss)"
+        ),
+    }
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading layout {path}"))?;
+    let compiled =
+        crate::core::moss_layout::compile(&text).with_context(|| format!("layout {path}"))?;
+    let size = match (compiled.size, size) {
+        (Some((w, h)), None) => Some(format!("{w}x{h}")),
+        (Some((w, h)), Some(s)) if s != format!("{w}x{h}") => anyhow::bail!(
+            "--size {s} differs from the layout canvas {w}x{h}; boxes are drawn on that canvas, so drop --size or change width/height in the layout"
+        ),
+        (_, s) => s,
+    };
+    Ok((compiled.prompt, size))
+}
+
 pub async fn run(args: GenerateArgs<'_>) -> Result<()> {
     // Pod execution funnels through the remote modl install — model checks
     // and the store live pod-side, so none of the local resolution below
