@@ -141,7 +141,7 @@ Not yet supported on pods: controlnet/style-ref, inpainting masks.
 
 ## Supported Models
 
-32 models across 10 families. See the full comparison at **[modl.pedroalonso.net/guides/model-comparison](https://modl.pedroalonso.net/guides/model-comparison)**.
+33 models across 11 families. See the full comparison at **[modl.pedroalonso.net/guides/model-comparison](https://modl.pedroalonso.net/guides/model-comparison)**.
 
 | Family | Models | Best for |
 |--------|--------|----------|
@@ -151,6 +151,7 @@ Not yet supported on pods: controlnet/style-ref, inpainting masks.
 | **Z-Image** | Base, Turbo | Strong quality/size, fast turbo, great ControlNet |
 | **Qwen Image** | Image, Image Edit, 2.1, 2.1 Turbo | Text rendering (Chinese/English), instruction editing; 2.1: generate + 10-ref edit + transparent RGBA in one 7B model |
 | **MOSS-Image** | SFT, Base, Kromoss | Apache 2.0, excellent text rendering, natural realism (Base), `--fast 8` |
+| **MiniMax H3** | H3 Image | Native 4 MP in 6 steps, typography, up to 8-reference edits; INT8 on a 24 GB card, needs ~48 GB RAM. License excludes the EU, UK, US and South Korea — check it before you pull |
 | **Legacy SD** | SDXL, SD 1.5 | Low VRAM, massive LoRA library |
 
 Plus 70+ ControlNets, IP-Adapters, VAEs, text encoders, upscalers, and segmentation models. Browse all at **[modl.pedroalonso.net/models](https://modl.pedroalonso.net/models)**.

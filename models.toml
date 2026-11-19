@@ -582,6 +582,43 @@ keep CFG at 1. Same prompting as qwen-image-2-1: quote exact text, the RGBA
 phrasing for transparent output, up to 10 reference images for edits.
 Non-commercial (Qwen Research License)."""
 
+# ─── MiniMax H3 Image ───────────────────────────────────────────────
+
+[families.minimax_h3]
+name = "MiniMax H3 Image"
+vendor = "MiniMax"
+year = 2026
+
+[families.minimax_h3.models.minimax-h3-image]
+name = "MiniMax H3 Image"
+arch_key = "minimax_h3_image"
+description = "6-step 4 MP text-to-image + multi-reference edit; INT8, 64 GB RAM; territory-restricted license"
+transformer_b = 20.1
+text_encoder = "Qwen3-VL 32B"
+text_encoder_b = 32.0
+total_b = 52.1
+# INT8 DiT (20GB) + VAE stay resident; the 27GB INT8 text encoder lives in
+# pinned RAM and streams through the GPU one layer per prompt encode.
+vram_bf16 = 22
+vram_fp8 = 22
+capabilities = ["txt2img", "edit"]
+max_edit_images = 8
+quality = 5
+speed = 3
+text_rendering = true
+defaults = { steps = 6, guidance = 1.0, resolution = 2048 }
+prompt_guide = """
+Guidance-distilled: always 6 steps, no CFG, no negative prompt (`--steps`
+and `--guidance` are ignored). Native resolution is high: 2048x2048 (4 MP)
+is the default and where it looks best; 1024 works but is softer. Write
+long, literal descriptions; quote exact text for signs and posters.
+Editing: `modl edit` with one or more images; the first is the picture to
+edit, and the prompt can refer to each as <Picture 1>, <Picture 2>... An
+edit keeps the first picture's aspect ratio at ~4 MP unless --size is given.
+Needs ~48GB of free system RAM (the text encoder is held in pinned memory).
+License: MiniMax-H3-Image Community License, which excludes the EU, UK,
+South Korea and the US; check it before use."""
+
 # ─── Qwen Image Edit (editing) ──────────────────────────────────────
 
 [families.qwen_image_edit]

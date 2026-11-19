@@ -1249,6 +1249,11 @@ def load_pipeline(
     dtype = get_inference_dtype()
     PipelineClass = _get_pipeline(cls_name)
 
+    # Pipelines that place and quantize themselves (MiniMax-H3-Image: INT8
+    # DiT + a text encoder streamed from pinned RAM) skip the generic paths.
+    if getattr(PipelineClass, "_modl_custom_loader", False):
+        return PipelineClass.load_for_modl(base_model_id, base_model_path, emitter)
+
     # Storeless assembly: a model whose HF release is a single transformer file
     # (no diffusers model_index.json) but which has a component-assembly spec
     # with HF sources — e.g. Flux 2 Klein on a pod. Assemble it from parts

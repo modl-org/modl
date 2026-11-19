@@ -1,4 +1,4 @@
-"""Vendored third-party pipelines (Krea 2 edit, MOSS-Image). See README.md for sources + licenses.
+"""Vendored and modl-native pipelines (Krea 2 edit, MOSS-Image, MiniMax-H3-Image). See README.md for sources + licenses.
 
 Classes here are addressed with an explicit ``modl.`` prefix in arch_config
 (e.g. ``"modl.Krea2OstrisEditPipeline"``) and resolved by
@@ -24,6 +24,9 @@ _VENDORED_CLASSES = {
     "MOSSImagePipeline": ("modl_worker.pipelines.moss_image", "MOSSImagePipeline"),
     "MOSSImageTransformer": ("modl_worker.pipelines.moss_image", "MOSSImageTransformer"),
     "MOSSImageScheduler": ("modl_worker.pipelines.moss_image", "MOSSImageScheduler"),
+    # MiniMax-H3-Image: diffusers' modular pipeline plus modl's INT8 loaders
+    # and streamed text encoder (it loads itself; see load_for_modl).
+    "MiniMaxH3ImagePipeline": ("modl_worker.pipelines.minimax_h3_image", "MiniMaxH3ImagePipeline"),
 }
 
 

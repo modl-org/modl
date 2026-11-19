@@ -30,17 +30,17 @@ pub fn default_profile() -> &'static str {
 }
 const DEFAULT_CHANNEL: &str = "stable";
 const PYTHON_VERSION: &str = "3.11.12";
-const TRAINER_CU126_INDEX_URL: &str = "https://download.pytorch.org/whl/cu126";
-pub(crate) const TRAINER_TORCH_VERSION: &str = "2.7.0";
-pub(crate) const TRAINER_TORCHVISION_VERSION: &str = "0.22.0";
-pub(crate) const TRAINER_TORCHAUDIO_VERSION: &str = "2.7.0";
-const GENERATOR_TORCH_VERSION: &str = "2.7.0";
-const GENERATOR_TORCHVISION_VERSION: &str = "0.22.0";
+const TRAINER_CU128_INDEX_URL: &str = "https://download.pytorch.org/whl/cu128";
+pub(crate) const TRAINER_TORCH_VERSION: &str = "2.11.0";
+pub(crate) const TRAINER_TORCHVISION_VERSION: &str = "0.26.0";
+pub(crate) const TRAINER_TORCHAUDIO_VERSION: &str = "2.11.0";
+const GENERATOR_TORCH_VERSION: &str = "2.11.0";
+const GENERATOR_TORCHVISION_VERSION: &str = "0.26.0";
 pub(crate) const AITOOLKIT_REPO_URL: &str = "https://github.com/ostris/ai-toolkit.git";
 // f1bc650: first pin with the krea2 arch (Krea 2 Raw + edit-LoRA training).
 pub(crate) const AITOOLKIT_PIN_SHA: &str = "f1bc6508ad63369ea2ac684a8ba929a9ab685c1e";
 const AITOOLKIT_CLONE_DIR: &str = "ai-toolkit";
-const DIFFUSERS_VERSION: &str = "0.39.0";
+const DIFFUSERS_VERSION: &str = "0.43.0";
 const DEFAULT_PYTHON_ARTIFACT_URL: &str = "https://github.com/indygreg/python-build-standalone/releases/download/20250409/cpython-3.11.12+20250409-x86_64-unknown-linux-gnu-install_only.tar.gz";
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const MACOS_AARCH64_PYTHON_ARTIFACT_URL: &str = "https://github.com/indygreg/python-build-standalone/releases/download/20250409/cpython-3.11.12+20250409-aarch64-apple-darwin-install_only.tar.gz";
@@ -733,7 +733,7 @@ fn ensure_profile_dependencies(
                 .arg(format!("torchvision=={}", TRAINER_TORCHVISION_VERSION))
                 .arg(format!("torchaudio=={}", TRAINER_TORCHAUDIO_VERSION))
                 .arg("--index-url")
-                .arg(TRAINER_CU126_INDEX_URL),
+                .arg(TRAINER_CU128_INDEX_URL),
             "Failed to install pinned torch dependencies for trainer-cu124",
         )?;
 
@@ -773,7 +773,7 @@ fn ensure_profile_dependencies(
 
         // On Linux, use CUDA-optimized wheels; on macOS, default PyPI includes MPS
         if !is_macos() {
-            cmd.arg("--index-url").arg(TRAINER_CU126_INDEX_URL);
+            cmd.arg("--index-url").arg(TRAINER_CU128_INDEX_URL);
         }
 
         cmd.arg(format!("torch=={}", GENERATOR_TORCH_VERSION))

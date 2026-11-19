@@ -92,6 +92,84 @@ class CachedPipeline:
     lora_weight: float = 0.0
 
 
+# ---------------------------------------------------------------------------
+# Host RAM guard
+# ---------------------------------------------------------------------------
+# The cache is capped by model count, but two big cached pipelines (parked
+# CPU copies, a pinned 27GB text encoder) plus a third one loading can exceed
+# host RAM and get the worker — or an innocent bystander — OOM-killed.
+
+_RAM_HEADROOM_BYTES = 6 * 1024**3
+
+
+def _available_ram_bytes() -> int | None:
+    """MemAvailable from /proc/meminfo, or None where it doesn't exist."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _path_bytes(path: str | None) -> int:
+    if not path:
+        return 0
+    p = Path(path)
+    try:
+        if p.is_file():
+            return p.stat().st_size
+        if p.is_dir():
+            return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+    except OSError:
+        pass
+    return 0
+
+
+def _estimate_load_ram_bytes(base_model_id: str, base_model_path: str | None) -> int:
+    """Host RAM a fresh load needs, estimated from the weights' on-disk size."""
+    # The denoiser is the model itself (not an assembly component), so it is
+    # looked up by id; text encoder / VAE come from the assembly.
+    paths: set[str] = set()
+    if base_model_path:
+        paths.add(base_model_path)
+    try:
+        from modl_worker.adapters.arch_config import _get_installed_path, resolve_gen_assembly
+
+        if not base_model_path:
+            installed = _get_installed_path(base_model_id)
+            if installed:
+                paths.add(installed)
+        for component in (resolve_gen_assembly(base_model_id) or {}).values():
+            if component.get("resolved_path"):
+                paths.add(component["resolved_path"])
+    except Exception:
+        pass
+    return sum(_path_bytes(p) for p in paths)
+
+
+def _trim_heap() -> None:
+    """Hand freed host memory back to the OS after an eviction.
+
+    Two caches hold on to it otherwise: torch's pinned-memory allocator (a
+    dropped MiniMax-H3 text encoder leaves 28GB there) and glibc's heap.
+    """
+    try:
+        import torch
+
+        torch._C._host_emptyCache()
+    except Exception:
+        pass
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
+
 class ModelCache:
     """LRU cache for loaded diffusers pipelines.
 
@@ -205,6 +283,7 @@ class ModelCache:
             # Cache miss — evict LRU if at capacity
             if len(self._cache) >= self._max_models:
                 self._evict_lru(emitter)
+            self._make_room_in_ram(base_model_id, base_model_path, emitter)
 
             # Load fresh pipeline
             emitter.info(f"Model cache MISS: loading {base_model_id}...")
@@ -327,6 +406,7 @@ class ModelCache:
                 self._utility_order.clear()
             gc.collect()
             torch.cuda.empty_cache()
+            _trim_heap()
 
     def _must_reload_for_lora(self, cached: CachedPipeline, spec: dict) -> bool:
         """True if the cached pipeline was irreversibly fused (krea2) and the
@@ -352,6 +432,7 @@ class ModelCache:
             pass
         gc.collect()
         torch.cuda.empty_cache()
+        _trim_heap()
 
     def _reconcile_lora(self, cached: CachedPipeline, spec: dict, emitter: EventEmitter) -> None:
         """Hot-swap LoRA if the base model matches but LoRA changed."""
@@ -406,6 +487,22 @@ class ModelCache:
         del self._cache[lru_key]
         gc.collect()
         torch.cuda.empty_cache()
+        _trim_heap()
+
+    def _make_room_in_ram(
+        self, base_model_id: str, base_model_path: str | None, emitter: EventEmitter
+    ) -> None:
+        """Evict cached models until the incoming one fits in host RAM."""
+        need = _estimate_load_ram_bytes(base_model_id, base_model_path) + _RAM_HEADROOM_BYTES
+        while self._cache:
+            available = _available_ram_bytes()
+            if available is None or available >= need:
+                return
+            emitter.info(
+                f"Host RAM is tight ({available / 1024**3:.0f}GB available, "
+                f"~{need / 1024**3:.0f}GB needed for {base_model_id})"
+            )
+            self._evict_lru(emitter)
 
     @staticmethod
     def _estimate_vram(pipeline: Any) -> int:

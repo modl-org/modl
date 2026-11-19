@@ -258,7 +258,14 @@ def _park_move(module, device: str) -> None:
     small and may be reassigned by the model (RoPE tables), so they move
     normally. Costs no extra RAM while the module is on the CPU; while it is
     on the GPU the CPU copy is kept (that's the point).
+
+    A module may supply its own ``_modl_park_move(device)`` (MiniMax-H3-Image's
+    20GB DiT is dropped and reloaded from disk rather than copied to RAM).
     """
+    custom = getattr(module, "_modl_park_move", None)
+    if custom is not None:
+        custom(device)
+        return
     with torch.no_grad():
         for param in module.parameters():
             if device == "cuda":
