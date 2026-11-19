@@ -27,7 +27,42 @@ def apply_shims() -> list[str]:
             applied.append("ltx2.encode_video")
     except Exception:  # noqa: BLE001 — a missing shim target is not our error to raise
         pass
+    try:
+        if _register_capture_specs_for_subclasses():
+            applied.append("transformers.capture_registry")
+    except Exception:  # noqa: BLE001
+        pass
     return applied
+
+
+def _register_capture_specs_for_subclasses() -> bool:
+    """Make transformers' output capture work for class-swapped models.
+
+    transformers looks up what a model can record (hidden states, attentions)
+    in a registry keyed by ``str(model.__class__)`` and filled in ``__init__``.
+    ai-toolkit rebinds loaded components onto its own subclasses
+    (``module.__class__ = wrapper``), whose ``__init__`` never ran, so the
+    lookup misses and ``output_hidden_states=True`` returns ``None`` — SDXL
+    training dies encoding its first prompt. Register every subclass when it
+    is defined instead.
+    """
+    from transformers.modeling_utils import PreTrainedModel
+    from transformers.utils import output_capturing
+
+    registry = getattr(output_capturing, "_CAN_RECORD_REGISTRY", None)
+    if registry is None or getattr(PreTrainedModel, "_modl_capture_patch", False):
+        return False
+    original = PreTrainedModel.__dict__["__init_subclass__"].__func__
+
+    def __init_subclass__(cls, **kwargs):
+        original(cls, **kwargs)
+        specs = getattr(cls, "_can_record_outputs", None)
+        if specs:
+            registry.setdefault(str(cls), specs)
+
+    PreTrainedModel.__init_subclass__ = classmethod(__init_subclass__)
+    PreTrainedModel._modl_capture_patch = True
+    return True
 
 
 def main() -> None:
