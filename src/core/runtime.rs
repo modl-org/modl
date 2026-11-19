@@ -43,6 +43,11 @@ pub(crate) const AITOOLKIT_REPO_URL: &str = "https://github.com/ostris/ai-toolki
 pub(crate) const AITOOLKIT_PIN_SHA: &str = "7a5fe1a8ca72276e1376ce6577f853b480c45576";
 const AITOOLKIT_CLONE_DIR: &str = "ai-toolkit";
 const DIFFUSERS_VERSION: &str = "0.43.0";
+/// ai-toolkit pins transformers 5.5.3 for its own diffusers commit, but the
+/// diffusers release we install on top imports `Gemma4UnifiedForConditionalGeneration`
+/// (transformers >= 5.10) from its LTX-2 pipeline. ai-toolkit imports that
+/// pipeline for every job, so with 5.5.3 no training run starts at all.
+const TRAINER_TRANSFORMERS_VERSION: &str = "5.10.4";
 const DEFAULT_PYTHON_ARTIFACT_URL: &str = "https://github.com/indygreg/python-build-standalone/releases/download/20250409/cpython-3.11.12+20250409-x86_64-unknown-linux-gnu-install_only.tar.gz";
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const MACOS_AARCH64_PYTHON_ARTIFACT_URL: &str = "https://github.com/indygreg/python-build-standalone/releases/download/20250409/cpython-3.11.12+20250409-aarch64-apple-darwin-install_only.tar.gz";
@@ -520,7 +525,7 @@ fn write_profile_requirements(root: &Path, profile: &str) -> Result<()> {
     let content = match profile {
         "trainer-cu124" => {
             format!(
-                "# Additional trainer-cu124 requirements (base torch + ai-toolkit are installed by bootstrap logic)\naccelerate>=0.33\nsafetensors>=0.5\ntransformers>=4.51\ndiffusers>={DIFFUSERS_VERSION}\npillow>=10.0\nspandrel>=0.4\ngguf>=0.10.0\n"
+                "# Additional trainer-cu124 requirements (base torch + ai-toolkit are installed by bootstrap logic)\naccelerate>=0.33\nsafetensors>=0.5\ntransformers=={TRAINER_TRANSFORMERS_VERSION}\ndiffusers>={DIFFUSERS_VERSION}\npillow>=10.0\nspandrel>=0.4\ngguf>=0.10.0\n"
             )
         }
         "inference-cu124" => {

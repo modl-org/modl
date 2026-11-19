@@ -159,12 +159,14 @@ def split_qwen21_gate_up(state_dict: dict) -> tuple[dict, int]:
         gate_key = key.replace(_QWEN21_GATE_UP, ".img_mlp.gate_layer.")
         up_key = key.replace(_QWEN21_GATE_UP, ".img_mlp.proj.")
         if re.search(r"\.(lora_B|lora_up)\.weight$", key):
+            # Copies, not views: safetensors refuses to save tensors that
+            # share storage, and a failed save means loading the raw file.
             gate, up = value.chunk(2, dim=0)
-            out[gate_key], out[up_key] = gate.contiguous(), up.contiguous()
+            out[gate_key], out[up_key] = gate.clone(), up.clone()
             split += 1
-        else:  # lora_A / lora_down / alpha: shared by both halves
+        else:  # lora_A / lora_down / alpha: same values for both halves
             out[gate_key] = value
-            out[up_key] = value
+            out[up_key] = value.clone() if hasattr(value, "clone") else value
     return out, split
 
 
@@ -192,7 +194,11 @@ def _maybe_convert_qwen21_lora(lora_path: str, emitter=None) -> str | None:
         return tmp_path
     except Exception as exc:
         if emitter:
-            emitter.info(f"  Qwen-Image 2.1 LoRA conversion skipped: {exc}")
+            emitter.warning(
+                "LORA_PARTIAL",
+                f"Qwen-Image 2.1 LoRA conversion failed ({exc}); loading it as-is, "
+                "which drops its img_mlp.gate_up modules",
+            )
         return None
 
 
