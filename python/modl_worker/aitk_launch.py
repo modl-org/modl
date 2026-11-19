@@ -8,6 +8,8 @@ Usage: python aitk_launch.py <path/to/run.py> <config.yaml> [...]
 """
 
 import importlib
+import importlib.abc
+import importlib.util
 import os
 import runpy
 import sys
@@ -32,7 +34,63 @@ def apply_shims() -> list[str]:
             applied.append("transformers.capture_registry")
     except Exception:  # noqa: BLE001
         pass
+    _set_module_constant_on_import(
+        "toolkit.dataloader_mixins", "TEXT_EMBED_CACHE_BATCH", _text_embed_batch()
+    )
+    applied.append("text_embed_cache_batch")
     return applied
+
+
+def _text_embed_batch() -> int:
+    """Prompts per text-encoder forward while caching text embeddings.
+
+    ai-toolkit 7a5fe1a went from one prompt per forward to 16. With Klein 4B
+    unquantized (transformer + Qwen3-4B resident, ~15 GB) a 16 x 512-token
+    batch through a causal LM adds ~6 GB of logits and hidden states and runs a
+    24 GB card out of memory before the first training step. One prompt per
+    forward is what modl's VRAM figures were measured with; captions are
+    encoded once, so the cost is seconds.
+    """
+    try:
+        return max(1, int(os.environ.get("MODL_AITK_TEXT_EMBED_BATCH", "1")))
+    except ValueError:
+        return 1
+
+
+class _ConstantOnImport(importlib.abc.MetaPathFinder):
+    """Set ``module.<name> = value`` right after ``module`` is first imported."""
+
+    def __init__(self, module: str, name: str, value) -> None:
+        self.module, self.name, self.value = module, name, value
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname != self.module:
+            return None
+        sys.meta_path.remove(self)
+        spec = importlib.util.find_spec(fullname)
+        if spec is None or spec.loader is None:
+            return None
+        exec_module = spec.loader.exec_module
+        finder = self
+
+        def exec_and_set(module):
+            exec_module(module)
+            if hasattr(module, finder.name):
+                setattr(module, finder.name, finder.value)
+
+        spec.loader.exec_module = exec_and_set
+        return spec
+
+
+def _set_module_constant_on_import(module: str, name: str, value) -> None:
+    sys.meta_path[:] = [
+        f
+        for f in sys.meta_path
+        if not (
+            isinstance(f, _ConstantOnImport) and (f.module, f.name) == (module, name)
+        )
+    ]
+    sys.meta_path.insert(0, _ConstantOnImport(module, name, value))
 
 
 def _register_capture_specs_for_subclasses() -> bool:

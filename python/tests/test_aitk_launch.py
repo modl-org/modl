@@ -38,19 +38,19 @@ def _fake_diffusers(monkeypatch, ltx2_has_encode_video):
 
 def test_adds_encode_video_where_ai_toolkit_looks_for_it(monkeypatch):
     ltx2_export = _fake_diffusers(monkeypatch, ltx2_has_encode_video=False)
-    assert aitk_launch.apply_shims() == ["ltx2.encode_video"]
+    assert "ltx2.encode_video" in aitk_launch.apply_shims()
     assert ltx2_export.encode_video() == "utils"
 
 
 def test_leaves_an_existing_encode_video_alone(monkeypatch):
     ltx2_export = _fake_diffusers(monkeypatch, ltx2_has_encode_video=True)
-    assert aitk_launch.apply_shims() == []
+    assert aitk_launch.apply_shims() == ["text_embed_cache_batch"]
     assert ltx2_export.encode_video() == "ltx2"
 
 
 def test_no_diffusers_is_not_an_error(monkeypatch):
     monkeypatch.setitem(sys.modules, "diffusers", None)
-    assert aitk_launch.apply_shims() == []
+    assert aitk_launch.apply_shims() == ["text_embed_cache_batch"]
 
 
 def _fake_transformers(monkeypatch):
@@ -115,3 +115,25 @@ def test_models_without_capture_specs_are_not_registered(monkeypatch):
         pass
 
     assert str(Plain) not in registry
+
+
+def test_text_embed_batch_is_one_prompt_per_forward(monkeypatch, tmp_path):
+    """ai-toolkit's 16-prompt caching batch runs Klein 4B out of VRAM on 24 GB."""
+    pkg = tmp_path / "toolkit"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "dataloader_mixins.py").write_text("TEXT_EMBED_CACHE_BATCH = 16\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    for name in ("toolkit", "toolkit.dataloader_mixins"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.setattr(sys, "meta_path", list(sys.meta_path))
+
+    monkeypatch.setenv("MODL_AITK_TEXT_EMBED_BATCH", "4")
+    aitk_launch.apply_shims()
+    monkeypatch.delenv("MODL_AITK_TEXT_EMBED_BATCH")
+    assert "text_embed_cache_batch" in aitk_launch.apply_shims()  # replaces, not stacks
+
+    import toolkit.dataloader_mixins as dm
+
+    assert dm.TEXT_EMBED_CACHE_BATCH == 1
+    assert not any(isinstance(f, aitk_launch._ConstantOnImport) for f in sys.meta_path)
