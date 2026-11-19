@@ -64,6 +64,14 @@ _TAIL_BUFFER_SIZE = 30
 # Command building
 # ---------------------------------------------------------------------------
 
+_AITK_LAUNCHER = Path(__file__).resolve().parents[1] / "aitk_launch.py"
+
+
+def _launch_command(run_py: str, config_path: Path) -> List[str]:
+    """run.py through aitk_launch.py, which shims imports for our diffusers pin."""
+    return [sys.executable, str(_AITK_LAUNCHER), run_py, str(config_path)]
+
+
 def _build_train_command(config_path: Path) -> List[str]:
     """Build the command to run ai-toolkit training.
 
@@ -84,7 +92,7 @@ def _build_train_command(config_path: Path) -> List[str]:
                 break
 
     if aitk_root:
-        return [sys.executable, os.path.join(aitk_root, "run.py"), str(config_path)]
+        return _launch_command(os.path.join(aitk_root, "run.py"), config_path)
 
     return [sys.executable, "-m", "toolkit.job", "--config", str(config_path)]
 
@@ -95,7 +103,7 @@ def _resolve_aitk_command(config_path: Path) -> List[str]:
     if aitk_root:
         run_py = os.path.join(aitk_root, "run.py")
         if os.path.exists(run_py):
-            return [sys.executable, run_py, str(config_path)]
+            return _launch_command(run_py, config_path)
     return _build_train_command(config_path)
 
 

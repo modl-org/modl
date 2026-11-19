@@ -33,6 +33,13 @@ Optional sub-dicts (only present when values differ from defaults):
         use_ema                     – whether to use EMA (default: True)
         caption_dropout             – forced caption dropout rate
         required_tokenizer_repo     – HF repo to pre-cache for training
+        model                       – ai-toolkit ``model`` block, used INSTEAD of
+                                      model_flags when the trainer's arch name or
+                                      flags differ from modl's inference ones
+        name_or_path                – HF repo ai-toolkit loads the weights from
+                                      (when the store layout is not what it reads)
+        network_kwargs              – extra ``network.network_kwargs``
+        sample_steps / sample_guidance – preview sampling overrides
 """
 
 import os
@@ -972,7 +979,7 @@ ARCH_CONFIGS: dict[str, dict] = {
     },
 }
 
-def _moss_image_arch(skip_layers: list[int]) -> dict:
+def _moss_image_arch(skip_layers: list[int], train_arch: str | None = None, train_repo: str | None = None) -> dict:
     """MOSS-Image (OpenMOSS, Apache-2.0): 5B single-stream DiT conditioned on
     the final hidden state of Qwen3.5-9B, decoded by the FLUX.2 small-decoder
     VAE. SFT and Base share everything except the transformer weights.
@@ -982,8 +989,11 @@ def _moss_image_arch(skip_layers: list[int]) -> dict:
     encoder 19GB, which together don't fit 24GB: ``park_text_encoder`` keeps
     the transformer + VAE resident and swaps only the text encoder in for the
     prompt encode (see device.place_with_parked_text_encoder).
+
+    ``train_arch``/``train_repo`` enable LoRA training through ai-toolkit's
+    ``moss_image`` arch, which loads the official repo layout itself.
     """
-    return {
+    arch = {
         "pipeline_class": "modl.MOSSImagePipeline",
         "gen_components": {
             "transformer": {
@@ -1026,11 +1036,40 @@ def _moss_image_arch(skip_layers: list[int]) -> dict:
             "extra_call_kwargs": {"uncond_skip_layers": skip_layers},
         },
     }
+    if train_arch:
+        arch["extra_train"] = {"timestep_type": "shift"}
+        arch["training"] = {
+            "max_learning_rate": 1e-4,
+            "cache_text_embeddings": True,
+            # ConvRot INT8 for the DiT and the Qwen3.5-9B encoder: ~10GB VRAM
+            # at 512–1024px on a 24GB card.
+            "model": {
+                "arch": train_arch,
+                "quantize": True,
+                "qtype": "convrot8",
+                "quantize_te": True,
+                "qtype_te": "convrot8",
+                "low_vram": True,
+                # Sampling during training uses upstream's skip (block 22).
+                "model_kwargs": {"uncond_skip_layers": [22]},
+            },
+            "name_or_path": train_repo,
+            # Block 22 is skipped in the uncond branch at inference; a LoRA
+            # trained into it only acts on the cond branch and skews CFG.
+            "network_kwargs": {"ignore_if_contains": ["layers.22."]},
+            # Sampling 5 prompts x 50 steps on the quantized DiT is slow.
+            "sample_steps": 30,
+        }
+    return arch
 
 
 
-ARCH_CONFIGS["moss_image"] = _moss_image_arch([22])
-ARCH_CONFIGS["moss_image_base"] = _moss_image_arch([22, 24])
+ARCH_CONFIGS["moss_image"] = _moss_image_arch(
+    [22], train_arch="moss_image", train_repo="OpenMOSS-Team/MOSS-Image-SFT"
+)
+ARCH_CONFIGS["moss_image_base"] = _moss_image_arch(
+    [22, 24], train_arch="moss_image:base", train_repo="OpenMOSS-Team/MOSS-Image-Base"
+)
 # lodestones' Base fine-tune; upstream card samples with block 22 skipped.
 ARCH_CONFIGS["kromoss"] = _moss_image_arch([22])
 
@@ -1115,6 +1154,29 @@ def _qwen_image_21_arch(turbo: bool) -> dict:
     }
     if turbo:
         arch["pipeline_kwargs"] = {"sample_sigmas": list(_QWEN_IMAGE_21_TURBO_SIGMAS)}
+    else:
+        # LoRA training goes through ai-toolkit's ``qwen_image_2`` arch, which
+        # reads the Comfy-Org single-file repackage (not the diffusers repo).
+        # Turbo is remapped to this arch for training (config_builder).
+        arch["extra_train"] = {"timestep_type": "shift"}
+        arch["training"] = {
+            "max_learning_rate": 1e-4,
+            "cache_text_embeddings": True,
+            "model": {
+                "arch": "qwen_image_2",
+                "quantize": True,
+                "qtype": "convrot8",
+                "quantize_te": True,
+                "qtype_te": "convrot8",
+                "low_vram": True,
+                "model_kwargs": {"rgba": False},
+            },
+            "name_or_path": "Comfy-Org/Qwen-Image-2.1",
+            # Inference defaults to CFG 1 / 40 steps; previews during training
+            # use the trainer's CFG 3 / 30 steps (what the pilots sampled at).
+            "sample_guidance": 3.0,
+            "sample_steps": 30,
+        }
     return arch
 
 

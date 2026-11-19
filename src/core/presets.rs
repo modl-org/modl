@@ -26,6 +26,8 @@ pub enum BaseModelFamily {
     Chroma,
     QwenImage,
     Krea2,
+    Moss,
+    QwenImage21,
     Sdxl,
     Sd15,
 }
@@ -38,6 +40,15 @@ impl BaseModelFamily {
             Ok(Self::ZImage)
         } else if lower.contains("chroma") {
             Ok(Self::Chroma)
+        } else if lower.contains("moss") {
+            Ok(Self::Moss)
+        } else if ["qwen-image-2-1", "qwen-image-2.1", "qwen_image_2"]
+            .iter()
+            .any(|t| lower.contains(t))
+        {
+            // Before the generic qwen-image arm: 2.1 is a different (7B) model
+            // with its own, much shorter step budget.
+            Ok(Self::QwenImage21)
         } else if lower.contains("qwen-image") || lower.contains("qwen_image") {
             Ok(Self::QwenImage)
         } else if lower.contains("krea") {
@@ -58,7 +69,8 @@ impl BaseModelFamily {
                  - flux-dev / flux-schnell / flux2-dev\n\
                  - z-image / z-image-turbo\n\
                  - chroma\n\
-                 - qwen-image\n\
+                 - qwen-image / qwen-image-2-1\n\
+                 - moss-image / moss-image-base\n\
                  - sdxl-base-1.0\n\
                  - sd-1.5\n\n\
                  If this is a custom model path, include a known family token in the base id \
@@ -75,7 +87,9 @@ impl BaseModelFamily {
             | Self::Sdxl
             | Self::ZImage
             | Self::Chroma
-            | Self::QwenImage => 1024,
+            | Self::QwenImage
+            | Self::Moss
+            | Self::QwenImage21 => 1024,
             // Krea 2 trains fine at 512 and generalizes to 1024 inference
             // (community consensus); keeps 24GB cards comfortable.
             Self::Krea2 => 512,
@@ -104,6 +118,12 @@ pub fn resolve_params(
     let is_schnell = matches!(family, BaseModelFamily::FluxSchnell);
     let is_flux2 = matches!(family, BaseModelFamily::Flux2);
     let is_krea2 = matches!(family, BaseModelFamily::Krea2);
+    // MOSS-Image and Qwen-Image 2.1 converge on the same short budget as
+    // Krea 2 (measured: maxi, 24-img dog, rank 32, lr 1e-4, 4090). MOSS Base
+    // had likeness from step 500 and started memorizing poses by 1500;
+    // Qwen 2.1 held likeness from 500 to 1500 without degrading.
+    let is_fast_dit =
+        is_krea2 || matches!(family, BaseModelFamily::Moss | BaseModelFamily::QwenImage21);
 
     // Z-Image only needs ~17GB without quantization (per Ostris).
     // On 24GB+ cards, skip quantization for much faster iteration (~1.3s vs ~4s).
@@ -229,15 +249,15 @@ pub fn resolve_params(
         // no likeness, only training-context memorization (identity samples
         // near-identical across 1000/1250/1500 at real inference). ~40 steps/img
         // is the sweet spot, matching the earlier Z-Image maxi finding.
-        (Preset::Quick, _) if is_krea2 => {
+        (Preset::Quick, _) if is_fast_dit => {
             let steps = compute_steps(img_count, 35, 700, 900);
             (steps, 16, 1e-4)
         }
-        (Preset::Standard, _) if is_krea2 => {
+        (Preset::Standard, _) if is_fast_dit => {
             let steps = compute_steps(img_count, 45, 900, 1250);
             (steps, 32, 1e-4)
         }
-        (Preset::Advanced, _) if is_krea2 => {
+        (Preset::Advanced, _) if is_fast_dit => {
             let steps = compute_steps(img_count, 60, 1100, 1500);
             (steps, 32, 1e-4)
         }
@@ -624,5 +644,53 @@ mod tests {
         assert!(msg.contains("Unknown base model family"));
         assert!(msg.contains("qwen-image"));
         assert!(msg.contains("sdxl-base-1.0"));
+    }
+
+    #[test]
+    fn moss_and_qwen21_get_their_own_families() {
+        for id in [
+            "moss-image",
+            "moss-image-base",
+            "OpenMOSS-Team/MOSS-Image-Base",
+        ] {
+            assert_eq!(
+                BaseModelFamily::from_model_id(id).unwrap(),
+                BaseModelFamily::Moss
+            );
+        }
+        for id in [
+            "qwen-image-2-1",
+            "qwen-image-2-1-turbo",
+            "Qwen/Qwen-Image-2.1",
+        ] {
+            assert_eq!(
+                BaseModelFamily::from_model_id(id).unwrap(),
+                BaseModelFamily::QwenImage21
+            );
+        }
+        // The older 20B Qwen Image keeps its own (much longer) budget.
+        assert_eq!(
+            BaseModelFamily::from_model_id("qwen-image").unwrap(),
+            BaseModelFamily::QwenImage
+        );
+    }
+
+    #[test]
+    fn moss_and_qwen21_use_the_short_step_budget() {
+        // 24 images is the dataset the budget was measured on: MOSS Base was
+        // best at 750–1250 steps and memorizing poses by 1500.
+        for id in ["moss-image-base", "moss-image", "qwen-image-2-1"] {
+            let p = resolve(
+                Preset::Standard,
+                LoraType::Character,
+                &dataset(24),
+                Some(&gpu(24_000)),
+                id,
+                "OHWX",
+            );
+            assert_eq!(p.rank, 32, "{id}");
+            assert!((900..=1250).contains(&p.steps), "{id}: {}", p.steps);
+            assert_eq!(p.resolution, 1024, "{id}");
+        }
     }
 }
