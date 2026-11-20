@@ -1,0 +1,71 @@
+# Three MiniMax-H3-Image edit recipes that share one character:
+#   1. placed  — put a character into a scene (two references)
+#   2. clothes — remove the person, keep the outfit
+#   3. sheet   — front / side / back reference sheet from one image
+#
+#   modl pull minimax-h3-image
+#   modl worker start          # keeps the model loaded between steps
+#   modl run examples/workflows/h3-edit-recipes.yaml
+#
+# What makes these work is naming what must survive the edit: every scene
+# element in `placed`, every garment in `clothes`. A one-line prompt drops
+# whatever it does not mention. Plain prose and the JSON prompt format that
+# circulates for this model gave the same results when tested
+# (one seed, an illustrated and a photographic character).
+#
+# To use your own images, add an `images:` map and replace the
+# `$character.outputs[0]` / `$scene.outputs[0]` refs with `$name`.
+# In a multi-image edit, the output framing follows the first image.
+name: h3-edit-recipes
+model: minimax-h3-image
+defaults:
+  width: 1024
+  height: 1536
+
+steps:
+  - id: character
+    generate: >-
+      Full-body illustration of a young woman with short copper-red hair and freckles, wearing an
+      orange cropped top and green shorts, white sneakers, standing in a neutral pose, plain light
+      grey studio background, clean line art with flat cel shading.
+    seeds: [7]
+
+  - id: scene
+    generate: >-
+      A small city park in the late afternoon, a wooden bench beside a stone water fountain,
+      plane trees, long shadows across the grass, photographed at eye level, natural light.
+    seeds: [7]
+
+  # 1. Say what to keep from each image, then describe the result, naming the
+  #    scene elements you want to see again (here: the bench and the fountain).
+  - id: placed
+    edit: ["$character.outputs[0]", "$scene.outputs[0]"]
+    seeds: [7]
+    prompt: >-
+      Put the woman from the first image into the park from the second image. Keep her likeness,
+      hair, clothing and the illustration style; adapt her pose and lighting. Use the park loosely:
+      keep the environment and time of day, the camera angle can change. She is mid-step in a
+      playful dance on the grass, one arm raised, smiling, lit by warm low sun from the left. The
+      wooden bench and the stone fountain sit behind her, slightly out of focus, with plane trees
+      in the background.
+
+  # 2. List every garment. Anything you leave out tends to disappear.
+  - id: clothes
+    edit: "$character.outputs[0]"
+    seeds: [7]
+    prompt: >-
+      Make the woman invisible and leave only her clothes. The orange cropped top, the green shorts
+      and the white sneakers float in place exactly where she was wearing them, keeping their shape
+      and folds as if worn by an invisible body. No skin, hair, face or limbs are visible. Same
+      plain light grey studio background, same illustration style with clean line art and flat cel
+      shading.
+
+  # 3. The one recipe where a short prompt is enough.
+  - id: sheet
+    edit: "$character.outputs[0]"
+    width: 1536
+    height: 1024
+    seeds: [7]
+    prompt: >-
+      Make a character reference sheet of this woman: front view, side view and back view, side by
+      side on a plain light grey background.
