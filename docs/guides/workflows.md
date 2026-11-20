@@ -647,6 +647,9 @@ open an issue before assuming something is coming.
 
 ## Reference
 
+- **Example workflows:** `examples/workflows/` — `h3-edit-recipes.yaml` chains
+  two generates and three MiniMax-H3-Image edits (character in a scene, clothes
+  extraction, three-view character sheet).
 - **Plan doc:** `docs/plans/workflow-run.md` (private)
 - **Smoke tests:** `docs/plans/smoke-test-workflow.md` (private)
 - **Source:**
